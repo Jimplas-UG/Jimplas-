@@ -1,0 +1,13 @@
+BILSHENZ — 12-month gold proxy backtest (Yahoo GC=F 1h → synthetic M30, journal + throttle)
+Data: GC=F — 6739 hourly bars → 13478 M30 bars (upsampled).
+Window (journal entries): 2025-05-01 → 2026-05-01 exclusive end
+M30 bars loaded: 13478  |  Main loop: 1.94s
+
+Starting equity: $50,000
+Ending equity (closed trades, compounding 0.50%): $51544.00
+Max drawdown (on equity curve): $968.93
+
+Trades opened in window: 12  (OPEN at end: 0)
+Closed in window: 12  |  Wins: 6  |  Losses: 6
+Win rate (closed): 50.00%
+P1 / P2 / P3 WR: 100.0% / 0.0% / 40.0%

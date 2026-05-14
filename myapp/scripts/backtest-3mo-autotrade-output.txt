@@ -1,0 +1,48 @@
+BILSHENZ — 3-month auto-trade backtest (synthetic XAUUSD M30, bot logic)
+Bars: 4383 M30 (~3 calendar months @ 48/day)
+Warmup skipped: 80  |  Main loop: 1.11s
+
+Mode: auto — on each signal bar, one journal entry (same as app TICK), max 3 trades/NY day.
+Sizing: each closed trade risks 0.5% of equity at that trade (compounding), then P&L applied.
+Journal SL: 50 pips from entry (5.00 price).
+
+Starting equity: $50,000
+Ending equity:   $52146.88
+Net change:      $2146.88
+Max drawdown (peak-to-trough on equity curve): $629.47
+
+Closed trades: 29  |  W: 24  L: 5
+Win rate: 82.76%
+P1 / P2 / P3 WR: 0.0% / 0.0% / 82.8%
+Still OPEN at end: 0
+
+--- Last 30 closed trades (chronological, oldest → newest in file order) ---
+WIN BUY P3 bar=214 entry=3282.70 TP1=3285.50  pnl=$140.00  equity~$50140.00
+WIN BUY P3 bar=218 entry=3283.97 TP1=3286.77  pnl=$140.39  equity~$50280.39
+WIN BUY P3 bar=222 entry=3283.67 TP1=3286.47  pnl=$140.79  equity~$50421.18
+WIN SELL P3 bar=268 entry=3280.57 TP1=3277.77  pnl=$141.18  equity~$50562.36
+WIN SELL P3 bar=270 entry=3280.49 TP1=3277.69  pnl=$141.47  equity~$50703.83
+LOSS BUY P3 bar=334 entry=3283.02 TP1=3285.82  pnl=$-253.52  equity~$50450.31
+WIN BUY P3 bar=426 entry=3283.27 TP1=3286.07  pnl=$141.26  equity~$50591.57
+WIN BUY P3 bar=427 entry=3283.96 TP1=3286.76  pnl=$141.66  equity~$50733.22
+WIN SELL P3 bar=543 entry=3286.84 TP1=3284.04  pnl=$142.05  equity~$50875.28
+WIN SELL P3 bar=548 entry=3286.85 TP1=3284.05  pnl=$142.45  equity~$51017.73
+WIN SELL P3 bar=552 entry=3285.37 TP1=3282.57  pnl=$142.85  equity~$51160.58
+WIN BUY P3 bar=711 entry=3283.67 TP1=3286.47  pnl=$143.25  equity~$51303.83
+WIN BUY P3 bar=713 entry=3283.65 TP1=3286.45  pnl=$143.65  equity~$51447.48
+WIN BUY P3 bar=714 entry=3284.27 TP1=3287.07  pnl=$144.05  equity~$51591.53
+WIN SELL P3 bar=838 entry=3282.89 TP1=3280.09  pnl=$144.46  equity~$51735.99
+LOSS SELL P3 bar=1324 entry=3283.30 TP1=3280.50  pnl=$-258.68  equity~$51477.31
+WIN BUY P3 bar=2022 entry=3299.11 TP1=3301.91  pnl=$144.14  equity~$51621.44
+LOSS BUY P3 bar=2053 entry=3302.51 TP1=3305.31  pnl=$-258.11  equity~$51363.34
+LOSS BUY P3 bar=2055 entry=3302.94 TP1=3305.74  pnl=$-256.82  equity~$51106.52
+WIN SELL P3 bar=2472 entry=3307.40 TP1=3304.60  pnl=$143.10  equity~$51249.62
+WIN SELL P3 bar=2473 entry=3307.22 TP1=3304.42  pnl=$143.50  equity~$51393.12
+WIN SELL P3 bar=2475 entry=3306.93 TP1=3304.13  pnl=$143.90  equity~$51537.02
+LOSS SELL P3 bar=2610 entry=3304.86 TP1=3302.13  pnl=$-257.69  equity~$51279.33
+WIN BUY P3 bar=3657 entry=3295.95 TP1=3298.75  pnl=$143.58  equity~$51422.92
+WIN BUY P3 bar=3660 entry=3296.45 TP1=3299.25  pnl=$143.98  equity~$51566.90
+WIN BUY P3 bar=3661 entry=3296.56 TP1=3299.36  pnl=$144.39  equity~$51711.29
+WIN BUY P3 bar=3920 entry=3293.15 TP1=3295.95  pnl=$144.79  equity~$51856.08
+WIN BUY P3 bar=3922 entry=3293.03 TP1=3295.83  pnl=$145.20  equity~$52001.28
+WIN BUY P3 bar=3930 entry=3294.27 TP1=3297.07  pnl=$145.60  equity~$52146.88

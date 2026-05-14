@@ -1,0 +1,100 @@
+BILSHENZ v3.2 (myapp) — AUDIT REPORT
+Generated: project audit (no original TradingView .pine file in repo)
+
+================================================================================
+1. PINE SCRIPT LOGIC
+================================================================================
+✅ TypeScript engine implements a BILSHENZ-LIKE ruleset: bias (EMA50 H4 + daily
+   structure), SR replay, gates (session, spread, news, NFP, chop, DXY, ATH,
+   geo, max trades), P1/P2/P3 signal flags, trade bot (entry/SL/TP1/RR),
+   journal resolution, ATR/risk tiers (see engine/*.ts comments referencing Pine).
+
+⚠ EXACT PARITY with “Bilshenz v3.2” Pine CANNOT be certified: no Pine source
+   is checked into this repository for line-by-line or bar-state verification.
+
+❌ TradingView `alert()` / Pine runtime: NOT APPLICABLE (React Native app).
+   Webhook + optional MT5 bridge replace “alerts” for execution.
+
+⚠ REPAINTING: Synthetic M30 bundle + live `patchBundleLast` updates the
+   terminal bar; signals recompute on that bar like realtime Pine — not the
+   same as historical “closed bar only” backtest unless you only step
+   backtest cursor on closed bars (current backtest is synthetic replay).
+
+⚠ BACKTESTING: In-app M30 cursor replay on synthetic history — NOT MT5
+   Strategy Tester or broker tick history.
+
+Files: myapp/engine/*.ts, myapp/hooks/useBilshenzMarketEngine.js
+
+================================================================================
+2. UI COMPLETENESS
+================================================================================
+✅ Large dashboard: Left / Center / Right columns, flow strip, sessions,
+   filters, signal card, history table, profile, mobile tabs, backtest bar
+   (desk), bot/broker profile section.
+
+✅ GeoPoliticalTicker: Reanimated frame loop, duplicate segment wrap, hold to
+   pause. NOW driven by live `tickerStrings` from engine risk strip (was
+   static copy only). Terminal-style monospace (Menlo / monospace) on tape.
+
+⚠ “Bloomberg” proprietary font: NOT bundled; UI uses system fonts + serif
+   in a few places (BilshenzHeader). Full terminal Bloomberg look would need
+   licensed font assets + global Text theme.
+
+✅ Responsive: `useWindowDimensions`, `isWide`, compact signal mode, padding.
+
+Files: myapp/App.js, myapp/components/GeoPoliticalTicker.js, BilshenzHeader.js
+
+================================================================================
+3. BOT ENGINE
+================================================================================
+✅ Strategy stack: computeBilshenzSnapshot pipeline (bundle → bias, SR, risk,
+   gates, signals, trade recommendation).
+
+✅ Live signal processing: TICK reducer + auto webhook when enabled.
+
+✅ Webhook: postBrokerOrderWebhook with 3 attempts, backoff, no retry on
+   clear 4xx (except 408/429).
+
+⚠ DATA FEED: Synthetic bundle + simulated price tick — NO live broker
+   OHLCV WebSocket/REST feed in this repo.
+
+⚠ MT5: Optional `mt5/bridge-server.mjs` + `PollBridgeEA.mq5` — user-operated;
+   not embedded in the app binary.
+
+Files: hooks/useBilshenzMarketEngine.js, broker/webhookBroker.ts, mt5/*
+
+================================================================================
+4. CODE QUALITY
+================================================================================
+✅ `npx tsc --noEmit` used during development; re-run after edits.
+
+⚠ No automated Jest/detox test suite in package.json.
+
+⚠ engine/uiAdapter.ts — exported from index but not referenced from App.js
+   (may be library surface for future use; not necessarily dead).
+
+✅ TODO/FIXME grep: no outstanding TODO/FIXME in TS/JS (only TextInput
+   placeholder props).
+
+Dependencies: see myapp/package.json — coherent Expo 52 set.
+
+================================================================================
+5. PRODUCTION READINESS SCORE
+================================================================================
+Score: 52 / 100  (educated sim + integration shell; NOT institutional prod)
+
+Rationale:
+ - Strong: modular engine, UI depth, persistence, webhook + retries, MT5
+   bridge template, auto-exec path.
+ - Weak: no Pine proof, no real market data, no automated tests, MT5 path
+   requires external ops, regulatory/disclaimer burden on user.
+
+Cannot honestly reach “100/100” without: Pine source diff, live data adapter,
+test suite, and operational hardening — outside a single auto-fix pass.
+
+================================================================================
+RECENT FIXES FROM THIS AUDIT PASS
+================================================================================
+- GeoPoliticalTicker: `items` prop + live strings + monospace tape font.
+- App: `buildGmAlertRows` shared helper; mobile + desktop tickers wired.
+- broker/webhookBroker.ts: retry loop for POST failures / network errors.
