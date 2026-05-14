@@ -19,6 +19,7 @@ import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import BilshenzHeader from './components/BilshenzHeader';
 import GeoPoliticalTicker from './components/GeoPoliticalTicker';
+import { Mt5BridgePanel } from './components/Mt5BridgePanel';
 import { buildBrokerOrderIntent, postBrokerOrderWebhook } from './broker/webhookBroker';
 import { defaultBilshenzConfig, mapJournalToHistRows, mapSessionBitsFromEngine, mapSrFromEngine } from './engine';
 import { useBilshenzMarketEngine } from './hooks/useBilshenzMarketEngine';
@@ -56,9 +57,6 @@ function profileRiskModeToGeo(mode) {
   if (mode === 'AGGRESSIVE') return 'MEDIUM';
   return 'LOW';
 }
-
-const RESISTANCES = [4760.0, 4821.0, 4881.0, 4937.0];
-const SUPPORTS = [4698.0, 4645.0, 4576.0, 4509.0, 4441.0];
 
 const SIGNAL_HISTORY_SIM = [
   ['14:32', '▲', 'WICK', '4612.50', '4597.00', 'Pending', 'OPEN', '⏳', 'buy', 'open'],
@@ -185,30 +183,6 @@ function journalClosedStats(rows, pipSize) {
   }
   const pfStr = grossLoss > 1e-9 ? (grossWin / grossLoss).toFixed(2) : grossWin > 0 ? '∞' : '—';
   return { winP, lossP, netP: winP - lossP, pfStr };
-}
-
-function getImmRes(p) {
-  return RESISTANCES.filter((v) => v > p).sort((a, b) => a - b)[0] ?? null;
-}
-function getImmSup(p) {
-  return SUPPORTS.filter((v) => v < p).sort((a, b) => b - a)[0] ?? null;
-}
-function getPoiRes(p, immRes) {
-  return RESISTANCES.filter((v) => v > p && v > (immRes ?? 0) + 5).sort((a, b) => a - b)[0] ?? null;
-}
-function getPoiSup(p, immSup) {
-  return SUPPORTS.filter((v) => v < p && v < (immSup ?? 9999) - 5).sort((a, b) => b - a)[0] ?? null;
-}
-
-function calcChop(priceVal, target) {
-  const range = Math.abs(target - priceVal);
-  const rangePips = range / 0.1;
-  if (rangePips < 15) return 8;
-  if (rangePips < 20) return 5;
-  if (rangePips < 25) return 4;
-  if (rangePips < 30) return 3;
-  if (rangePips < 40) return 2;
-  return Math.floor(Math.random() * 3);
 }
 
 function Row({ children, style }) {
@@ -374,7 +348,11 @@ function LeftColumn({ sr, dxy }) {
           <View style={{ paddingLeft: 11 }}>
             <Text style={styles.flipGreenLbl}>RESISTANCE → SUPPORT (R flipped)</Text>
             <Text style={styles.flipSupLvl}>
-              {esr?.r1Flipped ? 'M30 R1 → SUP active' : esr?.r1 != null ? 'Watching R1 ' + fmtNum(esr.r1) : '—'}
+              {esr?.r1Flipped
+                ? 'PREV RES → NOW SUPPORT · M30 R1'
+                : esr?.r1 != null
+                  ? 'Watching R1 ' + fmtNum(esr.r1)
+                  : '—'}
             </Text>
             <Text style={styles.imSmall}>Pine: close &gt; R + zone → teal zone (engine replay).</Text>
             <Row style={{ marginTop: 6, gap: 6 }}>
@@ -387,7 +365,11 @@ function LeftColumn({ sr, dxy }) {
           <View style={{ paddingLeft: 11 }}>
             <Text style={styles.flipDimLbl}>SUPPORT → RESISTANCE (S flipped)</Text>
             <Text style={[styles.flipResLvl, !esr?.s1Flipped && { opacity: 0.75 }]}>
-              {esr?.s1Flipped ? 'M30 S1 → RES active' : esr?.s1 != null ? 'Watching S1 ' + fmtNum(esr.s1) : '—'}
+              {esr?.s1Flipped
+                ? 'PREV SUP → NOW RESISTANCE · M30 S1'
+                : esr?.s1 != null
+                  ? 'Watching S1 ' + fmtNum(esr.s1)
+                  : '—'}
             </Text>
             <Text style={styles.imSmall}>Pine: close &lt; S − zone → orange zone.</Text>
             <Text style={[styles.miniTagWatch, { marginTop: 6 }]}>{esr?.s1Flipped ? 'FLIPPED' : 'WATCHING'}</Text>
@@ -503,9 +485,42 @@ function ScannerRows({ sr, bull }) {
   const rngColor =
     clean ? (bull ? C.green : C.red) : pips >= 25 ? C.amber : bull ? C.red : C.amber;
 
+  /** Pine-style zone strip: green = clean path, amber = chop/dirty but ≥25p, red-tint = blocked */
+  const zoneH = Math.min(112, Math.max(52, 40 + Math.round(pips * 0.85)));
+  const zoneBg = clean
+    ? bull
+      ? 'rgba(0,230,118,0.16)'
+      : 'rgba(255,61,87,0.14)'
+    : pips >= 25
+      ? 'rgba(255,179,0,0.14)'
+      : bull
+        ? 'rgba(255,61,87,0.09)'
+        : 'rgba(255,179,0,0.1)';
+  const zoneBorder = clean
+    ? bull
+      ? 'rgba(0,230,118,0.55)'
+      : 'rgba(255,61,87,0.5)'
+    : 'rgba(255,179,0,0.55)';
+
   return (
     <View style={styles.lsPanel}>
-      {row(bull ? 'Entry → IMMED RES' : 'Entry → IMMED SUP', rng, { color: rngColor })}
+      <View
+        style={[
+          styles.lsZoneBox,
+          {
+            minHeight: zoneH,
+            backgroundColor: zoneBg,
+            borderColor: zoneBorder,
+            borderStyle: clean ? 'solid' : 'dashed',
+          },
+        ]}>
+        <Text style={styles.lsZonePath}>{bull ? 'ENTRY → IMMED RES' : 'ENTRY → IMMED SUP'}</Text>
+        <Text style={[styles.lsZonePips, { color: rngColor }]}>{rng}</Text>
+        <Text style={styles.lsZoneChop}>
+          Chop {chop} / 3 max · {qualOk ? '≥25p range' : '<25p range'}
+        </Text>
+        <Text style={[styles.lsZoneStatus, { color: clean ? C.green : pips >= 25 ? C.amber : C.red }]}>{sideTxt}</Text>
+      </View>
       {row('≥ 25 pips?', qualTxt, qualOk ? styles.tfBull : styles.tfBear)}
       {row('Chop closes (Pine LS)', chopTxt, chopOk ? styles.tfBull : styles.tfBear)}
       {row('Left side status', sideTxt, clean ? styles.tfBull : pips >= 25 ? styles.tfNeu : styles.tfBear)}
@@ -1531,6 +1546,8 @@ function ProfileTab({
           </Text>
         ) : null}
       </View>
+
+      <Mt5BridgePanel />
 
       <Pressable onPress={resetDefaults} style={({ pressed }) => [styles.psResetBtn, pressed && { opacity: 0.88 }]}>
         <Text style={styles.psResetTxt}>RESET TO DEFAULTS</Text>
@@ -3310,6 +3327,26 @@ const styles = StyleSheet.create({
     borderRadius: DR.block,
     overflow: 'hidden',
   },
+  lsZoneBox: {
+    marginHorizontal: 8,
+    marginTop: 8,
+    marginBottom: 4,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: DR.block,
+    borderWidth: 2,
+    justifyContent: 'center',
+  },
+  lsZonePath: {
+    fontSize: 7,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    color: C.dim,
+    textTransform: 'uppercase',
+  },
+  lsZonePips: { fontSize: 22, fontWeight: '900', marginTop: 4 },
+  lsZoneChop: { fontSize: 9, fontWeight: '700', color: C.text, marginTop: 6, opacity: 0.92 },
+  lsZoneStatus: { fontSize: 10, fontWeight: '900', marginTop: 8, letterSpacing: 0.5 },
   lsRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
