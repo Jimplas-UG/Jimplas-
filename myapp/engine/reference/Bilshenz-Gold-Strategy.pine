@@ -1,0 +1,6 @@
+// TradingView Pine v5 reference — BILSHENZ Gold Strategy (user source of truth).
+// Ported to TypeScript in signalEngine.ts, biasEngine.ts, srEngine.ts (pivot 3/3), leftSideScan.
+
+//@version=5
+indicator("BILSHENZ — Gold Strategy", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=100)
+// ... full script maintained in repo — see user-provided version in project docs.

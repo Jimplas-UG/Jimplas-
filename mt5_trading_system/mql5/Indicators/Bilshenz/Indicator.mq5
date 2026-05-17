@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| Indicator.mq5 — Bilshenz signals (S/R replay + P1–P3, TS-aligned) |
+//| Indicator.mq5 — legacy alias; prefer MQL5-indicator-Bilshenzv3.mq5 |
 //| Requires: MQL5/Include/Bilshenz/BilshenzCore.mqh                 |
 //+------------------------------------------------------------------+
 #property copyright "Bilshenz / Jimplas"
@@ -178,7 +178,7 @@ int OnCalculate(const int rates_total,
 
       const bool hasStruct = (sr[k].immRes != EMPTY_VALUE || sr[k].immSup != EMPTY_VALUE);
       const bool structOk = hasStruct;
-      const bool inSess = (!InpUseSessionFilter) || BzInFxSession(TimeHour(time[si]));
+      const bool inSess = (!InpUseSessionFilter) || BzInPineSessionNY(time[si]);
       const bool sessionGate = InpShowHistory || inSess;
       const bool spreadBl = false;
       const bool newsAct = (!InpNewsSimOff) && false;
@@ -217,7 +217,7 @@ int OnCalculate(const int rates_total,
    bool brc = false;
    BzLeftSideScan(C, k0, sr[k0].immRes, sr[k0].immSup, C[k0], InpPipSize, InpLsBars, InpLsChopMax, InpMinRangePips, bc, brc);
    const bool hasS2 = (sr[k0].immRes != EMPTY_VALUE || sr[k0].immSup != EMPTY_VALUE);
-   const bool inS2 = (!InpUseSessionFilter) || BzInFxSession(TimeHour(time[si0]));
+   const bool inS2 = (!InpUseSessionFilter) || BzInPineSessionNY(time[si0]);
    const bool pine2 = (InpShowHistory || inS2) && (bc || brc);
    const bool athB2 = (C[k0] >= InpAthLow && C[k0] <= InpAthHigh);
    BzSignals sg2;

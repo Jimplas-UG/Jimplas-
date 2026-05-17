@@ -2,7 +2,7 @@ import type { TradeJournalRow } from './types';
 
 /** Maps engine journal row → `HistRow` tuple shape used in App.js */
 export function mapJournalRowToHist(row: TradeJournalRow): (string | number)[] {
-  const typ = row.type === 'P1' ? 'WICK' : row.type === 'P2' ? 'BREAK' : 'FLIP';
+  const typ = row.type === 'P1' ? 'P1' : row.type === 'P2' ? 'P2' : row.type === 'P3' ? 'P3' : 'P2';
   const dir = row.dir === 'BUY' ? '▲' : '▼';
   const side = row.dir === 'BUY' ? 'buy' : 'sell';
   const e1 = row.entry.toFixed(2);

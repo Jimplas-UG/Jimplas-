@@ -1,5 +1,9 @@
-import React, { useCallback, useContext, useEffect, useMemo, useRef, useState, createContext } from 'react';
+import React, { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, createContext } from 'react';
+import * as SplashScreen from 'expo-splash-screen';
+import CinematicSplash from './components/CinematicSplash';
 import {
+  Alert,
+  Image,
   Modal,
   Platform,
   Pressable,
@@ -12,6 +16,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import Svg, { Defs, LinearGradient, Polyline, Stop } from 'react-native-svg';
 import { BlurView } from 'expo-blur';
 import Slider from '@react-native-community/slider';
@@ -19,35 +24,37 @@ import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import BilshenzHeader from './components/BilshenzHeader';
 import GeoPoliticalTicker from './components/GeoPoliticalTicker';
-import { Mt5BridgePanel } from './components/Mt5BridgePanel';
-import { buildBrokerOrderIntent, postBrokerOrderWebhook } from './broker/webhookBroker';
+
+const Mt5BridgePanelLazy = lazy(() => import('./components/Mt5BridgePanel'));
+import { buildBrokerOrderIntent, canExecuteTrade, executeBrokerRoutes } from './broker';
+import { Mt5BridgeProvider, useMt5Bridge } from './contexts/Mt5BridgeContext';
+import { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';
 import { defaultBilshenzConfig, mapJournalToHistRows, mapSessionBitsFromEngine, mapSrFromEngine } from './engine';
 import { useBilshenzMarketEngine } from './hooks/useBilshenzMarketEngine';
+import { useMt5LiveFeed } from './hooks/useMt5LiveFeed';
+import {
+  clearProfilePhoto,
+  loadAllProfilePhotos,
+  saveProfilePhoto,
+} from './utils/profilePhoto';
+import {
+  clearProfileName,
+  initialsFromName,
+  loadAllProfileNames,
+  saveProfileName,
+} from './utils/profileName';
+import {
+  journalClosedUsd,
+  lotSizeSubtitle,
+  lotsForTrade,
+  pctOfBalanceLabel,
+  resolveAccountEquity,
+  SIM_DESK_EQUITY,
+  sizingForTrade,
+} from './utils/riskSizing';
 
 const STORAGE_BROKER_HOOK_URL = '@bilshenz_v1/brokerHookUrl';
 const STORAGE_AUTO_EXEC = '@bilshenz_v1/autoExecSignals';
-
-const C = {
-  gold: '#D4B45A',
-  goldL: '#F2E2B0',
-  goldD: '#7A5C18',
-  black: '#0A0806',
-  appBg: '#100E0A',
-  panel: '#15130C',
-  panel2: '#1C1A12',
-  border: '#322A18',
-  text: '#E9E0C8',
-  dim: '#7A6C45',
-  dim2: '#524628',
-  green: '#00E676',
-  greenD: 'rgba(0,230,118,0.1)',
-  red: '#FF3D57',
-  redD: 'rgba(255,61,87,0.1)',
-  amber: '#FFB300',
-  blue: '#40C4FF',
-  purple: '#CE93D8',
-  teal: '#26C6DA',
-};
 
 const BilshenzEngineCtx = createContext(null);
 
@@ -73,7 +80,7 @@ function getEST(now = new Date()) {
 }
 
 /** Risk / macro strip rows (shared by dashboard stack + geopolitical ticker tape). */
-function buildGmAlertRows(r, nfpBlackout, newsActive) {
+function buildGmAlertRows(r, nfpBlackout, newsActive, C) {
   if (!r) return [];
   const rows = [];
   rows.push({
@@ -86,7 +93,8 @@ function buildGmAlertRows(r, nfpBlackout, newsActive) {
   });
   if (r.atrPips != null) {
     const c = r.atrPips >= 100 ? C.red : r.atrPips >= 50 ? C.amber : C.teal;
-    rows.push({ color: c, text: `ATR: ${r.atrMode.split('—')[0].trim()} (${r.atrPips.toFixed(0)}p)` });
+    const atrLbl = typeof r.atrMode === 'string' ? r.atrMode.split('—')[0].trim() : 'ATR';
+    rows.push({ color: c, text: `ATR: ${atrLbl} (${r.atrPips.toFixed(0)}p)` });
   }
   rows.push({
     color: r.chopZone ? C.amber : C.green,
@@ -148,15 +156,43 @@ function effectiveRiskPctFromEngine(geoRisk, atrPips, cfg) {
   return pct;
 }
 
+/** Active Jimplas setup labels for UI (matches jimplasFluiditySignalEngine). */
+function jimplasSetupLive(signals) {
+  if (!signals) return { p1: 'SCAN', p2: 'SCAN', p3: 'SCAN' };
+  return {
+    p1: signals.p1Buy || signals.p1Sell ? 'LIVE' : 'SCAN',
+    p2: signals.p2Buy || signals.p2Sell ? 'LIVE' : 'SCAN',
+    p3: signals.p3Buy || signals.p3Sell ? 'LIVE' : 'SCAN',
+  };
+}
+
+function jimplasStrategyModeLine(cfg) {
+  if (!cfg) return 'Jimplas Fluidity';
+  const tp =
+    cfg.useLegacyTpClampOnly && cfg.tp1MinRewardPips != null
+      ? `TP ${cfg.tp1MinRewardPips}–${cfg.tp1MaxRewardPips}p`
+      : 'Structure TP';
+  const p2 = cfg.p2UseStrictFilters ? 'P2 strict' : 'P2 loose';
+  const sz = cfg.journalSizingSlPips > 0 ? `${cfg.journalSizingSlPips}p risk lots` : 'SL-sized lots';
+  return `Jimplas Fluidity · ${tp} · ${p2} · ${sz}`;
+}
+
+function activeSetupGrabLbl(signals) {
+  if (signals?.p1Buy || signals?.p1Sell) return 'P1 BREAKOUT ✓';
+  if (signals?.p2Buy || signals?.p2Sell) return 'P2 WICK FILL ✓';
+  if (signals?.p3Buy || signals?.p3Sell) return 'P3 SESSION ✓';
+  return 'JIMPLAS SCAN';
+}
+
 function wickStoryLines(wick, pipSize) {
   const pip = pipSize > 0 ? pipSize : 0.1;
   const rngP = (wick.candleRange / pip).toFixed(0);
   const bodyPct = (wick.bodyRatio * 100).toFixed(0);
   const lwP = (wick.lowerWick / pip).toFixed(0);
   const uwP = (wick.upperWick / pip).toFixed(0);
-  let main = 'M30 wick scan — awaiting Raja flip / rejection stack';
-  if (wick.rajaFlipBuy) main = 'WICK CREATED ✓ — Raja flip BUY (prev bear → bull + lower wick)';
-  else if (wick.rajaFlipSell) main = 'WICK CREATED ✓ — Raja flip SELL (prev bull → bear + upper wick)';
+  let main = 'M30 wick scan — awaiting Jimplas flip / rejection stack';
+  if (wick.jimplasFlipBuy) main = 'WICK CREATED ✓ — Jimplas flip BUY (prev bear → bull + lower wick)';
+  else if (wick.jimplasFlipSell) main = 'WICK CREATED ✓ — Jimplas flip SELL (prev bull → bear + upper wick)';
   else if (wick.isValidRejection) main = 'WICK REJECTION ✓ — Dominant wick (Pine wick path)';
   const sub = `M30 · range ${rngP}p · body ${bodyPct}% · lower ${lwP}p · upper ${uwP}p`;
   return { main, sub };
@@ -186,14 +222,17 @@ function journalClosedStats(rows, pipSize) {
 }
 
 function Row({ children, style }) {
+  const { colors: C, styles } = useBilshenzTheme();
   return <View style={[styles.row, style]}>{children}</View>;
 }
 
 function BlinkDot({ color }) {
+  const { colors: C, styles } = useBilshenzTheme();
   return <View style={[styles.ldot, { backgroundColor: color, shadowColor: color }]} />;
 }
 
 function SessionBlock({ narrow, active, forceDead, sn, st, badge, badgeKind }) {
+  const { colors: C, styles } = useBilshenzTheme();
   const w = narrow ? '50%' : '25%';
   const blk = [styles.sblk, { width: w }];
   if (active) blk.push(styles.sblkActive);
@@ -216,13 +255,17 @@ function SessionBlock({ narrow, active, forceDead, sn, st, badge, badgeKind }) {
 }
 
 function LeftColumn({ sr, dxy }) {
+  const { colors: C, styles } = useBilshenzTheme();
   const eng = useContext(BilshenzEngineCtx);
   const snap = eng?.snapshot;
+  const useRealMt5 = !!eng?.useRealMt5;
+  const dxyLive = snap?.dxyClose ?? (useRealMt5 ? null : dxy);
   const cfg = eng?.cfg;
   const bias = snap?.bias;
   const risk = snap?.risk;
   const esr = snap?.sr;
-  const p1Live = snap?.signals?.p1Buy || snap?.signals?.p1Sell;
+  const jLive = jimplasSetupLive(snap?.signals);
+  const cfgJ = eng?.cfg;
   const athLo = cfg?.athZoneLow ?? 5278;
   const athHi = cfg?.athZoneHigh ?? 5602;
 
@@ -273,9 +316,11 @@ function LeftColumn({ sr, dxy }) {
         ? '⚠ MEDIUM GEO — monitor headlines\nSize capped per protocol'
         : 'GEO filter clear — full protocol sizing';
 
+  const liveBadge = useRealMt5 ? 'MT5 LIVE' : 'SIM';
+
   return (
     <View style={styles.leftCol}>
-      <Panel shell={{}} head={{ title: 'M30 Bias (Pine v3.2)', badge: 'EMA50 · piv 5/5' }}>
+      <Panel shell={{}} head={{ title: 'HTF Bias · Jimplas', badge: useRealMt5 ? 'MT5 · H4/D1' : 'H4 EMA50' }}>
         <View style={styles.biasHero}>
           <Text style={styles.biasTag}>OVERALL BIAS</Text>
           <Text style={[styles.biasWord, biasWordStyle]}>{biasWord}</Text>
@@ -287,7 +332,27 @@ function LeftColumn({ sr, dxy }) {
         <TfRow l="M30 S&R" r={snap?.gates?.structureOk ? '▲ ALIGNED' : '⏳ WAIT'} rStyle={snap?.gates?.structureOk ? styles.tfBull : styles.tfNeu} />
       </Panel>
 
-      <Panel shell={styles.gmPanelShell} headTint={styles.gmHeaderTint} head={{ title: 'Geopolitical Filter', badge: 'NEW · v3', titleColor: C.red, badgeColor: C.gold }}>
+      <Panel
+        shell={styles.gmPanelShell}
+        headTint={styles.gmHeaderTint}
+        head={{ title: 'Jimplas Setups', badge: 'P1 · P2 · P3', titleColor: C.goldL, badgeColor: C.gold }}
+      >
+        <DxyRow l="P1 Breakout + retest" v={jLive.p1} vc={jLive.p1 === 'LIVE' ? C.green : C.dim} />
+        <DxyRow l="P2 Wick fill" v={jLive.p2} vc={jLive.p2 === 'LIVE' ? C.teal : C.dim} />
+        <DxyRow l="P3 Session impulse" v={jLive.p3} vc={jLive.p3 === 'LIVE' ? C.amber : C.dim} />
+        <Text style={styles.geoSub}>{jimplasStrategyModeLine(cfgJ)}</Text>
+      </Panel>
+
+      <Panel
+        shell={styles.gmPanelShell}
+        headTint={styles.gmHeaderTint}
+        head={{
+          title: 'Geopolitical Filter',
+          badge: useRealMt5 ? 'MT5 · v3' : 'NEW · v3',
+          titleColor: C.red,
+          badgeColor: C.gold,
+        }}
+      >
         <View style={styles.geoDial}>
           <Text style={styles.geoRiskLbl}>RISK LEVEL</Text>
           <Text style={styles.geoLevel}>{geoLbl}</Text>
@@ -305,7 +370,11 @@ function LeftColumn({ sr, dxy }) {
         </View>
       </Panel>
 
-      <Panel shell={styles.srPanelShell} headTint={styles.srHeadTint} head={{ title: 'S&R Engine', badge: 'M30 ZONES · v3.2', titleColor: C.red, badgeColor: C.gold }}>
+      <Panel
+        shell={styles.srPanelShell}
+        headTint={styles.srHeadTint}
+        head={{ title: 'S&R Engine', badge: `${liveBadge} · M30`, titleColor: C.red, badgeColor: C.gold }}
+      >
         <Text style={styles.sectionLbl}>① IMMEDIATE S&R ZONES</Text>
         <View style={styles.twoCol}>
           <View style={styles.immedResBox}>
@@ -341,7 +410,11 @@ function LeftColumn({ sr, dxy }) {
         </View>
       </Panel>
 
-      <Panel shell={styles.flipShell} headTint={styles.flipHeadTint} head={{ title: 'Flip Engine', badge: 'S→R / R→S · v3.2', titleColor: C.amber, badgeColor: C.gold }}>
+      <Panel
+        shell={styles.flipShell}
+        headTint={styles.flipHeadTint}
+        head={{ title: 'Flip Engine', badge: `${liveBadge} · S/R`, titleColor: C.amber, badgeColor: C.gold }}
+      >
         <Text style={styles.sectionLbl}>③ LEVEL FLIP STATUS (M30 pivots)</Text>
         <View style={styles.flipSupOuter}>
           <View style={styles.flipAccentGreen} />
@@ -399,7 +472,7 @@ function LeftColumn({ sr, dxy }) {
       </Panel>
 
       <Panel shell={styles.gmPanelShell} headTint={styles.gmHeaderTint} head={{ title: 'DXY Confirmation', badge: 'NEW · v3', titleColor: C.teal, badgeColor: C.gold }}>
-        <DxyRow l="DXY Level" v={dxy.toFixed(2)} vc={C.text} />
+        <DxyRow l="DXY Level" v={dxyLive != null ? dxyLive.toFixed(2) : '—'} vc={C.text} />
         <DxyRow
           l="Direction (3-bar)"
           v={risk?.dxyRising ? '▲ RISING' : '▼ FALLING / FLAT'}
@@ -419,8 +492,8 @@ function LeftColumn({ sr, dxy }) {
             Last 3 H4 ranges &lt; 40p — {risk?.chopZone ? 'compression advisory' : 'normal volatility'}
           </Text>
         </View>
-        <DxyRow l="Breakout / Flip" v={risk?.chopZone ? 'ADVISORY' : 'ACTIVE'} vc={risk?.chopZone ? C.amber : C.green} />
-        <DxyRow l="Wick (P1)" v={p1Live ? 'LIVE' : 'SCAN'} vc={p1Live ? C.green : C.dim} />
+        <DxyRow l="P2 wick path" v={risk?.chopZone ? 'ADVISORY' : 'ACTIVE'} vc={risk?.chopZone ? C.amber : C.green} />
+        <DxyRow l="P1 breakout" v={jLive.p1} vc={jLive.p1 === 'LIVE' ? C.green : C.dim} />
       </Panel>
 
       <Panel shell={styles.gmPanelShell} headTint={styles.gmHeaderTint} head={{ title: 'ATH Wick Awareness', badge: 'NEW · v3', titleColor: C.red, badgeColor: C.gold }}>
@@ -437,6 +510,7 @@ function LeftColumn({ sr, dxy }) {
 }
 
 function Panel({ shell, headTint, head: { title, badge, titleColor, badgeColor }, children }) {
+  const { colors: C, styles } = useBilshenzTheme();
   return (
     <View style={[styles.pnl, shell]}>
       <Row style={[styles.ph, headTint]}>
@@ -449,6 +523,7 @@ function Panel({ shell, headTint, head: { title, badge, titleColor, badgeColor }
 }
 
 function TfRow({ l, r, rStyle }) {
+  const { colors: C, styles } = useBilshenzTheme();
   return (
     <Row style={styles.tfRow}>
       <Text style={styles.tfl}>{l}</Text>
@@ -458,6 +533,7 @@ function TfRow({ l, r, rStyle }) {
 }
 
 function DxyRow({ l, v, vc }) {
+  const { colors: C, styles } = useBilshenzTheme();
   return (
     <Row style={styles.dxyRow}>
       <Text style={styles.dxyL}>{l}</Text>
@@ -467,6 +543,7 @@ function DxyRow({ l, v, vc }) {
 }
 
 function ScannerRows({ sr, bull }) {
+  const { colors: C, styles } = useBilshenzTheme();
   const pips = bull ? sr.bullPips : sr.bearPips;
   const chop = bull ? sr.bullChop : sr.bearChop;
   const clean = bull ? sr.bullClean : sr.bearClean;
@@ -529,6 +606,7 @@ function ScannerRows({ sr, bull }) {
 }
 
 function VerdictBar({ ok, bull }) {
+  const { colors: C, styles } = useBilshenzTheme();
   const txt = ok ? (bull ? '✅ BULL PATH — TRADEABLE' : '✅ BEAR PATH — TRADEABLE') : bull ? '❌ BULL PATH — NO TRADE' : '❌ BEAR PATH — NO TRADE';
   return (
     <View
@@ -542,6 +620,7 @@ function VerdictBar({ ok, bull }) {
 }
 
 function ScannerTabPanels({ sr }) {
+  const { colors: C, styles } = useBilshenzTheme();
   return (
     <View style={styles.leftCol}>
       <Panel shell={styles.srPanelShell} headTint={styles.srHeadTint} head={{ title: 'S&R Engine', badge: 'M30 ZONES · v3.2', titleColor: C.red, badgeColor: C.gold }}>
@@ -619,9 +698,13 @@ function CenterColumn({
   atrModePill,
   engineTrade,
   histRows,
+  accountEquity,
+  mt5LiveAccount,
+  mt5Account,
   variant = 'dashboard',
   compactSignal = false,
 }) {
+  const { colors: C, styles } = useBilshenzTheme();
   const engCtx = useContext(BilshenzEngineCtx);
   const snap = engCtx?.snapshot;
   const cfg = engCtx?.cfg;
@@ -633,6 +716,7 @@ function CenterColumn({
   const tradeCountDisp = engineReady ? tradeCount : '—';
   const trade = engineTrade;
   const wickM = snap?.wick;
+  const jLive = jimplasSetupLive(snap?.signals);
   const lv = snap?.structureLevels;
   const srE = snap?.sr;
   const geoRg = cfg?.geoRisk ?? 'LOW';
@@ -653,25 +737,58 @@ function CenterColumn({
   const beOff = cfg?.beOffset ?? 1.2;
   const bePips = Math.max(1, Math.round(beOff / pip));
   const bePx = trade?.side === 'SELL' ? entPx - beOff : trade?.side === 'BUY' ? entPx + beOff : entPx + beOff;
-  const riskUsd = Math.round(50000 * (effRiskPct / 100));
-  const rrDisp = trade?.rr != null && Number.isFinite(trade.rr) ? `1 : ${trade.rr.toFixed(1)}` : '—';
+  const simUsd = cfg?.simUsdPerEnginePip ?? defaultBilshenzConfig.simUsdPerEnginePip;
+  const tradeSizing = sizingForTrade(
+    { side: trade?.side, entry: entPx, sl: slPx, tp1: tp1Px },
+    cfg,
+    accountEquity,
+    effRiskPct
+  );
+  const slPipsE = tradeSizing.structuralSlPips;
+  const sizingSlPips = tradeSizing.sizingSlPips;
+  const riskUsd = Math.round(tradeSizing.riskUsd);
+  const lotStr = tradeSizing.lots > 0 ? tradeSizing.lots.toFixed(2) : '—';
+  const rrDisp =
+    sizingSlPips > 0 && tp1Px != null && Number.isFinite(tp1Px)
+      ? `1 : ${(Math.abs(tp1Px - entPx) / pip / sizingSlPips).toFixed(1)}`
+      : trade?.rr != null && Number.isFinite(trade.rr)
+        ? `1 : ${trade.rr.toFixed(1)}`
+        : '—';
   const rewardUsd =
-    trade?.rr != null && Number.isFinite(trade.rr) ? Math.round(riskUsd * trade.rr) : Math.round(riskUsd * 1.8);
+    tradeSizing.rewardUsd > 0
+      ? Math.round(tradeSizing.rewardUsd)
+      : trade?.rr != null && Number.isFinite(trade.rr)
+        ? Math.round(riskUsd * trade.rr)
+        : Math.round(riskUsd * 1.8);
   const fmtPx = (x) => (x != null && Number.isFinite(x) ? fmtNum(x) : '—');
   const athLo = cfg?.athZoneLow ?? 5278;
   const athHi = cfg?.athZoneHigh ?? 5602;
   const maxSpr = cfg?.maxSpreadPips ?? 3.5;
   const minRp = cfg?.minRangePips ?? 25;
-  const simUsd = cfg?.simUsdPerEnginePip ?? defaultBilshenzConfig.simUsdPerEnginePip;
-  const currentRiskLbl = `${effRiskPct.toFixed(2)}% · ${er?.atrMode?.split('—')[0]?.trim() ?? 'ATR'}`;
-  const sizeModeLbl = er?.geoHigh ? `GEO cap ${effRiskPct.toFixed(2)}%` : `${effRiskPct.toFixed(2)}% stack`;
+  const equityLbl = mt5LiveAccount
+    ? `$${Math.round(accountEquity).toLocaleString('en-US')} MT5`
+    : `$${Math.round(SIM_DESK_EQUITY / 1000)}k sim`;
+  const riskAtPct = Math.round(accountEquity * (effRiskPct / 100));
+  const normPct = cfg?.riskPctAtrNormal ?? 1;
+  const elevPct = cfg?.riskPctAtrElevated ?? 0.7;
+  const crisisPct = cfg?.riskPctAtrCrisis ?? 0.5;
+  const currentRiskLbl = `${effRiskPct.toFixed(2)}% · ${fmtUsd(riskAtPct)} at risk`;
+  const sizeModeLbl = er?.geoHigh ? `GEO cap ${effRiskPct.toFixed(2)}%` : `${effRiskPct.toFixed(2)}% of balance`;
   const tp2Sub = er?.yieldHigh ? 'TP2 −30% (yield rule)' : 'Next ladder zone';
-  const slSub = trade?.side === 'SELL' ? 'Above entry + buffer' : trade?.side === 'BUY' ? 'Below entry − buffer' : 'M30 buffer';
-  const slDistPx = slPx != null && entPx != null ? Math.abs(entPx - slPx) : 0;
-  const slPipsE = slDistPx > 0 ? slDistPx / pip : 0;
-  const lotStr =
-    slPipsE > 0 && riskUsd > 0 ? (riskUsd / (slPipsE * simUsd)).toFixed(2) : '—';
-  const grabLbl = snap?.signals?.p1Buy || snap?.signals?.p1Sell ? 'WICK GRAB ✓' : 'WICK SCAN';
+  const tp1Sub =
+    cfg?.useLegacyTpClampOnly && cfg?.tp1MinRewardPips != null
+      ? `Clamp ${cfg.tp1MinRewardPips}–${cfg.tp1MaxRewardPips} pips`
+      : 'Structure target';
+  const slSub =
+    trade?.side && (cfg?.journalSizingSlPips ?? 0) > 0 && slPipsE > sizingSlPips + 0.05
+      ? `Chart SL · lots on ${sizingSlPips}p risk`
+      : trade?.side === 'SELL'
+        ? 'Above entry + buffer'
+        : trade?.side === 'BUY'
+          ? 'Below entry − buffer'
+          : 'Structure + buffer';
+  const grabLbl = activeSetupGrabLbl(snap?.signals);
+  const stratModeLbl = jimplasStrategyModeLine(cfg);
   const fSpreadCol = spHigh ? C.red : C.green;
   const rangeCol = sr.bullClean ? C.green : C.amber;
   const modeCls =
@@ -695,8 +812,13 @@ function CenterColumn({
                   ⬡ ENGINE GATES · CONFIDENCE {engineTrade?.confidencePct?.toFixed(1) ?? '—'}%
                 </Text>
                 <Text style={styles.sigStratCompact} numberOfLines={3}>
-                  {engineTrade?.reason ?? 'Awaiting Pine-qualified setup…'}
+                  {engineTrade?.reason ?? 'Awaiting Jimplas Fluidity setup (P1/P2/P3)…'}
                 </Text>
+                {engineTrade?.m15EarlyExit ? (
+                  <Text style={styles.sigStratCompact} numberOfLines={2}>
+                    ⚠ {engineTrade.m15EarlyExit.message} · exit ≈ {engineTrade.m15EarlyExit.exitPrice.toFixed(2)}
+                  </Text>
+                ) : null}
               </View>
             </Row>
             <Text style={styles.sigSessCompact}>📍 {sessionBits.sessLabel}</Text>
@@ -732,8 +854,13 @@ function CenterColumn({
                   ⬡ ENGINE GATES · CONFIDENCE {engineTrade?.confidencePct?.toFixed(1) ?? '—'}%
                 </Text>
                 <Text style={styles.sigStrat} numberOfLines={3}>
-                  {engineTrade?.reason ?? 'Awaiting Pine-qualified setup…'}
+                  {engineTrade?.reason ?? 'Awaiting Jimplas Fluidity setup (P1/P2/P3)…'}
                 </Text>
+                {engineTrade?.m15EarlyExit ? (
+                  <Text style={styles.sigStrat} numberOfLines={2}>
+                    ⚠ {engineTrade.m15EarlyExit.message} · exit ≈ {engineTrade.m15EarlyExit.exitPrice.toFixed(2)}
+                  </Text>
+                ) : null}
               </View>
             </Row>
             <View style={styles.sigR}>
@@ -817,6 +944,24 @@ function CenterColumn({
         </View>
       </Row>
 
+      <Panel
+        shell={styles.gmPanelShell}
+        headTint={styles.gmHeaderTint}
+        head={{ title: 'Strategy Mode', badge: 'JIMPLAS', titleColor: C.goldL, badgeColor: C.gold }}
+      >
+        <Text style={styles.wiMain}>{stratModeLbl}</Text>
+        <Text style={[styles.wiSub, { marginTop: 6 }]}>
+          {trade?.setup
+            ? `Active: ${trade.setup} · ${trade.side ?? '—'}`
+            : 'Priority: P1 → P2 → P3 · max ' + (cfg?.maxDailyTrades ?? 3) + ' trades/NY day'}
+        </Text>
+        <Row style={{ marginTop: 8, gap: 8, flexWrap: 'wrap' }}>
+          <Text style={[styles.miniTagG, jLive.p1 === 'LIVE' && { opacity: 1 }]}>P1 {jLive.p1}</Text>
+          <Text style={[styles.miniTagG, jLive.p2 === 'LIVE' && { opacity: 1 }]}>P2 {jLive.p2}</Text>
+          <Text style={[styles.miniTagWatch, jLive.p3 === 'LIVE' && { color: C.amber }]}>P3 {jLive.p3}</Text>
+        </Row>
+      </Panel>
+
       <Panel shell={styles.gmPanelShell} headTint={styles.gmHeaderTint} head={{ title: 'ATR Volatility Sizing', badge: 'NEW · v3', titleColor: C.amber, badgeColor: C.gold }}>
         <Row style={styles.atrRow}>
           <Text style={styles.atrLabel}>ATR-14 (M30)</Text>
@@ -826,24 +971,41 @@ function CenterColumn({
           <View style={[styles.atrBarFill, { width: `${atrFillPct}%` }]} />
         </View>
         <Text style={[styles.modePill, modeCls]}>{atrModePill.text}</Text>
-        <DxyRow l="ATR <50p" v={`Standard ${(cfg?.riskPctAtrNormal ?? 1).toFixed(2)}%`} vc={C.green} />
-        <DxyRow l="ATR 50–100p" v={`Reduced ${(cfg?.riskPctAtrElevated ?? 0.7).toFixed(2)}%`} vc={C.amber} />
-        <DxyRow l="ATR >100p" v={`Crisis ${(cfg?.riskPctAtrCrisis ?? 0.5).toFixed(2)}%`} vc={C.red} />
+        <DxyRow l="ATR <50p" v={pctOfBalanceLabel(normPct, accountEquity, mt5LiveAccount)} vc={C.green} />
+        <DxyRow l="ATR 50–100p" v={pctOfBalanceLabel(elevPct, accountEquity, mt5LiveAccount)} vc={C.amber} />
+        <DxyRow l="ATR >100p" v={pctOfBalanceLabel(crisisPct, accountEquity, mt5LiveAccount)} vc={C.red} />
         <DxyRow l="Current Risk" v={currentRiskLbl} vc={C.amber} />
+        {mt5LiveAccount && mt5Account ? (
+          <DxyRow
+            l="MT5 Equity"
+            v={`$${Math.round(mt5Account.equity ?? accountEquity).toLocaleString('en-US')}`}
+            vc={C.text}
+          />
+        ) : null}
       </Panel>
 
-      <Panel shell={{}} head={{ title: 'Entry & Exit Engine', badge: 'ZONE-TO-ZONE TARGETS' }}>
+      <Panel shell={{}} head={{ title: 'Entry & Exit Engine', badge: 'JIMPLAS FLUIDITY' }}>
         <View style={styles.eeGrid}>
-          <EeCell lab="Entry Price" val={fmtPx(entPx)} sub={`${effRiskPct.toFixed(2)}% nominal`} valStyle={styles.eeEntry} />
+          <EeCell lab="Entry Price" val={fmtPx(entPx)} sub={`${effRiskPct.toFixed(2)}% risk tier`} valStyle={styles.eeEntry} />
           <EeCell lab={`BE @ +${bePips}p`} val={fmtPx(bePx)} sub="Move SL to entry" valStyle={styles.eeBe} />
-          <EeCell lab="TP1 — Zone" val={fmtPx(tp1Px)} sub="Next key zone" valStyle={styles.eeTp1} />
+          <EeCell lab="TP1 — Target" val={fmtPx(tp1Px)} sub={tp1Sub} valStyle={styles.eeTp1} />
           <EeCell lab="TP2 — Zone" val={fmtPx(tp2Px)} sub={tp2Sub} valStyle={styles.eeTp2} />
         </View>
         <View style={styles.eeGrid}>
           <EeCell lab="Stop Loss" val={fmtPx(slPx)} sub={slSub} valStyle={styles.eeSl} />
-          <EeCell lab="Risk $" val={`$${riskUsd.toLocaleString('en-US')}`} sub={`${effRiskPct.toFixed(2)}% of $50k`} valStyle={styles.eePlain} />
-          <EeCell lab="R:R Ratio" val={rrDisp} sub="Engine zones" valStyle={styles.eeGold} />
-          <EeCell lab="Lot Size" val={lotStr} sub={`risk ÷ SLpips ÷ $${simUsd}/pip`} valStyle={styles.eePlain} />
+          <EeCell
+            lab="Risk $"
+            val={`$${riskUsd.toLocaleString('en-US')}`}
+            sub={`${effRiskPct.toFixed(2)}% of ${equityLbl}`}
+            valStyle={styles.eePlain}
+          />
+          <EeCell lab="R:R Ratio" val={rrDisp} sub="On journal risk pips" valStyle={styles.eeGold} />
+          <EeCell
+            lab="Lot Size"
+            val={lotStr}
+            sub={lotSizeSubtitle(riskUsd, slPipsE, sizingSlPips, simUsd, cfg)}
+            valStyle={styles.eePlain}
+          />
         </View>
         <Row style={styles.rrStrip}>
           <RrCell lab="REWARD $" val={`$${rewardUsd.toLocaleString('en-US')}`} color={C.green} />
@@ -894,7 +1056,7 @@ function CenterColumn({
         </View>
       </Panel>
 
-      <Panel shell={{}} head={{ title: 'Signal History', badge: 'BILSHENZ v3 · TODAY' }}>
+      <Panel shell={{}} head={{ title: 'Signal History', badge: 'JIMPLAS · TODAY' }}>
         <View style={styles.histTableWrap}>
           <HistHeader />
           {(histRows ?? SIGNAL_HISTORY_SIM).map((row, i) => (
@@ -907,6 +1069,7 @@ function CenterColumn({
 }
 
 function FilterCell({ lab, val, sub, box, valColor }) {
+  const { colors: C, styles } = useBilshenzTheme();
   const bx =
     box === 'ok' ? styles.filtOk : box === 'warn' ? styles.filtWarn : styles.filtAmb;
   return (
@@ -919,6 +1082,7 @@ function FilterCell({ lab, val, sub, box, valColor }) {
 }
 
 function EeCell({ lab, val, sub, valStyle }) {
+  const { colors: C, styles } = useBilshenzTheme();
   return (
     <View style={styles.eeCell}>
       <Text style={styles.eeL}>{lab}</Text>
@@ -929,6 +1093,7 @@ function EeCell({ lab, val, sub, valStyle }) {
 }
 
 function RrCell({ lab, val, color }) {
+  const { colors: C, styles } = useBilshenzTheme();
   return (
     <View style={styles.rri}>
       <Text style={styles.rrl}>{lab}</Text>
@@ -938,6 +1103,7 @@ function RrCell({ lab, val, color }) {
 }
 
 function HistHeader() {
+  const { colors: C, styles } = useBilshenzTheme();
   return (
     <Row style={styles.histHead}>
       <Text style={[styles.histTh, styles.histColUtc]}>UTC</Text>
@@ -955,6 +1121,7 @@ function HistHeader() {
 }
 
 function HistRow({ row }) {
+  const { colors: C, styles } = useBilshenzTheme();
   const [utc, dir, typ, e1, e2, e3, e4, res, side, kind] = row;
   if (typ === 'BREAK') {
     return (
@@ -962,7 +1129,7 @@ function HistRow({ row }) {
         <Text style={[styles.histTd, styles.histColUtc]}>{utc}</Text>
         <Text style={[styles.histTd, side === 'buy' ? styles.tBuy : styles.tSell, styles.histColDir]}>{dir}</Text>
         <View style={styles.histColType}>
-          <Text style={[styles.eb, styles.ebW]}>BREAK</Text>
+          <Text style={[styles.eb, styles.ebB]}>P1</Text>
         </View>
         <Text
           style={[styles.histTd, styles.histColEntry, styles.histBreakMsg]}
@@ -977,8 +1144,15 @@ function HistRow({ row }) {
       </View>
     );
   }
+  const typLbl = typ === 'WICK' ? 'P2' : typ === 'FLIP' ? 'P3' : typ;
   const eb =
-    typ === 'WICK' ? styles.ebW : typ === 'BREAK' ? styles.ebB : styles.ebF;
+    typLbl === 'P2'
+      ? styles.ebW
+      : typLbl === 'P1'
+        ? styles.ebB
+        : typLbl === 'P3'
+          ? styles.ebF
+          : styles.ebF;
   const plStyle =
     kind === 'win' ? styles.tWin : kind === 'loss' ? styles.tLoss : kind === 'open' ? styles.tOpen : styles.histTd;
   return (
@@ -986,7 +1160,7 @@ function HistRow({ row }) {
       <Text style={[styles.histTd, styles.histColUtc]}>{utc}</Text>
       <Text style={[styles.histTd, side === 'buy' ? styles.tBuy : styles.tSell, styles.histColDir]}>{dir}</Text>
       <View style={styles.histColType}>
-        <Text style={[styles.eb, eb]}>{typ}</Text>
+        <Text style={[styles.eb, eb]}>{typLbl}</Text>
       </View>
       <Text style={[styles.histTd, styles.histColEntry]} numberOfLines={2} ellipsizeMode="tail">
         {e1}
@@ -1010,7 +1184,19 @@ function HistRow({ row }) {
   );
 }
 
-function RightColumn({ tradeCount, pnl, sessTag, spread, spreadOkColor, spHigh, dayBits }) {
+function RightColumn({
+  tradeCount,
+  pnl,
+  sessTag,
+  spread,
+  spreadOkColor,
+  spHigh,
+  dayBits,
+  accountEquity,
+  mt5LiveAccount,
+  mt5Account,
+}) {
+  const { colors: C, styles } = useBilshenzTheme();
   const pr = Math.round(pnl);
   const pnlColor = pr >= 0 ? C.green : C.red;
   const eng = useContext(BilshenzEngineCtx);
@@ -1035,6 +1221,10 @@ function RightColumn({ tradeCount, pnl, sessTag, spread, spreadOkColor, spHigh, 
   const effRiskStr = `${effPct.toFixed(2)}% (${atrShort})`;
   const dynEntStr = r?.geoHigh ? 'SUSPENDED · GEO=HIGH' : r?.chopZone ? 'ACTIVE · H4 CHOP ADVISORY' : 'ACTIVE';
   const maxNorm = cfg?.riskPctAtrNormal ?? 1;
+  const elevPct = cfg?.riskPctAtrElevated ?? 0.7;
+  const crisisPct = cfg?.riskPctAtrCrisis ?? 0.5;
+  const riskUsdNow = Math.round(accountEquity * (effPct / 100));
+  const riskUsdMax = Math.round(accountEquity * (maxNorm / 100));
   const rmPctWidth = `${Math.min(100, maxNorm > 0 ? (effPct / maxNorm) * 100 : 0)}%`;
   const yFillW =
     yClose != null ? `${Math.min(100, Math.max(0, ((yClose - 3) / 2) * 100))}%` : '74%';
@@ -1043,9 +1233,16 @@ function RightColumn({ tradeCount, pnl, sessTag, spread, spreadOkColor, spHigh, 
   const simUsd = cfg?.simUsdPerEnginePip ?? defaultBilshenzConfig.simUsdPerEnginePip;
   const journalRows = eng?.journalRows ?? [];
   const jStat = journalClosedStats(journalRows, pipRm);
-  const closedSimUsd = Math.round(jStat.netP * simUsd);
-  const closedTodayVal = fmtUsd(closedSimUsd);
-  const closedTodayCol = closedSimUsd >= 0 ? C.green : C.red;
+  const closedUsd = mt5LiveAccount
+    ? Math.round(journalClosedUsd(journalRows, cfg, accountEquity, effPct))
+    : Math.round(jStat.netP * simUsd);
+  const closedTodayVal = fmtUsd(closedUsd);
+  const closedTodayCol = closedUsd >= 0 ? C.green : C.red;
+  const openTrade = snap?.trade;
+  const openSizing = sizingForTrade(openTrade, cfg, accountEquity, effPct);
+  const openLotsStr = openSizing.lots > 0 ? openSizing.lots.toFixed(2) : '—';
+  const openSlPips = openSizing.structuralSlPips;
+  const openSizingSlPips = openSizing.sizingSlPips;
   const pfVal = jStat.pfStr;
   const pfNum = parseFloat(jStat.pfStr);
   const pfCol =
@@ -1063,11 +1260,15 @@ function RightColumn({ tradeCount, pnl, sessTag, spread, spreadOkColor, spHigh, 
 
   return (
     <View style={styles.rightCol}>
-      <Panel shell={{}} head={{ title: 'Live P&L', badge: sessTag }}>
+      <Panel shell={{}} head={{ title: 'Live P&L', badge: mt5LiveAccount ? 'MT5' : sessTag }}>
         <View style={styles.pnlHero}>
-          <Text style={styles.pnlTag}>UNREALIZED P&L (USD)</Text>
+          <Text style={styles.pnlTag}>{mt5LiveAccount ? 'FLOATING P&L (MT5)' : 'UNREALIZED P&L (USD)'}</Text>
           <Text style={[styles.pnlNum, { color: pnlColor }]}>{fmtUsd(pr)}</Text>
-          <Text style={styles.pnlPips}>{`${pr >= 0 ? '+' : ''}${(Math.abs(pr) / 10).toFixed(1)} pips · 1 active`}</Text>
+          <Text style={styles.pnlPips}>
+            {mt5LiveAccount
+              ? `Account profit · risk ${effPct.toFixed(2)}% = ${fmtUsd(riskUsdNow)}`
+              : `${pr >= 0 ? '+' : ''}${(Math.abs(pr) / 10).toFixed(1)} pips · sim`}
+          </Text>
         </View>
         <View style={styles.pnlMini}>
           <PmCell lab="Closed Today" val={closedTodayVal} c={closedTodayCol} />
@@ -1079,7 +1280,11 @@ function RightColumn({ tradeCount, pnl, sessTag, spread, spreadOkColor, spHigh, 
       </Panel>
 
       {g && r ? (
-        <Panel shell={styles.gmPanelShell} headTint={styles.gmHeaderTint} head={{ title: 'Engine gates', badge: 'LIVE', titleColor: C.teal, badgeColor: C.gold }}>
+        <Panel
+          shell={styles.gmPanelShell}
+          headTint={styles.gmHeaderTint}
+          head={{ title: 'Engine gates', badge: mt5LiveAccount ? 'MT5 LIVE' : 'LIVE', titleColor: C.teal, badgeColor: C.gold }}
+        >
           <DxyRow l="Session gate" v={g.sessionGate ? 'OPEN' : 'CLOSED'} vc={g.sessionGate ? C.green : C.amber} />
           <DxyRow l="M30 structure" v={g.structureOk ? 'OK' : 'WAIT'} vc={g.structureOk ? C.green : C.amber} />
           <DxyRow l="Live gate (B/S)" v={`${g.liveGateBuy ? 'B' : '·'}/${g.liveGateSell ? 'S' : '·'}`} vc={g.liveGateBuy || g.liveGateSell ? C.green : C.dim} />
@@ -1099,18 +1304,77 @@ function RightColumn({ tradeCount, pnl, sessTag, spread, spreadOkColor, spHigh, 
         </Panel>
       ) : null}
 
-      <Panel shell={{}} head={{ title: 'Risk Engine', badge: 'GODMODE PROTOCOL' }}>
+      <Panel
+        shell={{}}
+        head={{
+          title: 'Risk Engine',
+          badge: mt5LiveAccount ? (mt5Account ? 'MT5 BALANCE' : 'MT5…') : 'SIM $50K',
+        }}
+      >
         <Row style={styles.rmHdr}>
-          <Text style={styles.rmL}>PORTFOLIO RISK USED</Text>
-          <Text style={styles.rmV}>{`${effPct.toFixed(2)}% / ${maxNorm.toFixed(1)}% MAX`}</Text>
+          <Text style={styles.rmL}>RISK AT STAKE</Text>
+          <Text style={styles.rmV}>{`${fmtUsd(riskUsdNow)} / ${fmtUsd(riskUsdMax)} cap`}</Text>
         </Row>
         <View style={styles.rmBar}>
           <View style={[styles.rmFill, { width: rmPctWidth }]} />
         </View>
-        <DxyRow l="Balance" v="$50,000" vc={C.text} />
+        <DxyRow
+          l="Balance"
+          v={
+            mt5LiveAccount
+              ? mt5Account?.balance != null
+                ? `$${Math.round(mt5Account.balance).toLocaleString('en-US')}`
+                : 'Loading…'
+              : `$${SIM_DESK_EQUITY.toLocaleString('en-US')} (sim)`
+          }
+          vc={C.text}
+        />
+        {mt5LiveAccount ? (
+          <DxyRow
+            l="Equity"
+            v={
+              mt5Account?.equity != null
+                ? `$${Math.round(mt5Account.equity).toLocaleString('en-US')}`
+                : 'Loading…'
+            }
+            vc={C.text}
+          />
+        ) : null}
+        {mt5LiveAccount && mt5Account?.margin_free != null ? (
+          <DxyRow
+            l="Free margin"
+            v={`$${Math.round(mt5Account.margin_free).toLocaleString('en-US')}`}
+            vc={C.dim}
+          />
+        ) : null}
+        <DxyRow l="Risk % (now)" v={`${effPct.toFixed(2)}% = ${fmtUsd(riskUsdNow)}`} vc={C.amber} />
+        <DxyRow l="Normal tier" v={`${maxNorm.toFixed(2)}% = ${fmtUsd(Math.round(accountEquity * (maxNorm / 100)))}`} vc={C.green} />
+        <DxyRow l="Elevated tier" v={`${elevPct.toFixed(2)}% = ${fmtUsd(Math.round(accountEquity * (elevPct / 100)))}`} vc={C.amber} />
+        <DxyRow l="Crisis tier" v={`${crisisPct.toFixed(2)}% = ${fmtUsd(Math.round(accountEquity * (crisisPct / 100)))}`} vc={C.red} />
         <DxyRow l="Active Risk Mode" v={activeRiskStr} vc={geoVc} />
         <DxyRow l="ATR Mode" v={atrShort} vc={C.amber} />
-        <DxyRow l="Effective Risk" v={effRiskStr} vc={geoVc} />
+        <DxyRow l="Effective Risk" v={`${effRiskStr} · ${fmtUsd(riskUsdNow)}`} vc={geoVc} />
+        <DxyRow
+          l="Next trade lots"
+          v={openTrade?.side ? openLotsStr : '—'}
+          vc={openTrade?.side ? C.goldL : C.dim}
+        />
+        <DxyRow
+          l="Risk sizing"
+          v={
+            openTrade?.side
+              ? (cfg?.journalSizingSlPips ?? 0) > 0
+                ? `${openSizingSlPips}p risk · ${openSlPips.toFixed(1)}p chart SL`
+                : `${openSlPips.toFixed(1)}p SL`
+              : '—'
+          }
+          vc={openTrade?.side ? C.amber : C.dim}
+        />
+        <DxyRow
+          l="Max loss @ risk"
+          v={openTrade?.side ? fmtUsd(riskUsdNow) : '—'}
+          vc={openTrade?.side ? C.red : C.dim}
+        />
         <DxyRow l="BE Trigger" v={`+${bePipsRm} pips`} vc={C.green} />
         <DxyRow l="Trades Today" v={`${tradeCountDisp} of ${tradeCap} (executes)`} vc={C.amber} />
         <DxyRow l="Dynamic Entries" v={dynEntStr} vc={r?.geoHigh || r?.chopZone ? C.amber : C.green} />
@@ -1181,6 +1445,7 @@ function RightColumn({ tradeCount, pnl, sessTag, spread, spreadOkColor, spHigh, 
 }
 
 function PmCell({ lab, val, c }) {
+  const { colors: C, styles } = useBilshenzTheme();
   return (
     <View style={styles.pmC}>
       <Text style={styles.pmL}>{lab}</Text>
@@ -1190,6 +1455,7 @@ function PmCell({ lab, val, c }) {
 }
 
 function NewsRow({ t, n, impact, extra, ok, past }) {
+  const { colors: C, styles } = useBilshenzTheme();
   return (
     <Row style={styles.ni}>
       <Text style={styles.niTime}>{t}</Text>
@@ -1229,30 +1495,129 @@ function ProfileTab({
   lastBrokerMsg,
   autoExecuteSignals,
   onAutoExecuteSignalsChange,
+  mt5Connected,
 }) {
+  const { colors: C, styles } = useBilshenzTheme();
   const [profileId, setProfileId] = useState('p1');
   const [showSwitchModal, setShowSwitchModal] = useState(false);
   const [nameEdit, setNameEdit] = useState(false);
   const [defaultLot, setDefaultLot] = useState('0.25');
   const [atrManual, setAtrManual] = useState(false);
   const [notificationsOn, setNotificationsOn] = useState(true);
+  const [photoByProfile, setPhotoByProfile] = useState({});
+  const [nameByProfile, setNameByProfile] = useState({});
+  const nameSaveTimer = useRef(null);
 
   const active = PROFILE_PRESETS.find((p) => p.id === profileId) ?? PROFILE_PRESETS[0];
-  const [displayName, setDisplayName] = useState(active.name);
+  const profilePhotoUri = photoByProfile[profileId] ?? null;
+  const savedName = nameByProfile[profileId];
+  const [displayName, setDisplayName] = useState(savedName || active.name);
+  const avatarInitials = initialsFromName(displayName || active.name);
 
   useEffect(() => {
-    const p = PROFILE_PRESETS.find((x) => x.id === profileId);
-    if (p) setDisplayName(p.name);
+    const p = PROFILE_PRESETS.find((x) => x.id === profileId) ?? PROFILE_PRESETS[0];
+    setDisplayName(nameByProfile[profileId]?.trim() || p.name);
     setNameEdit(false);
+  }, [profileId, nameByProfile]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const ids = PROFILE_PRESETS.map((p) => p.id);
+      const [photos, names] = await Promise.all([loadAllProfilePhotos(ids), loadAllProfileNames(ids)]);
+      if (!cancelled) {
+        setPhotoByProfile(photos);
+        setNameByProfile(names);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (nameSaveTimer.current) clearTimeout(nameSaveTimer.current);
+    },
+    []
+  );
+
+  const persistDisplayName = useCallback(
+    async (name) => {
+      const trimmed = name.trim() || active.name;
+      await saveProfileName(profileId, trimmed);
+      setNameByProfile((prev) => ({ ...prev, [profileId]: trimmed }));
+      setDisplayName(trimmed);
+    },
+    [profileId, active.name]
+  );
+
+  const scheduleNameSave = useCallback(
+    (name) => {
+      if (nameSaveTimer.current) clearTimeout(nameSaveTimer.current);
+      nameSaveTimer.current = setTimeout(() => {
+        void persistDisplayName(name);
+      }, 400);
+    },
+    [persistDisplayName]
+  );
+
+  const pickProfilePhoto = useCallback(async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Photos', 'Allow photo library access to set a profile picture.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.85,
+      });
+      if (result.canceled || !result.assets?.[0]?.uri) return;
+      const uri = result.assets[0].uri;
+      await saveProfilePhoto(profileId, uri);
+      setPhotoByProfile((prev) => ({ ...prev, [profileId]: uri }));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      Alert.alert('Profile photo', msg || 'Could not open photo library.');
+    }
+  }, [profileId]);
+
+  const removeProfilePhoto = useCallback(() => {
+    Alert.alert('Remove photo', 'Use initials again for this profile?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          await clearProfilePhoto(profileId);
+          setPhotoByProfile((prev) => {
+            const next = { ...prev };
+            delete next[profileId];
+            return next;
+          });
+        },
+      },
+    ]);
   }, [profileId]);
 
   const tierColor = active.tier === 'PRO' ? C.goldL : C.blue;
   const engPr = useContext(BilshenzEngineCtx);
+  const useRealMt5Pr = !!engPr?.useRealMt5;
   const jStatPr = journalClosedStats(engPr?.journalRows ?? [], engPr?.cfg?.pipSize ?? 0.1);
-  const simUsdPr = engPr?.cfg?.simUsdPerEnginePip ?? defaultBilshenzConfig.simUsdPerEnginePip;
-  const simTotalPl = Math.round(jStatPr.netP * simUsdPr);
-  const totalPlStr = fmtUsd(simTotalPl);
-  const totalPlCol = simTotalPl >= 0 ? C.green : C.red;
+  const effPctPr = effectiveRiskPctFromEngine(
+    engPr?.cfg?.geoRisk ?? 'LOW',
+    engPr?.snapshot?.risk?.atrPips ?? null,
+    engPr?.cfg
+  );
+  const eqPr = engPr?.accountEquity ?? SIM_DESK_EQUITY;
+  const totalPlUsd = useRealMt5Pr
+    ? Math.round(journalClosedUsd(engPr?.journalRows ?? [], engPr?.cfg, eqPr, effPctPr))
+    : Math.round(jStatPr.netP * (engPr?.cfg?.simUsdPerEnginePip ?? defaultBilshenzConfig.simUsdPerEnginePip));
+  const totalPlStr = fmtUsd(totalPlUsd);
+  const totalPlCol = totalPlUsd >= 0 ? C.green : C.red;
   const sparkW = Math.max(220, width - pad * 2 - 56);
   const sparkPts = '0,38 35,32 70,28 105,20 140,24 175,14 200,18';
 
@@ -1264,12 +1629,22 @@ function ProfileTab({
     onRunModeChange?.('live');
     onBrokerHookEnabledChange?.(false);
     onBrokerWebhookUrlChange?.('');
-    onAutoExecuteSignalsChange?.(false);
+    onAutoExecuteSignalsChange(false);
     setDefaultLot('0.25');
     setAtrManual(false);
     setNotificationsOn(true);
-    setDisplayName(PROFILE_PRESETS[0].name);
     setNameEdit(false);
+    void (async () => {
+      await Promise.all(
+        PROFILE_PRESETS.map(async (p) => {
+          await clearProfilePhoto(p.id);
+          await clearProfileName(p.id);
+        })
+      );
+      setPhotoByProfile({});
+      setNameByProfile({});
+      setDisplayName(PROFILE_PRESETS[0].name);
+    })();
   };
 
   return (
@@ -1284,14 +1659,36 @@ function ProfileTab({
         ) : null}
         <View style={styles.psProfileTint} />
         <View style={styles.psProfileGlow} />
-        <View style={styles.psAvatarRing}>
-          <Text style={styles.psAvatarTxt}>{active.initials}</Text>
-        </View>
+        <Pressable
+          onPress={pickProfilePhoto}
+          onLongPress={profilePhotoUri ? removeProfilePhoto : undefined}
+          accessibilityRole="button"
+          accessibilityLabel="Profile photo. Tap to choose from library. Long press to remove."
+          style={({ pressed }) => [styles.psAvatarRing, pressed && { opacity: 0.88 }]}>
+          {profilePhotoUri ? (
+            <Image source={{ uri: profilePhotoUri }} style={styles.psAvatarImage} resizeMode="cover" />
+          ) : (
+            <Text style={styles.psAvatarTxt}>{avatarInitials}</Text>
+          )}
+        </Pressable>
+        <Text style={styles.psAvatarHint}>
+          {profilePhotoUri ? 'Tap to change · hold to remove' : 'Tap to add photo'}
+        </Text>
         {nameEdit ? (
           <TextInput
             value={displayName}
-            onChangeText={setDisplayName}
-            onBlur={() => setNameEdit(false)}
+            onChangeText={(t) => {
+              setDisplayName(t);
+              scheduleNameSave(t);
+            }}
+            onBlur={() => {
+              if (nameSaveTimer.current) {
+                clearTimeout(nameSaveTimer.current);
+                nameSaveTimer.current = null;
+              }
+              void persistDisplayName(displayName);
+              setNameEdit(false);
+            }}
             style={styles.psNameInput}
             placeholder="Trader name"
             placeholderTextColor={C.dim2}
@@ -1300,7 +1697,7 @@ function ProfileTab({
         ) : (
           <Pressable onPress={() => setNameEdit(true)} style={({ pressed }) => [pressed && { opacity: 0.85 }]}>
             <Text style={styles.psName}>{displayName}</Text>
-            <Text style={styles.psNameHint}>Tap to edit</Text>
+            <Text style={styles.psNameHint}>Tap to edit · saved automatically</Text>
           </Pressable>
         )}
         <View style={[styles.psTierBadge, { borderColor: tierColor }]}>
@@ -1510,15 +1907,18 @@ function ProfileTab({
           <View style={{ flex: 1 }}>
             <Text style={styles.psToggleLbl}>AUTO-EXECUTE SIGNALS</Text>
             <Text style={styles.psToggleHint}>
-              {brokerWebhookUrl.trim()
-                ? 'POST on each new engine signal bar (live only). Risk: real orders.'
-                : 'Set webhook URL first.'}
+              {autoExecuteSignals
+                ? 'ON — auto-sends allowed signals to MT5 when connected.'
+                : mt5Connected
+                  ? 'OFF — manual EXEC only. Turn on to resume auto orders.'
+                  : 'Turns ON automatically when you connect MT5.'}
+              {!mt5Connected && !brokerWebhookUrl.trim() ? ' Connect MT5 in Profile first.' : ''}
             </Text>
           </View>
           <Switch
             value={autoExecuteSignals}
             onValueChange={onAutoExecuteSignalsChange}
-            disabled={!brokerWebhookUrl.trim() || !engineHydrated || runMode !== 'live'}
+            disabled={(!brokerWebhookUrl.trim() && !mt5Connected) || !engineHydrated || runMode !== 'live'}
             trackColor={{ false: C.border, true: 'rgba(255,61,87,0.45)' }}
             thumbColor={autoExecuteSignals ? C.red : C.dim2}
             style={{ transform: [{ scaleX: 1.05 }, { scaleY: 1.05 }] }}
@@ -1537,8 +1937,8 @@ function ProfileTab({
           style={styles.psBrokerInput}
         />
         <Text style={[styles.psToggleHint, { marginTop: 6, lineHeight: 15 }]}>
-          Optional env: EXPO_PUBLIC_BROKER_WEBHOOK_URL, EXPO_PUBLIC_BROKER_WEBHOOK_SECRET (Bearer). For MT5: run
-          mt5/bridge-server.mjs + attach mt5/PollBridgeEA.mq5 — see mt5/README.txt. JSON includes trigger manual|auto.
+          Auto/manual EXEC sends webhook (if URL set) and Python MT5 order (if CONNECT MT5). Webhook bridge:
+          myapp/mt5/bridge-server.mjs + PollBridgeEA.mq5 — see myapp/mt5/README.txt.
         </Text>
         {lastBrokerMsg ? (
           <Text style={[styles.psToggleHint, { marginTop: 8, color: C.amber }]} numberOfLines={3}>
@@ -1547,7 +1947,14 @@ function ProfileTab({
         ) : null}
       </View>
 
-      <Mt5BridgePanel />
+      <Suspense
+        fallback={
+          <View style={{ paddingVertical: 12, paddingHorizontal: pad }}>
+            <Text style={{ color: C.dim, fontSize: 11 }}>Loading MT5 panel…</Text>
+          </View>
+        }>
+        <Mt5BridgePanelLazy />
+      </Suspense>
 
       <Pressable onPress={resetDefaults} style={({ pressed }) => [styles.psResetBtn, pressed && { opacity: 0.88 }]}>
         <Text style={styles.psResetTxt}>RESET TO DEFAULTS</Text>
@@ -1571,10 +1978,18 @@ function ProfileTab({
                   pressed && { opacity: 0.9 },
                 ]}>
                 <View style={styles.psModalAvatar}>
-                  <Text style={styles.psModalAvatarTxt}>{p.initials}</Text>
+                  {photoByProfile[p.id] ? (
+                    <Image
+                      source={{ uri: photoByProfile[p.id] }}
+                      style={styles.psModalAvatarImg}
+                      resizeMode="cover"
+                    />
+                  ) : (
+                    <Text style={styles.psModalAvatarTxt}>{p.initials}</Text>
+                  )}
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.psModalName}>{p.name}</Text>
+                  <Text style={styles.psModalName}>{nameByProfile[p.id]?.trim() || p.name}</Text>
                   <Text style={styles.psModalTier}>{p.tier}</Text>
                 </View>
                 {profileId === p.id ? <Text style={styles.psModalCheck}>✓</Text> : null}
@@ -1600,10 +2015,14 @@ function GodmodeHome({
   histRows,
   winRatePct,
 }) {
+  const { colors: C, styles } = useBilshenzTheme();
   const eng = useContext(BilshenzEngineCtx);
+  const useRealMt5 = !!eng?.useRealMt5;
+  const mt5Account = eng?.mt5Account;
   const tradeCap = eng?.cfg?.maxDailyTrades ?? 5;
   const tradeCountDisp = eng?.hydrated === true ? tradeCount : '—';
-  const pnlRounded = Math.round(pnl);
+  const livePnl = useRealMt5 && mt5Account?.profit != null ? mt5Account.profit : pnl;
+  const pnlRounded = Math.round(livePnl);
   const pnlColor = pnlRounded >= 0 ? C.green : C.red;
   const sessShort = sessionBits.act
     ? sessionBits.s3
@@ -1659,7 +2078,7 @@ function GodmodeHome({
         <View style={styles.ghStatTile}>
           <Text style={styles.ghStatLbl}>DAY P&L</Text>
           <Text style={[styles.ghStatVal, { color: pnlColor }]}>{fmtUsd(pnlRounded)}</Text>
-          <Text style={styles.ghStatSub}>Unrealized · sim</Text>
+          <Text style={styles.ghStatSub}>{useRealMt5 ? 'Floating P&L · MT5' : 'Unrealized · sim'}</Text>
         </View>
         <View style={styles.ghStatTile}>
           <Text style={styles.ghStatLbl}>TRADES</Text>
@@ -1677,7 +2096,7 @@ function GodmodeHome({
       </View>
 
       <View style={[styles.ghHistWrap, { marginHorizontal: pad }]}>
-        <Panel shell={{}} head={{ title: 'Signal History', badge: 'BILSHENZ v3 · TODAY' }}>
+        <Panel shell={{}} head={{ title: 'Signal History', badge: 'JIMPLAS · TODAY' }}>
           <View style={styles.histTableWrap}>
             <HistHeader />
             {(histRows ?? SIGNAL_HISTORY_SIM).map((row, i) => (
@@ -1696,8 +2115,10 @@ function GodmodeHome({
   );
 }
 
-function MobileCompactStrip({ price, spread, pad, utcStr, est, tickerItems }) {
-  const xauDiff = parseFloat((price - 4698.2).toFixed(2));
+function MobileCompactStrip({ price, spread, pad, utcStr, est, tickerItems, tapeTheme, dayOpen }) {
+  const { colors: C, styles } = useBilshenzTheme();
+  const ref = dayOpen != null && Number.isFinite(dayOpen) ? dayOpen : 4698.2;
+  const xauDiff = parseFloat((price - ref).toFixed(2));
   const xauUp = xauDiff >= 0;
   return (
     <View style={[styles.header, styles.mobileCompactHdr, { paddingHorizontal: pad }]}>
@@ -1716,12 +2137,17 @@ function MobileCompactStrip({ price, spread, pad, utcStr, est, tickerItems }) {
           </Text>
         </View>
       </Row>
-      <GeoPoliticalTicker style={{ marginTop: 8, marginHorizontal: -pad }} items={tickerItems} />
+      <GeoPoliticalTicker
+        style={{ marginTop: 8, marginHorizontal: -pad }}
+        items={tickerItems}
+        tapeTheme={tapeTheme}
+      />
     </View>
   );
 }
 
 function MobileBottomNav({ tab, onChange, bottomInset }) {
+  const { colors: C, styles } = useBilshenzTheme();
   const items = [
     { id: 'home', icon: '⌂', label: 'HOME' },
     { id: 'desk', icon: '◈', label: 'INTEL' },
@@ -1734,7 +2160,9 @@ function MobileBottomNav({ tab, onChange, bottomInset }) {
       <View style={styles.bottomNavBar}>
         {Platform.OS === 'ios' ? (
           <BlurView intensity={28} tint="dark" style={StyleSheet.absoluteFillObject} />
-        ) : null}
+        ) : (
+          <View style={[StyleSheet.absoluteFillObject, { backgroundColor: 'rgba(10,9,0,0.96)' }]} />
+        )}
         <View style={styles.bottomNavBarTint} />
         <Row style={styles.bottomNavRow}>
           {items.map((it) => {
@@ -1774,7 +2202,9 @@ function MobileBottomNav({ tab, onChange, bottomInset }) {
   );
 }
 
-function AppContent() {
+function AppContent({ onEngineReady }) {
+  const { colors: C, styles } = useBilshenzTheme();
+  const { baseUrl: mt5BaseUrl, connected: mt5Connected } = useMt5Bridge();
   const { width } = useWindowDimensions();
   const isWide = width >= 880;
   const pad = Math.max(12, Math.min(24, width * 0.06));
@@ -1802,6 +2232,29 @@ function AppContent() {
   const [brokerWebhookUrl, setBrokerWebhookUrl] = useState('');
   const [lastBrokerMsg, setLastBrokerMsg] = useState('');
   const [autoExecuteSignals, setAutoExecuteSignals] = useState(false);
+  const prevMt5ConnectedRef = useRef(false);
+  const userDisabledAutoExecRef = useRef(false);
+
+  const onAutoExecuteSignalsChange = useCallback((enabled) => {
+    if (!enabled) userDisabledAutoExecRef.current = true;
+    setAutoExecuteSignals(!!enabled);
+  }, []);
+
+  const mt5Live = useMt5LiveFeed({
+    baseUrl: mt5BaseUrl,
+    connected: mt5Connected,
+    enabled: runMode === 'live',
+  });
+
+  const useRealMt5 = mt5Connected && runMode === 'live';
+
+  const accountEquity = useMemo(() => {
+    if (!useRealMt5) return SIM_DESK_EQUITY;
+    if (mt5Live.account) return resolveAccountEquity(mt5Live.account, SIM_DESK_EQUITY);
+    return null;
+  }, [useRealMt5, mt5Live.account?.balance, mt5Live.account?.equity]);
+
+  const sizingEquity = accountEquity ?? SIM_DESK_EQUITY;
 
   const est = useMemo(() => getEST(now), [now]);
 
@@ -1809,10 +2262,9 @@ function AppContent() {
     let cancelled = false;
     (async () => {
       try {
-        const [[, urlVal], [, autoVal]] = await AsyncStorage.multiGet([STORAGE_BROKER_HOOK_URL, STORAGE_AUTO_EXEC]);
+        const [[, urlVal]] = await AsyncStorage.multiGet([STORAGE_BROKER_HOOK_URL]);
         if (cancelled) return;
         if (urlVal) setBrokerWebhookUrl(urlVal);
-        if (autoVal === '1' || autoVal === 'true') setAutoExecuteSignals(true);
       } catch {
         /* ignore */
       }
@@ -1821,6 +2273,17 @@ function AppContent() {
       cancelled = true;
     };
   }, []);
+
+  /** Turn auto-execute ON when MT5 connects (user can still switch OFF in Profile). */
+  useEffect(() => {
+    if (runMode !== 'live') return;
+    const wasConnected = prevMt5ConnectedRef.current;
+    if (mt5Connected && !wasConnected) {
+      userDisabledAutoExecRef.current = false;
+      setAutoExecuteSignals(true);
+    }
+    prevMt5ConnectedRef.current = mt5Connected;
+  }, [mt5Connected, runMode]);
 
   useEffect(() => {
     AsyncStorage.setItem(STORAGE_BROKER_HOOK_URL, brokerWebhookUrl).catch(() => {});
@@ -1852,10 +2315,31 @@ function AppContent() {
     initialTradeCount: 0,
     runMode,
     backtestEndIndex,
+    mt5MarketBundle: useRealMt5 ? mt5Live.marketBundle : null,
+    useMt5Data: useRealMt5,
+    mt5Connected: useRealMt5,
+    countSignalTowardCap: !autoExecuteSignals,
   });
+
+  const engineCtxValue = useMemo(
+    () => ({
+      ...bilshenzEngine,
+      useRealMt5,
+      mt5Connected,
+      mt5Account: useRealMt5 ? mt5Live.account : null,
+      accountEquity: sizingEquity,
+    }),
+    [bilshenzEngine, useRealMt5, mt5Connected, mt5Live.account, sizingEquity]
+  );
   const bzSnapshot = bilshenzEngine.snapshot;
   const tradeCount = bilshenzEngine.tradeCount;
   const engineHydrated = bilshenzEngine.hydrated;
+  const bundleReady = bilshenzEngine.bundleReady;
+
+  useEffect(() => {
+    if (bundleReady && onEngineReady) onEngineReady();
+  }, [bundleReady, onEngineReady]);
+
   const incrementExecuteTrade = bilshenzEngine.incrementExecuteTrade;
   const bumpAutoTradeCount = bilshenzEngine.bumpAutoTradeCount;
   const dailyTradeCap = bilshenzEngine.cfg.maxDailyTrades;
@@ -1878,11 +2362,20 @@ function AppContent() {
   const autoHookInFlight = useRef(false);
   const autoHookDoneBarRef = useRef(null);
 
+  const execLotsForTrade = useCallback(
+    (tradeSnap) => {
+      const cfg = bilshenzEngine.cfg ?? defaultBilshenzConfig;
+      const riskPct = effectiveRiskPctFromEngine(cfg.geoRisk, bzSnapshot.risk?.atrPips ?? null, cfg);
+      return lotsForTrade(tradeSnap, cfg, sizingEquity, riskPct);
+    },
+    [sizingEquity, bilshenzEngine.cfg, bzSnapshot.risk?.atrPips]
+  );
+
   useEffect(() => {
     if (!autoExecuteSignals || !engineHydrated) return;
     if (runMode !== 'live') return;
     const hookUrl = brokerWebhookUrl.trim();
-    if (!hookUrl) return;
+    if (!hookUrl && !mt5Connected) return;
 
     const lastSig = bilshenzEngine.lastBarSig;
     const m30 = bilshenzEngine.bundle?.m30;
@@ -1898,8 +2391,9 @@ function AppContent() {
       return;
     }
     const trade = bzSnapshot.trade;
-    if (!trade?.side) {
-      setLastBrokerMsg('Auto: skipped (no trade side)');
+    const gate = canExecuteTrade(bzSnapshot, trade);
+    if (!gate.ok) {
+      setLastBrokerMsg(`Auto: skipped (${gate.reason})`);
       autoHookDoneBarRef.current = bar.t;
       return;
     }
@@ -1908,6 +2402,7 @@ function AppContent() {
       barTimeMs: bar.t,
       runMode: 'live',
       trigger: 'auto',
+      symbol: mt5Live.resolvedSymbol || 'XAUUSD',
     });
     if (!intent) {
       autoHookDoneBarRef.current = bar.t;
@@ -1917,19 +2412,26 @@ function AppContent() {
     autoHookInFlight.current = true;
     void (async () => {
       try {
-        const r = await postBrokerOrderWebhook(intent, { url: hookUrl });
-        if (r.ok) {
+        const lots = execLotsForTrade(bzSnapshot.trade);
+        const r = await executeBrokerRoutes({
+          intent,
+          webhookUrl: hookUrl,
+          useWebhook: !!hookUrl && !mt5Connected,
+          mt5BaseUrl,
+          useMt5: mt5Connected,
+          mt5Volume: lots,
+          symbol: mt5Live.resolvedSymbol,
+        });
+        if (r.anyOk) {
           bumpAutoTradeCount();
-          setLastBrokerMsg(`Auto hook OK ${r.status}`);
-        } else {
-          setLastBrokerMsg(`Auto hook ${r.status}: ${r.bodySnippet}`);
+          autoHookDoneBarRef.current = bar.t;
         }
+        setLastBrokerMsg(r.anyOk ? `Auto: ${r.summary}` : `Auto: ${r.summary}`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        setLastBrokerMsg(`Auto hook error: ${msg}`);
+        setLastBrokerMsg(`Auto error: ${msg}`);
       } finally {
         autoHookInFlight.current = false;
-        autoHookDoneBarRef.current = bar.t;
       }
     })();
   }, [
@@ -1947,7 +2449,21 @@ function AppContent() {
     tradeCount,
     dailyTradeCap,
     bumpAutoTradeCount,
+    mt5BaseUrl,
+    mt5Connected,
+    mt5Live.resolvedSymbol,
+    execLotsForTrade,
+    bzSnapshot.trade,
   ]);
+
+  useEffect(() => {
+    if (mt5Connected && mt5Live.feedReady) {
+      setLastBrokerMsg((prev) =>
+        prev.startsWith('Auto:') || prev.startsWith('MT5') ? prev : 'MT5 live feed · M30 bars from terminal'
+      );
+    }
+    if (mt5Live.feedError) setLastBrokerMsg(`MT5 feed: ${mt5Live.feedError}`);
+  }, [mt5Connected, mt5Live.feedReady, mt5Live.feedError]);
 
   useEffect(() => {
     if (!autoExecuteSignals) autoHookDoneBarRef.current = null;
@@ -1959,8 +2475,10 @@ function AppContent() {
 
   const histRows = useMemo(() => {
     const mapped = mapJournalToHistRows(bilshenzEngine.journalRows);
-    return mapped.length ? mapped : SIGNAL_HISTORY_SIM;
-  }, [bilshenzEngine.journalRows]);
+    if (mapped.length) return mapped;
+    if (useRealMt5) return [];
+    return SIGNAL_HISTORY_SIM;
+  }, [bilshenzEngine.journalRows, useRealMt5]);
 
   const engineWinRatePctStr =
     bzSnapshot.winRate.totalWins + bzSnapshot.winRate.totalLosses > 0
@@ -2022,16 +2540,53 @@ function AppContent() {
   }, []);
 
   useEffect(() => {
-    if (runMode !== 'live') return undefined;
+    if (!useRealMt5) return;
+    if (mt5Live.price != null) setPrice(mt5Live.price);
+    if (mt5Live.spreadPips != null) setSpread(mt5Live.spreadPips);
+    if (mt5Live.account?.profit != null) setPnl(mt5Live.account.profit);
+    if (mt5Live.dxy != null) setDxy(mt5Live.dxy);
+    if (mt5Live.us10y != null) setUs10y(mt5Live.us10y);
+  }, [
+    useRealMt5,
+    mt5Live.price,
+    mt5Live.spreadPips,
+    mt5Live.account?.profit,
+    mt5Live.dxy,
+    mt5Live.us10y,
+  ]);
+
+  useEffect(() => {
+    if (!useRealMt5) return;
+    const ap = bzSnapshot.risk.atrPips;
+    if (ap == null || !Number.isFinite(ap)) return;
+    setAtr(ap);
+    setAtrFillPct(Math.min(100, ((ap - 30) / 120) * 100));
+  }, [useRealMt5, bzSnapshot.risk.atrPips]);
+
+  useEffect(() => {
+    if (runMode !== 'live' || useRealMt5) return undefined;
     const id = setInterval(tick, 1400);
     return () => clearInterval(id);
-  }, [tick, runMode]);
+  }, [tick, runMode, useRealMt5]);
 
   const spHigh = spread > (bilshenzEngine.cfg?.maxSpreadPips ?? 3.5);
   const spreadOkColor = spHigh ? C.red : C.green;
 
-  const xauDiff = parseFloat((chartPrice - 4698.2).toFixed(2));
+  const xauDayOpen = useMemo(() => {
+    const m30 = bilshenzEngine.bundle?.m30;
+    if (m30?.length) {
+      const ref = m30[Math.max(0, m30.length - 48)];
+      return ref?.o ?? ref?.c ?? chartPrice;
+    }
+    return useRealMt5 ? chartPrice : 4698.2;
+  }, [useRealMt5, bilshenzEngine.bundle?.m30, chartPrice]);
+
+  const xauDiff = parseFloat((chartPrice - xauDayOpen).toFixed(2));
   const xauUp = xauDiff >= 0;
+
+  const pipSz = defaultBilshenzConfig.pipSize;
+  const displayBid = useRealMt5 && mt5Live.bid != null ? mt5Live.bid : price - spread * pipSz;
+  const displayAsk = useRealMt5 && mt5Live.ask != null ? mt5Live.ask : price + spread * pipSz;
 
   const btMaxIdx = Math.max(0, bilshenzEngine.m30BaseLength - 1);
   const btMinIdx = Math.min(80, btMaxIdx);
@@ -2062,29 +2617,47 @@ function AppContent() {
     return { text: `✗ CRISIS MODE — RISK: ${rc}%`, cls: 'red' };
   }, [bzSnapshot.risk.atrPips, bilshenzEngine.cfg]);
 
-  const chartPts = [
-    [0, 105],
-    [80, 100],
-    [160, 94],
-    [240, 90],
-    [320, 84],
-    [400, 76],
-    [460, 82],
-    [480, 68],
-    [530, 62],
-    [580, 56],
-    [640, 48],
-    [700, 38],
-    [760, 26],
-    [820, 16],
-    [900, 10],
-  ];
+  const chartPts = useMemo(() => {
+    const m30 = bilshenzEngine.bundle?.m30;
+    if (m30?.length && (useRealMt5 || runMode === 'backtest')) {
+      const slice = m30.slice(-16);
+      const w = 900;
+      const lows = slice.map((b) => b.l);
+      const highs = slice.map((b) => b.h);
+      const min = Math.min(...lows);
+      const max = Math.max(...highs);
+      const range = max - min || 1;
+      return slice.map((b, i) => {
+        const x = (i / Math.max(slice.length - 1, 1)) * w;
+        const y = 8 + (1 - (b.c - min) / range) * 92;
+        return [x, y];
+      });
+    }
+    if (useRealMt5) return [];
+    return [
+      [0, 105],
+      [80, 100],
+      [160, 94],
+      [240, 90],
+      [320, 84],
+      [400, 76],
+      [460, 82],
+      [480, 68],
+      [530, 62],
+      [580, 56],
+      [640, 48],
+      [700, 38],
+      [760, 26],
+      [820, 16],
+      [900, 10],
+    ];
+  }, [useRealMt5, bilshenzEngine.bundle?.m30]);
 
   const sigPill = useMemo(() => {
     const t = bzSnapshot.trade;
-    if (t.setup === 'P3') return { text: '🟡 FLIP / P3 — S/R FLIP SETUP', variant: 'flip' };
-    if (t.setup === 'P2') return { text: '🟦 BREAKOUT — P2 SETUP', variant: 'break' };
-    if (t.setup === 'P1') return { text: '🟥 WICK — P1 SETUP', variant: 'wick' };
+    if (t.setup === 'P1') return { text: '🟩 P1 — S/R BREAKOUT & RETEST', variant: 'break' };
+    if (t.setup === 'P2') return { text: '🟦 P2 — WICK FILL (FLUIDITY)', variant: 'wick' };
+    if (t.setup === 'P3') return { text: '🟡 P3 — SESSION IMPULSE', variant: 'flip' };
     if (bzSnapshot.risk.chopZone) return { text: '⚠ H4 CHOP — advisory', variant: 'wick' };
     return { text: '⬡ SCANNING — NO PRIORITY SETUP', variant: 'wick' };
   }, [bzSnapshot.trade, bzSnapshot.risk.chopZone]);
@@ -2101,23 +2674,38 @@ function AppContent() {
     if (tradeCount >= dailyTradeCap) return;
     setExecBusy(true);
     setTimeout(async () => {
-      const tradeSnap = bzRef.current.trade;
+      const snap = bzRef.current;
+      const tradeSnap = snap.trade;
       const en = engineRef.current;
       const barT = en.bundle?.m30?.length ? en.bundle.m30[en.bundle.m30.length - 1].t : null;
+      const gate = canExecuteTrade(snap, tradeSnap);
+      if (!gate.ok) {
+        setLastBrokerMsg(`EXEC blocked: ${gate.reason}`);
+        setExecBusy(false);
+        return;
+      }
       incrementExecuteTrade();
       const hookUrl = brokerWebhookUrl.trim();
-      if (brokerHookEnabled && hookUrl) {
-        const intent = buildBrokerOrderIntent(tradeSnap, {
-          barTimeMs: barT,
-          runMode: runModeRef.current,
-          trigger: 'manual',
+      const intent = buildBrokerOrderIntent(tradeSnap, {
+        barTimeMs: barT,
+        runMode: runModeRef.current,
+        trigger: 'manual',
+        symbol: mt5Live.resolvedSymbol || 'XAUUSD',
+      });
+      if (intent && ((brokerHookEnabled && hookUrl) || mt5Connected)) {
+        const lots = execLotsForTrade(tradeSnap);
+        const r = await executeBrokerRoutes({
+          intent,
+          webhookUrl: hookUrl,
+          useWebhook: !!(brokerHookEnabled && hookUrl && !mt5Connected),
+          mt5BaseUrl,
+          useMt5: mt5Connected,
+          mt5Volume: lots,
+          symbol: mt5Live.resolvedSymbol,
         });
-        if (intent) {
-          const r = await postBrokerOrderWebhook(intent, { url: hookUrl });
-          setLastBrokerMsg(r.ok ? `Hook OK ${r.status}` : `Hook ${r.status}: ${r.bodySnippet}`);
-        } else {
-          setLastBrokerMsg('Hook skipped (no side)');
-        }
+        setLastBrokerMsg(r.summary ? `${r.summary} · ${lots.toFixed(2)} lot` : r.summary);
+      } else if (!intent) {
+        setLastBrokerMsg('EXEC skipped (no side)');
       } else {
         setLastBrokerMsg('');
       }
@@ -2130,6 +2718,10 @@ function AppContent() {
     incrementExecuteTrade,
     brokerHookEnabled,
     brokerWebhookUrl,
+    mt5BaseUrl,
+    mt5Connected,
+    mt5Live.resolvedSymbol,
+    execLotsForTrade,
   ]);
 
   const onSkip = () => {
@@ -2147,8 +2739,21 @@ function AppContent() {
   const showFullHeader =
     isWide || mobileTab === 'desk' || mobileTab === 'home' || mobileTab === 'profile' || mobileTab === 'risk';
 
-  const gmAlerts = useMemo(() => buildGmAlertRows(bzSnapshot.risk, nfpBlackout, newsActive), [bzSnapshot.risk, nfpBlackout, newsActive]);
+  const gmAlerts = useMemo(
+    () => buildGmAlertRows(bzSnapshot.risk, nfpBlackout, newsActive, C),
+    [bzSnapshot.risk, nfpBlackout, newsActive, C]
+  );
   const tickerStrings = useMemo(() => gmAlerts.map((a) => a.text), [gmAlerts]);
+  const tapeTheme = useMemo(
+    () => ({
+      barBg: C.panel2,
+      barBorder: C.border,
+      text: C.text,
+      textMuted: C.dim,
+      glow: 'rgba(212, 180, 90, 0.42)',
+    }),
+    [C]
+  );
 
   const flowNodes = useMemo(() => {
     const ec = bilshenzEngine.cfg;
@@ -2166,7 +2771,9 @@ function AppContent() {
     const f8State = r.chopZone ? 'warn' : 'pass';
     const f9State = sr.bullClean || sr.bearClean ? 'pass' : 'warn';
     const f10State = r.athZoneBlocked ? 'warn' : 'pass';
-    const f11State = bzSnapshot.trade?.setup ? 'pass' : 'warn';
+    const setup = bzSnapshot.trade?.setup;
+    const f11State = setup ? 'pass' : 'warn';
+    const f11Ft = setup ? `SETUP\n${setup}` : 'SETUP\nP1-P3';
     const f12State = 'pass';
     const f13State = r.atrPips != null && r.atrPips >= 50 ? 'warn' : 'pass';
     const f14State = r.yieldHigh ? 'warn' : 'pass';
@@ -2183,7 +2790,7 @@ function AppContent() {
       { id: 'f8', state: f8State, icon: '🌀', sn: 'S08', ft: 'CHOP\nDETECT', tag: 'NEW' },
       { id: 'f9', state: f9State, icon: '🔭', sn: 'S09', ft: 'LEFT SIDE\nCLEAN' },
       { id: 'f10', state: f10State, icon: '🗺', sn: 'S10', ft: 'ZONE\nMAP', tag: 'NEW' },
-      { id: 'f11', state: f11State, icon: '⚡', sn: 'S11', ft: 'SETUP\nP1-P3' },
+      { id: 'f11', state: f11State, icon: '⚡', sn: 'S11', ft: f11Ft },
       { id: 'f12', state: f12State, icon: '🕯', sn: 'S12', ft: 'CANDLE\n40/60' },
       { id: 'f13', state: f13State, icon: '📉', sn: 'S13', ft: 'ATR\nSIZE', tag: 'NEW' },
       { id: 'f14', state: f14State, icon: '🏛', sn: 'S14', ft: 'YIELD\nCHECK', tag: 'NEW' },
@@ -2203,8 +2810,20 @@ function AppContent() {
     newsActive,
   ]);
 
+  if (!bundleReady || (useRealMt5 && !mt5Live.feedReady)) {
+    return (
+      <View style={[styles.safeRoot, { alignItems: 'center', justifyContent: 'center', padding: 24 }]}>
+        <Text style={{ color: C.dim, fontSize: 12, textAlign: 'center' }}>
+          {useRealMt5
+            ? mt5Live.feedError || 'Connecting to MT5…'
+            : 'Loading market engine…'}
+        </Text>
+      </View>
+    );
+  }
+
   return (
-    <BilshenzEngineCtx.Provider value={bilshenzEngine}>
+    <BilshenzEngineCtx.Provider value={engineCtxValue}>
       <SafeAreaView style={styles.safeRoot} edges={['top']}>
         <View style={styles.root}>
           <ScrollView
@@ -2228,8 +2847,9 @@ function AppContent() {
                       </Text>
                     </Row>
                     <Text style={styles.xauSub}>
-                      BID {fmtNum(price - 0.3)} · ASK {fmtNum(price + 0.3)} · SPREAD{' '}
+                      BID {fmtNum(displayBid)} · ASK {fmtNum(displayAsk)} · SPREAD{' '}
                       <Text style={styles.xauSub}>{spread.toFixed(2)}</Text>p
+                      {useRealMt5 ? ' · MT5' : ''}
                     </Text>
                     <TextInput
                       placeholder="Notes / tag (optional)"
@@ -2241,7 +2861,9 @@ function AppContent() {
                   <Row style={[styles.hdrRight, !isWide && { marginTop: 2, alignSelf: 'stretch', justifyContent: 'space-between' }]}>
                     <Row style={styles.livePill}>
                       <BlinkDot color={C.green} />
-                      <Text style={styles.livePillTxt}>{runMode === 'backtest' ? 'BACKTEST' : 'LIVE SIM'}</Text>
+                      <Text style={styles.livePillTxt}>
+                        {runMode === 'backtest' ? 'BACKTEST' : useRealMt5 ? 'MT5 LIVE' : 'LIVE SIM'}
+                      </Text>
                     </Row>
                     <View style={styles.clockBox}>
                       <Text style={styles.clockUtc}>{utcStr}</Text>
@@ -2251,7 +2873,11 @@ function AppContent() {
                     </View>
                   </Row>
                 </Row>
-                <GeoPoliticalTicker style={{ marginTop: 10, marginHorizontal: -pad }} items={tickerStrings} />
+                <GeoPoliticalTicker
+                  style={{ marginTop: 10, marginHorizontal: -pad }}
+                  items={tickerStrings}
+                  tapeTheme={tapeTheme}
+                />
               </View>
             ) : (
               <MobileCompactStrip
@@ -2261,6 +2887,8 @@ function AppContent() {
                 utcStr={utcStr}
                 est={est}
                 tickerItems={tickerStrings}
+                tapeTheme={tapeTheme}
+                dayOpen={xauDayOpen}
               />
             )}
 
@@ -2404,10 +3032,24 @@ function AppContent() {
                     atrModePill={atrModePill}
                     engineTrade={bzSnapshot.trade}
                     histRows={histRows}
+                    accountEquity={sizingEquity}
+                    mt5LiveAccount={useRealMt5}
+                    mt5Account={useRealMt5 ? mt5Live.account : null}
                   />
                 </View>
                 <View style={[styles.col, { width: 250 }]}>
-                  <RightColumn tradeCount={tradeCount} pnl={pnl} sessTag={sessTag} spread={spread} spreadOkColor={spreadOkColor} spHigh={spHigh} dayBits={dayBits} />
+                  <RightColumn
+                    tradeCount={tradeCount}
+                    pnl={pnl}
+                    sessTag={sessTag}
+                    spread={spread}
+                    spreadOkColor={spreadOkColor}
+                    spHigh={spHigh}
+                    dayBits={dayBits}
+                    accountEquity={sizingEquity}
+                    mt5LiveAccount={useRealMt5}
+                    mt5Account={useRealMt5 ? mt5Live.account : null}
+                  />
                 </View>
               </View>
             ) : mobileTab === 'home' ? (
@@ -2450,11 +3092,25 @@ function AppContent() {
                     atrModePill={atrModePill}
                     engineTrade={bzSnapshot.trade}
                     histRows={histRows}
+                    accountEquity={sizingEquity}
+                    mt5LiveAccount={useRealMt5}
+                    mt5Account={useRealMt5 ? mt5Live.account : null}
                     compactSignal
                   />
                 </View>
                 <View style={[styles.col, { width: '100%' }]}>
-                  <RightColumn tradeCount={tradeCount} pnl={pnl} sessTag={sessTag} spread={spread} spreadOkColor={spreadOkColor} spHigh={spHigh} dayBits={dayBits} />
+                  <RightColumn
+                    tradeCount={tradeCount}
+                    pnl={pnl}
+                    sessTag={sessTag}
+                    spread={spread}
+                    spreadOkColor={spreadOkColor}
+                    spHigh={spHigh}
+                    dayBits={dayBits}
+                    accountEquity={sizingEquity}
+                    mt5LiveAccount={useRealMt5}
+                    mt5Account={useRealMt5 ? mt5Live.account : null}
+                  />
                 </View>
               </View>
             ) : mobileTab === 'trade' ? (
@@ -2480,6 +3136,9 @@ function AppContent() {
                   atrModePill={atrModePill}
                   engineTrade={bzSnapshot.trade}
                   histRows={histRows}
+                  accountEquity={sizingEquity}
+                  mt5LiveAccount={useRealMt5}
+                  mt5Account={useRealMt5 ? mt5Live.account : null}
                   compactSignal
                 />
               </View>
@@ -2514,12 +3173,24 @@ function AppContent() {
                   onBrokerWebhookUrlChange={setBrokerWebhookUrl}
                   lastBrokerMsg={lastBrokerMsg}
                   autoExecuteSignals={autoExecuteSignals}
-                  onAutoExecuteSignalsChange={setAutoExecuteSignals}
+                  onAutoExecuteSignalsChange={onAutoExecuteSignalsChange}
+                  mt5Connected={mt5Connected}
                 />
               </View>
             ) : mobileTab === 'risk' ? (
               <View style={[styles.mobileTabBody, { paddingHorizontal: pad }]}>
-                <RightColumn tradeCount={tradeCount} pnl={pnl} sessTag={sessTag} spread={spread} spreadOkColor={spreadOkColor} spHigh={spHigh} dayBits={dayBits} />
+                <RightColumn
+                  tradeCount={tradeCount}
+                  pnl={useRealMt5 && mt5Live.account?.profit != null ? mt5Live.account.profit : pnl}
+                  sessTag={sessTag}
+                  spread={spread}
+                  spreadOkColor={spreadOkColor}
+                  spHigh={spHigh}
+                  dayBits={dayBits}
+                  accountEquity={sizingEquity}
+                  mt5LiveAccount={useRealMt5}
+                  mt5Account={useRealMt5 ? mt5Live.account : null}
+                />
               </View>
             ) : null}
 
@@ -2530,7 +3201,8 @@ function AppContent() {
                 </Text>
                 <Text style={styles.footerTxt}>{utcStr} UTC</Text>
                 <Text style={styles.footerTxt}>
-                  <Text style={styles.footerGold}>S&R Engine · Flip Engine · Left Side Scanner · 8 Godmode Upgrades</Text> · Simulated · Not financial advice
+                  <Text style={styles.footerGold}>Jimplas Fluidity P1/P2/P3 · S&R · Left Side Scanner · MT5 Bridge</Text>
+                  {useRealMt5 ? ' · MT5 live data' : ' · Simulated'} · Not financial advice
                 </Text>
               </View>
             ) : (
@@ -2540,7 +3212,7 @@ function AppContent() {
                   <Text style={styles.footerGold}>
                     {mobileTab === 'desk' ? 'INTEL' : mobileTab === 'profile' ? 'PROFILE' : mobileTab.toUpperCase()}
                   </Text>{' '}
-                  · Simulated · Not financial advice
+                  · {useRealMt5 ? 'MT5 live data' : 'Simulated'} · Not financial advice
                 </Text>
               </View>
             )}
@@ -2552,1345 +3224,36 @@ function AppContent() {
   );
 }
 
-/** Corner radii for INTEL / desk panels (left, center, right columns) and nested blocks */
-const DR = {
-  panel: 14,
-  block: 12,
-  soft: 10,
-  chip: 8,
-  mini: 6,
-};
 
-const styles = StyleSheet.create({
-  safeRoot: { flex: 1, backgroundColor: C.appBg },
-  root: { flex: 1, backgroundColor: C.appBg },
-  scrollContent: { paddingBottom: 0, backgroundColor: C.appBg },
-  row: { flexDirection: 'row', alignItems: 'center' },
-  header: {
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
-    backgroundColor: 'rgba(16,14,10,0.98)',
-  },
-  headerTopRow: { justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 },
-  stackCol: { flexDirection: 'column', alignItems: 'stretch' },
-  headerStackGap: { gap: 6 },
-  brandStack: { alignItems: 'flex-start' },
-  hdrCenter: { alignItems: 'center', gap: 2 },
-  xauRow: { alignItems: 'baseline', gap: 8 },
-  xauPair: { fontSize: 8, color: C.dim, letterSpacing: 2, fontWeight: '600' },
-  xauPrice: { fontSize: 28, fontWeight: '800', color: C.goldL },
-  xauChg: { fontSize: 12, fontWeight: '700' },
-  xauSub: { fontSize: 8, color: C.dim, letterSpacing: 1 },
-  headerNotes: {
-    marginTop: 5,
-    borderWidth: 1,
-    borderColor: C.border,
-    borderRadius: 2,
-    paddingHorizontal: 10,
-    paddingVertical: Platform.OS === 'ios' ? 7 : 5,
-    color: C.text,
-    fontSize: 10,
-    backgroundColor: 'rgba(14,12,10,0.28)',
-  },
-  hdrRight: { gap: 14 },
-  livePill: {
-    borderWidth: 1,
-    borderColor: 'rgba(0,230,118,0.3)',
-    backgroundColor: 'rgba(0,230,118,0.04)',
-    paddingVertical: 5,
-    paddingHorizontal: 11,
-    borderRadius: 20,
-    gap: 6,
-  },
-  livePillTxt: { fontSize: 8, color: C.green, letterSpacing: 2, fontWeight: '700' },
-  ldot: { width: 6, height: 6, borderRadius: 3 },
-  clockBox: { alignItems: 'flex-end' },
-  clockUtc: { fontSize: 16, fontWeight: '800', color: C.gold },
-  clockEst: { fontSize: 8, color: C.dim, letterSpacing: 1, marginTop: 1, fontWeight: '500' },
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
-  bannerScroll: { maxHeight: 52, borderBottomWidth: 1, borderBottomColor: 'rgba(255,61,87,0.2)', backgroundColor: C.appBg },
-  godBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    paddingVertical: 10,
-    backgroundColor: 'rgba(255,61,87,0.04)',
-  },
-  gmAlert: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  gmAlertTxt: { fontSize: 9, letterSpacing: 1.5, fontWeight: '700' },
-  gmDivider: { width: 1, height: 16, backgroundColor: C.border },
+function AppRoot() {
+  const { styles } = useBilshenzTheme();
+  const [splashDone, setSplashDone] = useState(false);
+  const [engineReady, setEngineReady] = useState(false);
 
-  sessBar: { flexDirection: 'row', flexWrap: 'wrap', borderBottomWidth: 1, borderBottomColor: C.border, backgroundColor: C.panel },
-  sblk: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 9,
-    paddingHorizontal: 16,
-    borderRightWidth: 1,
-    borderRightColor: C.border,
-    borderTopWidth: 2,
-    borderTopColor: 'transparent',
-  },
-  sblkActive: { borderTopColor: C.gold, backgroundColor: 'rgba(201,168,76,0.04)' },
-  sblkDead: { borderTopColor: 'rgba(255,61,87,0.4)', backgroundColor: 'rgba(255,61,87,0.02)' },
-  sn: { fontSize: 8, color: C.dim, letterSpacing: 1.5, marginBottom: 2, fontWeight: '600' },
-  st: { fontSize: 9, color: C.text, fontWeight: '500' },
-  sbadge: { fontSize: 7, letterSpacing: 1, paddingVertical: 3, paddingHorizontal: 8, borderRadius: 10, overflow: 'hidden', fontWeight: '700' },
-  sbOpen: { color: C.green, borderWidth: 1, borderColor: 'rgba(0,230,118,0.3)', backgroundColor: C.greenD },
-  sbWait: { color: C.amber, borderWidth: 1, borderColor: 'rgba(255,179,0,0.3)', backgroundColor: 'rgba(255,179,0,0.05)' },
-  sbDead: { color: C.red, borderWidth: 1, borderColor: 'rgba(255,61,87,0.3)', backgroundColor: C.redD },
-
-  flowScroll: { borderBottomWidth: 1, borderBottomColor: C.border, backgroundColor: 'rgba(16,14,10,0.94)', maxHeight: 92 },
-  btBar: {
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(212,180,90,0.25)',
-    backgroundColor: 'rgba(18,16,10,0.98)',
-    paddingVertical: 8,
-    gap: 6,
-  },
-  btBarTitle: { fontSize: 8, color: C.amber, letterSpacing: 1, fontWeight: '700' },
-  btBarRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
-  btBarMeta: { fontSize: 9, color: C.dim, flex: 1, textAlign: 'right' },
-  btMiniBtn: {
-    borderWidth: 1,
-    borderColor: C.border,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-    backgroundColor: 'rgba(14,12,10,0.5)',
-  },
-  btMiniBtnTxt: { fontSize: 12, color: C.goldL, fontWeight: '800' },
-  btSlider: { width: '100%', height: 36 },
-  flowWrap: { flexDirection: 'row', alignItems: 'center', gap: 2, paddingVertical: 10 },
-  fnode: {
-    alignItems: 'center',
-    gap: 2,
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-    borderWidth: 1,
-    borderColor: C.border,
-    backgroundColor: C.panel2,
-    minWidth: 68,
-    borderRadius: DR.soft,
-  },
-  fnodePass: { borderColor: 'rgba(0,230,118,0.35)', backgroundColor: 'rgba(0,230,118,0.04)' },
-  fnodeFail: { borderColor: 'rgba(255,61,87,0.35)', backgroundColor: 'rgba(255,61,87,0.04)' },
-  fnodeWarn: { borderColor: 'rgba(255,179,0,0.35)', backgroundColor: 'rgba(255,179,0,0.04)' },
-  fi: { fontSize: 11 },
-  fn: { fontSize: 6, color: C.dim, fontWeight: '600' },
-  ft: { fontSize: 7, color: C.text, letterSpacing: 0.3, textAlign: 'center', lineHeight: 11, fontWeight: '600' },
-  fnewTag: {
-    fontSize: 6,
-    color: C.gold,
-    backgroundColor: 'rgba(201,168,76,0.1)',
-    borderWidth: 1,
-    borderColor: 'rgba(201,168,76,0.2)',
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: DR.mini,
-    marginTop: 1,
-    fontWeight: '700',
-  },
-  farr: { fontSize: 10, color: C.dim2, paddingHorizontal: 1 },
-
-  grid: { gap: 12, paddingVertical: 12 },
-  col: { gap: 10 },
-  leftCol: { gap: 10 },
-  centerCol: { gap: 10 },
-  rightCol: { gap: 10 },
-
-  footer: {
-    paddingTop: 8,
-    paddingBottom: 4,
-    borderTopWidth: 1,
-    borderTopColor: C.border,
-    backgroundColor: C.panel,
-    gap: 6,
-  },
-  footerTxt: { fontSize: 7, color: C.dim, letterSpacing: 1, fontWeight: '500' },
-  footerGold: { color: C.goldD, fontWeight: '700' },
-  footerMinimal: { paddingTop: 6, paddingBottom: 4 },
-
-  mobileCompactHdr: { paddingVertical: 10 },
-  mobileTabBody: { paddingTop: 12, paddingBottom: 0, gap: 10 },
-
-  bottomNavOuter: {
-    paddingHorizontal: 0,
-    paddingTop: 0,
-  },
-  bottomNavBar: {
-    position: 'relative',
-    borderRadius: 0,
-    overflow: 'hidden',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: 'rgba(212,180,90,0.18)',
-    paddingTop: 4,
-    paddingBottom: 2,
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: -2 },
-        shadowOpacity: 0.2,
-        shadowRadius: 8,
-      },
-      android: { elevation: 6 },
-      default: {},
-    }),
-  },
-  bottomNavBarTint: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: Platform.OS === 'ios' ? 'rgba(18,16,12,0.78)' : 'rgba(18,16,12,0.96)',
-  },
-  bottomNavRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'stretch',
-    paddingHorizontal: 2,
-    paddingTop: 0,
-    zIndex: 3,
-  },
-  bottomNavItem: {
-    flex: 1,
-    position: 'relative',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 6,
-    minHeight: 50,
-    borderRadius: 0,
-    marginHorizontal: 0,
-    minWidth: 0,
-    backgroundColor: 'transparent',
-  },
-  bottomNavItemActive: {
-    backgroundColor: 'rgba(212,180,90,0.07)',
-  },
-  bottomNavItemPressed: { opacity: 0.88 },
-  bottomNavActiveCapWrap: {
-    position: 'absolute',
-    top: 2,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    zIndex: 4,
-  },
-  bottomNavActiveCap: {
-    width: 28,
-    height: 2,
-    borderRadius: 2,
-    backgroundColor: C.goldL,
-    opacity: 0.95,
-  },
-  bottomNavItemInner: { alignItems: 'center', justifyContent: 'center', gap: 2, paddingTop: 5 },
-  bottomNavIcon: {
-    fontSize: 28,
-    color: 'rgba(233,224,200,0.45)',
-    fontWeight: '600',
-  },
-  bottomNavIconActive: { color: C.goldL },
-  bottomNavLbl: {
-    fontSize: 8,
-    fontWeight: '700',
-    color: 'rgba(233,224,200,0.52)',
-    letterSpacing: 0.9,
-    textTransform: 'uppercase',
-  },
-  bottomNavLblActive: {
-    color: C.goldL,
-    fontWeight: '800',
-    letterSpacing: 1,
-  },
-
-  psTabBody: { paddingTop: 8, paddingBottom: 0 },
-  psScroll: { gap: 16, paddingTop: 4 },
-  psProfileCard: {
-    position: 'relative',
-    borderRadius: 14,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(212,180,90,0.28)',
-    paddingVertical: 20,
-    paddingHorizontal: 16,
-    alignItems: 'center',
-  },
-  psProfileTint: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(20,18,14,0.88)',
-  },
-  psProfileGlow: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    bottom: 0,
-    width: 4,
-    backgroundColor: C.gold,
-    opacity: 0.55,
-    borderTopLeftRadius: 14,
-    borderBottomLeftRadius: 14,
-  },
-  psAvatarRing: {
-    width: 68,
-    height: 68,
-    borderRadius: 34,
-    borderWidth: 3,
-    borderColor: C.goldL,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 10,
-    ...Platform.select({
-      ios: {
-        shadowColor: C.gold,
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.45,
-        shadowRadius: 8,
-      },
-      android: { elevation: 10 },
-      default: {},
-    }),
-  },
-  psAvatarTxt: { fontSize: 22, fontWeight: '900', color: C.goldL, letterSpacing: 1 },
-  psName: { fontSize: 20, fontWeight: '800', color: C.text, textAlign: 'center' },
-  psNameHint: { fontSize: 8, color: C.dim, textAlign: 'center', marginTop: 4, letterSpacing: 1 },
-  psNameInput: {
-    marginTop: 4,
-    marginBottom: 4,
-    minWidth: 200,
-    borderWidth: 1,
-    borderColor: C.gold,
-    borderRadius: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    color: C.text,
-    fontSize: 16,
-    fontWeight: '700',
-    textAlign: 'center',
-    backgroundColor: 'rgba(0,0,0,0.25)',
-  },
-  psBrokerInput: {
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: C.border,
-    borderRadius: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    color: C.text,
-    fontSize: 11,
-    backgroundColor: 'rgba(0,0,0,0.22)',
-  },
-  psTierBadge: {
-    marginTop: 10,
-    paddingVertical: 5,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-    borderWidth: 1,
-    backgroundColor: 'rgba(0,0,0,0.2)',
-  },
-  psTierTxt: { fontSize: 9, fontWeight: '900', letterSpacing: 2 },
-  psStatsRow: { flexDirection: 'row', gap: 8, marginTop: 16, alignSelf: 'stretch' },
-  psStatGlass: {
-    flex: 1,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(212,180,90,0.2)',
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    paddingVertical: 10,
-    paddingHorizontal: 6,
-    alignItems: 'center',
-    minHeight: 64,
-    justifyContent: 'center',
-  },
-  psStatLbl: { fontSize: 6, color: C.dim, letterSpacing: 1.2, fontWeight: '700', marginBottom: 4 },
-  psStatVal: { fontSize: 13, fontWeight: '900' },
-  psSparkWrap: { marginTop: 14, alignSelf: 'stretch', alignItems: 'center', opacity: 0.95 },
-  psSwitchProfileBtn: {
-    marginTop: 16,
-    minHeight: 48,
-    paddingVertical: 12,
-    paddingHorizontal: 22,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: C.gold,
-    backgroundColor: 'transparent',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  psSwitchProfileTxt: { fontSize: 10, fontWeight: '800', color: C.goldL, letterSpacing: 2 },
-  psDivider: {
-    height: 1,
-    backgroundColor: C.border,
-    marginVertical: 4,
-    opacity: 0.9,
-  },
-  psSettingsTitle: {
-    fontSize: 10,
-    fontWeight: '900',
-    color: C.gold,
-    letterSpacing: 3,
-    marginTop: 4,
-    marginBottom: 8,
-  },
-  psSettingsCard: {
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: C.border,
-    backgroundColor: 'rgba(0,0,0,0.18)',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    gap: 0,
-  },
-  psRowLabel: { fontSize: 9, fontWeight: '800', color: C.dim, letterSpacing: 1.5, marginBottom: 8, marginTop: 4 },
-  psSegRow: { flexDirection: 'row', gap: 6, marginBottom: 4 },
-  psSegChip: {
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: C.border,
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 4,
-  },
-  psSegChipOn: {
-    borderColor: 'rgba(212,180,90,0.65)',
-    backgroundColor: 'rgba(212,180,90,0.14)',
-  },
-  psSegChipTxt: { fontSize: 9, fontWeight: '700', color: C.dim, textAlign: 'center' },
-  psSegChipTxtOn: { color: C.goldL, fontWeight: '900' },
-  psRowDivider: { height: 1, backgroundColor: 'rgba(30,23,0,0.55)', marginVertical: 12 },
-  psToggleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    minHeight: 48,
-    paddingVertical: 6,
-    gap: 12,
-  },
-  psToggleLbl: { fontSize: 11, fontWeight: '700', color: C.text, flex: 1 },
-  psToggleHint: { fontSize: 9, color: C.dim, marginRight: 8, fontWeight: '600' },
-  psResetBtn: {
-    marginTop: 18,
-    minHeight: 48,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,61,87,0.65)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    backgroundColor: 'rgba(255,61,87,0.06)',
-  },
-  psResetTxt: { fontSize: 10, fontWeight: '800', color: C.red, letterSpacing: 1.5 },
-  psModalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.72)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 22,
-  },
-  psModalCard: {
-    width: '100%',
-    maxWidth: 340,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(212,180,90,0.35)',
-    backgroundColor: C.panel2,
-    padding: 16,
-    zIndex: 2,
-  },
-  psModalTitle: { fontSize: 11, fontWeight: '900', color: C.goldL, letterSpacing: 2, marginBottom: 12, textAlign: 'center' },
-  psModalRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: C.border,
-    marginBottom: 8,
-    gap: 12,
-    minHeight: 52,
-  },
-  psModalRowOn: { borderColor: C.gold, backgroundColor: 'rgba(212,180,90,0.1)' },
-  psModalAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    borderWidth: 2,
-    borderColor: C.goldL,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.3)',
-  },
-  psModalAvatarTxt: { fontSize: 12, fontWeight: '900', color: C.goldL },
-  psModalName: { fontSize: 14, fontWeight: '800', color: C.text },
-  psModalTier: { fontSize: 9, color: C.dim, marginTop: 2, letterSpacing: 1 },
-  psModalCheck: { fontSize: 16, color: C.green, fontWeight: '900' },
-  psModalClose: { marginTop: 8, paddingVertical: 12, alignItems: 'center' },
-  psModalCloseTxt: { fontSize: 10, fontWeight: '800', color: C.dim, letterSpacing: 2 },
-
-  ghBody: { paddingVertical: 0 },
-  ghWrap: { position: 'relative', paddingBottom: 0 },
-  ghPriceCard: {
-    borderRadius: 16,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(201,168,76,0.35)',
-  },
-  ghPriceInner: { padding: 16, position: 'relative', zIndex: 1 },
-  ghPriceMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 4,
-  },
-  ghPriceStatBlock: { flex: 1, alignItems: 'center', paddingHorizontal: 6 },
-  ghPriceStatDivider: { width: 1, height: 44, backgroundColor: 'rgba(30,23,0,0.85)' },
-  ghMiniLbl: { fontSize: 6, color: C.dim, letterSpacing: 1, fontWeight: '600' },
-  ghMiniVal: { fontSize: 18, fontWeight: '800', marginTop: 4 },
-  ghPriceFoot: {
-    marginTop: 14,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(30,23,0,0.6)',
-    justifyContent: 'space-between',
-  },
-  ghFootUtc: { fontSize: 8, color: C.dim2, fontWeight: '500' },
-  ghFootEdge: { fontSize: 8, color: C.amber, fontWeight: '700', letterSpacing: 1, flex: 1, textAlign: 'right' },
-  ghChipScroll: { maxHeight: 44, marginTop: 14 },
-  ghChipRow: { gap: 8, alignItems: 'center', paddingVertical: 4 },
-  ghChip: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(201,168,76,0.25)',
-    backgroundColor: 'rgba(15,13,6,0.95)',
-  },
-  ghChipTxt: { fontSize: 7, fontWeight: '800', color: C.gold, letterSpacing: 1.2 },
-  ghGrid2: { flexDirection: 'row', gap: 10, marginTop: 16 },
-  ghStatTile: {
-    flex: 1,
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: C.border,
-    backgroundColor: C.panel2,
-  },
-  ghStatLbl: { fontSize: 7, color: C.dim, letterSpacing: 2, fontWeight: '700', marginBottom: 6 },
-  ghStatVal: { fontSize: 20, fontWeight: '900' },
-  ghStatSub: { fontSize: 7, color: C.dim2, marginTop: 4, fontWeight: '500' },
-  ghVerdictCard: {
-    marginTop: 14,
-    padding: 16,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: C.border,
-    borderLeftWidth: 4,
-    borderLeftColor: C.gold,
-    backgroundColor: 'rgba(201,168,76,0.04)',
-  },
-  ghVerdictLbl: { fontSize: 7, color: C.dim, letterSpacing: 2, fontWeight: '800', marginBottom: 6 },
-  ghVerdictMain: { fontSize: 16, fontWeight: '900', letterSpacing: 0.5 },
-  ghVerdictSub: { fontSize: 8, color: C.dim, marginTop: 6, lineHeight: 14, fontWeight: '500' },
-  ghHistWrap: { marginTop: 14 },
-  ghQuote: {
-    marginTop: 22,
-    padding: 18,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(201,168,76,0.15)',
-    backgroundColor: 'rgba(0,0,0,0.35)',
-  },
-  ghQuoteMark: { fontSize: 28, color: 'rgba(201,168,76,0.2)', lineHeight: 28, marginBottom: -8, fontFamily: Platform.select({ ios: 'Georgia', android: 'serif', default: 'serif' }) },
-  ghQuoteTxt: {
-    fontSize: 11,
-    color: C.text,
-    lineHeight: 18,
-    fontStyle: 'italic',
-    fontWeight: '500',
-    letterSpacing: 0.3,
-  },
-  ghQuoteSig: { marginTop: 12, fontSize: 8, color: C.goldD, fontWeight: '800', letterSpacing: 2 },
-
-  pnl: { backgroundColor: C.panel, borderWidth: 1, borderColor: C.border, borderRadius: DR.panel, overflow: 'hidden' },
-  gmPanelShell: { borderColor: 'rgba(201,168,76,0.25)' },
-  gmHeaderTint: { backgroundColor: 'rgba(201,168,76,0.05)' },
-  srPanelShell: { borderColor: 'rgba(255,61,87,0.3)' },
-  srHeadTint: { backgroundColor: 'rgba(255,61,87,0.04)' },
-  flipShell: { borderColor: 'rgba(255,179,0,0.3)' },
-  flipHeadTint: { backgroundColor: 'rgba(255,179,0,0.04)' },
-  scanShell: { borderColor: 'rgba(64,196,255,0.3)' },
-  scanHeadTint: { backgroundColor: 'rgba(64,196,255,0.04)' },
-
-  ph: {
-    paddingVertical: 10,
-    paddingHorizontal: 13,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
-    justifyContent: 'space-between',
-    backgroundColor: 'rgba(201,168,76,0.02)',
-  },
-  phT: { fontSize: 9, fontWeight: '800', color: C.gold, letterSpacing: 2, textTransform: 'uppercase' },
-  phB: {
-    fontSize: 6,
-    color: C.dim,
-    letterSpacing: 1,
-    borderWidth: 1,
-    borderColor: C.border,
-    paddingVertical: 2,
-    paddingHorizontal: 6,
-    borderRadius: DR.chip,
-    fontWeight: '600',
-  },
-  pb: { paddingHorizontal: 13, paddingVertical: 11 },
-
-  biasHero: { alignItems: 'center', paddingVertical: 12 },
-  biasTag: { fontSize: 7, color: C.dim, letterSpacing: 2, marginBottom: 4 },
-  biasWord: { fontSize: 26, fontWeight: '800', letterSpacing: 4 },
-  biasBull: { color: C.green },
-  biasBear: { color: C.red },
-  biasNeu: { color: C.dim },
-  biasSub: { fontSize: 7, color: C.dim, marginTop: 2 },
-  tfRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 5,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(30,23,0,0.5)',
-  },
-  tfl: { fontSize: 8, color: C.dim, fontWeight: '600' },
-  tfv: { fontSize: 8, fontWeight: '700' },
-  tfBull: { color: C.green },
-  tfBear: { color: C.red },
-  tfNeu: { color: C.amber },
-
-  geoDial: { alignItems: 'center', paddingVertical: 12 },
-  geoRiskLbl: { fontSize: 7, color: C.dim, letterSpacing: 2, marginBottom: 5 },
-  geoLevel: { fontSize: 24, fontWeight: '900', letterSpacing: 3, color: C.red },
-  geoSub: { fontSize: 7, color: C.dim, letterSpacing: 1, marginTop: 3 },
-  geoBars: { gap: 4, marginVertical: 10 },
-  geoBar: { height: 20, width: 18, borderRadius: DR.mini, borderWidth: 1, borderColor: C.border },
-  geoBarG: { backgroundColor: C.green },
-  geoBarA: { backgroundColor: C.amber },
-  geoBarR: { backgroundColor: C.red },
-  geoRule: { fontSize: 8, color: C.red, letterSpacing: 0.5, textAlign: 'center', lineHeight: 14 },
-
-  sectionLbl: {
-    fontSize: 7,
-    fontWeight: '700',
-    color: C.dim,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-    marginBottom: 6,
-  },
-  twoCol: { flexDirection: 'row', gap: 6, marginBottom: 8 },
-  immedResBox: {
-    flex: 1,
-    backgroundColor: 'rgba(255,61,87,0.07)',
-    borderWidth: 2,
-    borderColor: 'rgba(255,61,87,0.4)',
-    borderRadius: DR.block,
-    padding: 10,
-  },
-  immedSupBox: {
-    flex: 1,
-    backgroundColor: 'rgba(0,230,118,0.07)',
-    borderWidth: 2,
-    borderColor: 'rgba(0,230,118,0.4)',
-    borderRadius: DR.block,
-    padding: 10,
-  },
-  imLbl: { fontSize: 7, color: C.dim, fontWeight: '700', letterSpacing: 1, marginBottom: 3 },
-  imResVal: { fontSize: 18, fontWeight: '800', color: C.red },
-  imSupVal: { fontSize: 18, fontWeight: '800', color: C.green },
-  imSmall: { fontSize: 7, color: C.dim, marginTop: 2 },
-  imDistRes: { fontSize: 8, fontWeight: '700', color: C.red, marginTop: 3 },
-  imDistSup: { fontSize: 8, fontWeight: '700', color: C.green, marginTop: 3 },
-  currPriceRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    backgroundColor: 'rgba(64,196,255,0.05)',
-    borderWidth: 1,
-    borderColor: 'rgba(64,196,255,0.2)',
-    borderRadius: DR.block,
-    marginBottom: 8,
-    gap: 6,
-  },
-  currLbl: { fontSize: 8, fontWeight: '700', color: C.blue },
-  currVal: { fontSize: 14, fontWeight: '800', color: C.goldL },
-  currPos: { fontSize: 8, fontWeight: '600', color: C.blue },
-  poiResBox: {
-    flex: 1,
-    backgroundColor: 'rgba(255,61,87,0.04)',
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: 'rgba(255,61,87,0.3)',
-    borderRadius: DR.block,
-    padding: 10,
-  },
-  poiSupBox: {
-    flex: 1,
-    backgroundColor: 'rgba(0,230,118,0.04)',
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: 'rgba(0,230,118,0.3)',
-    borderRadius: DR.block,
-    padding: 10,
-  },
-  poiResVal: { fontSize: 15, fontWeight: '800', color: 'rgba(255,61,87,0.7)' },
-  poiSupVal: { fontSize: 15, fontWeight: '800', color: 'rgba(0,230,118,0.7)' },
-
-  flipSupOuter: {
-    marginBottom: 8,
-    paddingVertical: 9,
-    paddingHorizontal: 11,
-    backgroundColor: 'rgba(0,230,118,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(0,230,118,0.3)',
-    borderRadius: DR.block,
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  flipAccentGreen: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: C.green },
-  flipGreenLbl: { fontSize: 7, color: C.green, fontWeight: '700', letterSpacing: 1.5, marginBottom: 4 },
-  flipSupLvl: { fontSize: 18, fontWeight: '800', color: C.green },
-  miniTagG: {
-    fontSize: 7,
-    fontWeight: '700',
-    paddingVertical: 2,
-    paddingHorizontal: 7,
-    borderRadius: DR.chip,
-    backgroundColor: 'rgba(0,230,118,0.1)',
-    borderWidth: 1,
-    borderColor: 'rgba(0,230,118,0.3)',
-    color: C.green,
-  },
-  miniTagG2: {
-    fontSize: 7,
-    fontWeight: '700',
-    paddingVertical: 2,
-    paddingHorizontal: 7,
-    borderRadius: DR.chip,
-    backgroundColor: 'rgba(0,230,118,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(0,230,118,0.2)',
-    color: C.green,
-  },
-  flipResOuter: {
-    marginBottom: 8,
-    paddingVertical: 9,
-    paddingHorizontal: 11,
-    backgroundColor: 'rgba(255,61,87,0.04)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,61,87,0.2)',
-    borderRadius: DR.block,
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  flipAccentRed: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: 'rgba(255,61,87,0.3)' },
-  flipDimLbl: { fontSize: 7, color: C.dim, fontWeight: '700', letterSpacing: 1.5, marginBottom: 4 },
-  flipResLvl: { fontSize: 18, fontWeight: '800', color: 'rgba(255,61,87,0.5)' },
-  miniTagWatch: {
-    alignSelf: 'flex-start',
-    fontSize: 7,
-    fontWeight: '700',
-    paddingVertical: 2,
-    paddingHorizontal: 7,
-    borderRadius: DR.chip,
-    backgroundColor: 'rgba(255,61,87,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,61,87,0.15)',
-    color: C.dim,
-  },
-  flipRuleBox: {
-    paddingVertical: 7,
-    paddingHorizontal: 10,
-    backgroundColor: 'rgba(255,179,0,0.05)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,179,0,0.2)',
-    borderRadius: DR.block,
-  },
-  flipRuleTxt: { fontSize: 7, color: C.amber, lineHeight: 14, fontWeight: '600' },
-
-  pathLblG: { fontSize: 7, fontWeight: '700', color: C.green, letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 5 },
-  pathLblR: { fontSize: 7, fontWeight: '700', color: C.red, letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 5 },
-  lsPanel: {
-    backgroundColor: 'rgba(0,0,0,0.2)',
-    borderWidth: 1,
-    borderColor: C.border,
-    borderRadius: DR.block,
-    overflow: 'hidden',
-  },
-  lsZoneBox: {
-    marginHorizontal: 8,
-    marginTop: 8,
-    marginBottom: 4,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: DR.block,
-    borderWidth: 2,
-    justifyContent: 'center',
-  },
-  lsZonePath: {
-    fontSize: 7,
-    fontWeight: '800',
-    letterSpacing: 1.2,
-    color: C.dim,
-    textTransform: 'uppercase',
-  },
-  lsZonePips: { fontSize: 22, fontWeight: '900', marginTop: 4 },
-  lsZoneChop: { fontSize: 9, fontWeight: '700', color: C.text, marginTop: 6, opacity: 0.92 },
-  lsZoneStatus: { fontSize: 10, fontWeight: '900', marginTop: 8, letterSpacing: 0.5 },
-  lsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
-  },
-  lsRowL: { fontSize: 8, fontWeight: '600', color: C.dim },
-  lsRowR: { fontSize: 8, fontWeight: '800' },
-  pathVerdict: { marginTop: 4, paddingVertical: 6, paddingHorizontal: 8, borderRadius: DR.block, borderWidth: 1 },
-  lsVerdictBox: { paddingVertical: 10, paddingHorizontal: 12, borderRadius: DR.block, borderWidth: 1, alignItems: 'center', marginTop: 8 },
-  lsVerdictLbl: { fontSize: 7, fontWeight: '700', letterSpacing: 2, marginBottom: 3 },
-  lsVerdictVal: { fontSize: 14, fontWeight: '800' },
-  lsVerdictSub: { fontSize: 7, color: C.dim, marginTop: 3 },
-
-  dxyRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(30,23,0,0.4)',
-  },
-  dxyL: { fontSize: 8, color: C.dim, fontWeight: '500' },
-  dxyV: { fontSize: 8, fontWeight: '600' },
-  dxyFoot: {
-    marginTop: 8,
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-    backgroundColor: C.greenD,
-    borderWidth: 1,
-    borderColor: 'rgba(0,230,118,0.15)',
-    borderRadius: DR.block,
-    fontSize: 7,
-    color: C.green,
-    letterSpacing: 0.5,
-  },
-
-  chopActive: {
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: DR.block,
-    alignItems: 'center',
-    marginBottom: 10,
-    backgroundColor: 'rgba(255,179,0,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,179,0,0.25)',
-  },
-  chopWord: { fontSize: 16, fontWeight: '800', letterSpacing: 2 },
-  chopSub: { fontSize: 7, marginTop: 3, letterSpacing: 1 },
-
-  athZone: {
-    backgroundColor: 'rgba(255,61,87,0.04)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,61,87,0.2)',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: DR.block,
-    marginBottom: 8,
-  },
-  athTitle: { fontSize: 8, color: C.red, letterSpacing: 1.5, marginBottom: 6, fontWeight: '700' },
-  athRange: { fontSize: 15, fontWeight: '800', color: C.red },
-  athSub: { fontSize: 7, color: C.dim, marginTop: 2 },
-
-  sigCard: {
-    borderWidth: 1,
-    borderColor: C.goldD,
-    backgroundColor: '#16130E',
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    borderRadius: DR.block,
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  sigCardCompact: {
-    paddingVertical: 14,
-    paddingHorizontal: 14,
-    borderRadius: DR.block,
-  },
-  sigInnerStack: { gap: 14 },
-  sigTopTrade: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 12,
-  },
-  sigBuyBadge: {
-    width: 72,
-    minHeight: 88,
-    borderRadius: DR.chip,
-    borderWidth: 1,
-    borderColor: 'rgba(0,230,118,0.35)',
-    backgroundColor: 'rgba(0,230,118,0.06)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 8,
-  },
-  sigActionCompact: { fontSize: 26, lineHeight: 30, letterSpacing: 1 },
-  sigInfoCompact: { flex: 1, minWidth: 0, gap: 6 },
-  sigPairCompact: { fontSize: 9, color: C.dim, letterSpacing: 1.5, fontWeight: '700' },
-  sigConfCompact: { fontSize: 10, color: C.gold, fontWeight: '700', lineHeight: 15 },
-  sigStratCompact: { fontSize: 8, color: C.dim, letterSpacing: 0.3, lineHeight: 14, fontWeight: '500' },
-  sigSessCompact: {
-    fontSize: 8,
-    color: C.dim,
-    letterSpacing: 0.8,
-    textAlign: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderRadius: DR.chip,
-    backgroundColor: 'rgba(0,0,0,0.25)',
-    borderWidth: 1,
-    borderColor: C.border,
-    overflow: 'hidden',
-  },
-  sigBtnRow: { flexDirection: 'row', alignItems: 'stretch', gap: 10 },
-  execBtnCompact: {
-    flex: 1,
-    paddingVertical: 14,
-    paddingHorizontal: 10,
-    borderRadius: DR.soft,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 50,
-  },
-  execBtnTxtCompact: { color: '#000', fontSize: 11, fontWeight: '800', letterSpacing: 1.5 },
-  skipBtnCompact: {
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    borderRadius: DR.soft,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 50,
-    minWidth: 100,
-  },
-  skipBtnTxtCompact: { color: C.red, fontSize: 10, fontWeight: '700', letterSpacing: 1 },
-  sigWatermarkCompact: { opacity: 0.06, top: '36%' },
-  sigGlow: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'transparent',
-    opacity: 1,
-  },
-  sigAccent: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    bottom: 0,
-    width: 4,
-    backgroundColor: C.green,
-    borderTopLeftRadius: DR.block,
-    borderBottomLeftRadius: DR.block,
-  },
-  sigInner: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'stretch',
-    gap: 12,
-    flexWrap: 'nowrap',
-  },
-  sigL: { flex: 1, minWidth: 0, gap: 14, alignItems: 'center', flexDirection: 'row' },
-  sigAction: { fontSize: 36, fontWeight: '800', lineHeight: 40 },
-  sigBuy: { color: C.green },
-  sigInfo: { flex: 1, minWidth: 0, gap: 4 },
-  sigPair: { fontSize: 8, color: C.dim, letterSpacing: 2, fontWeight: '600' },
-  pillWick: {
-    alignSelf: 'flex-start',
-    fontSize: 8,
-    paddingVertical: 3,
-    paddingHorizontal: 10,
-    borderRadius: DR.chip,
-    letterSpacing: 1,
-    marginBottom: 2,
-    fontWeight: '700',
-    color: C.red,
-    borderWidth: 1,
-    borderColor: 'rgba(255,61,87,0.4)',
-    backgroundColor: 'rgba(255,61,87,0.06)',
-  },
-  pillBreak: {
-    alignSelf: 'flex-start',
-    fontSize: 8,
-    paddingVertical: 3,
-    paddingHorizontal: 10,
-    borderRadius: DR.chip,
-    color: C.blue,
-    borderWidth: 1,
-    borderColor: 'rgba(64,196,255,0.4)',
-    backgroundColor: 'rgba(64,196,255,0.06)',
-    fontWeight: '700',
-  },
-  pillFlip: {
-    alignSelf: 'flex-start',
-    fontSize: 8,
-    paddingVertical: 3,
-    paddingHorizontal: 10,
-    borderRadius: DR.chip,
-    color: C.amber,
-    borderWidth: 1,
-    borderColor: 'rgba(255,179,0,0.4)',
-    backgroundColor: 'rgba(255,179,0,0.06)',
-    fontWeight: '700',
-  },
-  sigConf: { fontSize: 10, color: C.gold, fontWeight: '700' },
-  sigStrat: { fontSize: 7, color: C.dim, letterSpacing: 0.5 },
-  sigR: { flexShrink: 0, alignItems: 'flex-end', justifyContent: 'center', gap: 6 },
-  sigSess: { fontSize: 7, color: C.dim, letterSpacing: 1, textAlign: 'right' },
-  execBtn: {
-    backgroundColor: C.gold,
-    paddingVertical: 10,
-    paddingHorizontal: 22,
-    borderRadius: DR.soft,
-  },
-  execBtnTxt: { color: '#000', fontSize: 9, fontWeight: '800', letterSpacing: 2 },
-  skipBtn: {
-    borderWidth: 1,
-    borderColor: 'rgba(255,61,87,0.3)',
-    paddingVertical: 6,
-    paddingHorizontal: 14,
-    borderRadius: DR.soft,
-    backgroundColor: 'transparent',
-  },
-  skipBtnTxt: { color: C.red, fontSize: 8, fontWeight: '600', letterSpacing: 1 },
-  sigWatermark: {
-    position: 'absolute',
-    right: -18,
-    top: '42%',
-    fontSize: 7,
-    color: 'rgba(201,168,76,0.12)',
-    letterSpacing: 4,
-    transform: [{ rotate: '90deg' }],
-    fontWeight: '700',
-  },
-
-  filterGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 },
-  filt: { flexGrow: 1, flexBasis: '22%', paddingVertical: 8, paddingHorizontal: 10, borderRadius: DR.soft, gap: 3, minWidth: '22%' },
-  filtOk: { backgroundColor: C.greenD, borderWidth: 1, borderColor: 'rgba(0,230,118,0.2)' },
-  filtWarn: { backgroundColor: C.redD, borderWidth: 1, borderColor: 'rgba(255,61,87,0.2)' },
-  filtAmb: { backgroundColor: 'rgba(255,179,0,0.06)', borderWidth: 1, borderColor: 'rgba(255,179,0,0.2)' },
-  filtL: { fontSize: 7, color: C.dim, letterSpacing: 1, fontWeight: '600' },
-  filtV: { fontSize: 13, fontWeight: '800' },
-  filtS: { fontSize: 7, letterSpacing: 0.5, fontWeight: '600' },
-
-  wickInd: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingVertical: 8,
-    paddingHorizontal: 11,
-    borderRadius: DR.block,
-    marginBottom: 8,
-    backgroundColor: C.greenD,
-    borderWidth: 1,
-    borderColor: 'rgba(0,230,118,0.2)',
-  },
-  wiIcon: { fontSize: 16 },
-  wiMain: { fontSize: 8, color: C.text, letterSpacing: 0.5, marginBottom: 1, fontWeight: '600' },
-  wiSub: { fontSize: 7, color: C.dim },
-
-  atrRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
-  atrLabel: { fontSize: 8, color: C.dim, fontWeight: '600' },
-  atrVal: { fontSize: 14, fontWeight: '800', color: C.amber },
-  atrBarBg: { height: 5, backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: DR.mini, overflow: 'hidden', marginBottom: 10 },
-  atrBarFill: { height: '100%', borderRadius: DR.mini, backgroundColor: C.amber },
-  modePill: {
-    alignSelf: 'flex-start',
-    fontSize: 8,
-    paddingVertical: 3,
-    paddingHorizontal: 10,
-    borderRadius: DR.chip,
-    letterSpacing: 1,
-    marginBottom: 10,
-    fontWeight: '700',
-  },
-  modeStd: { color: C.green, borderWidth: 1, borderColor: 'rgba(0,230,118,0.3)', backgroundColor: C.greenD },
-  modeAmb: { color: C.amber, borderWidth: 1, borderColor: 'rgba(255,179,0,0.3)', backgroundColor: 'rgba(255,179,0,0.06)' },
-  modeRed: { color: C.red, borderWidth: 1, borderColor: 'rgba(255,61,87,0.3)', backgroundColor: C.redD },
-
-  eeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 8 },
-  eeCell: {
-    flexGrow: 1,
-    flexBasis: '22%',
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    borderWidth: 1,
-    borderColor: C.border,
-    padding: 10,
-    borderRadius: DR.block,
-    minWidth: '45%',
-  },
-  eeL: { fontSize: 6, color: C.dim, letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 4, fontWeight: '700' },
-  eeV: { fontSize: 15, fontWeight: '800' },
-  eeS: { fontSize: 7, color: C.dim, marginTop: 2 },
-  eeEntry: { color: C.green },
-  eeBe: { color: C.purple },
-  eeTp1: { color: C.goldL },
-  eeTp2: { color: C.gold },
-  eeSl: { color: C.red },
-  eePlain: { color: C.text },
-  eeGold: { color: C.gold },
-
-  rrStrip: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    gap: 8,
-    backgroundColor: 'rgba(201,168,76,0.04)',
-    borderWidth: 1,
-    borderColor: C.border,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: DR.block,
-  },
-  rri: { alignItems: 'center', minWidth: '18%' },
-  rrl: { fontSize: 6, color: C.dim, letterSpacing: 1, fontWeight: '600' },
-  rrv: { fontSize: 13, fontWeight: '800', color: C.gold },
-
-  chartWrap: {
-    height: 120,
-    backgroundColor: 'rgba(0,0,0,0.2)',
-    borderWidth: 1,
-    borderColor: C.border,
-    borderRadius: DR.block,
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  chartAth: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    height: 10,
-    backgroundColor: 'rgba(255,61,87,0.06)',
-    borderTopLeftRadius: DR.block,
-    borderTopRightRadius: DR.block,
-  },
-  chartAthTxt: {
-    position: 'absolute',
-    left: 4,
-    top: 1,
-    fontSize: 6,
-    color: 'rgba(255,61,87,0.6)',
-  },
-  chartDot: {
-    position: 'absolute',
-    width: 3,
-    height: 3,
-    borderRadius: 1.5,
-    backgroundColor: C.gold,
-    marginLeft: -1.5,
-    marginTop: -1.5,
-  },
-  hLine: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    borderTopWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: 'rgba(216,200,144,0.35)',
-  },
-  hLineLbl: { position: 'absolute', top: -10, fontSize: 6 },
-  vLine: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    borderLeftWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: 'rgba(0,230,118,0.45)',
-  },
-  vLineLbl: { position: 'absolute', left: 4, top: 4, fontSize: 6 },
-  wickGrab: {
-    position: 'absolute',
-    left: '49%',
-    top: '52%',
-    width: '8%',
-    height: '24%',
-    backgroundColor: 'rgba(255,61,87,0.07)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,61,87,0.35)',
-    borderRadius: DR.chip,
-  },
-  wickGrabLbl: { position: 'absolute', left: '48%', bottom: 4, fontSize: 7, color: C.red },
-
-  histTableWrap: {
-    borderRadius: DR.block,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(30,23,0,0.45)',
-    backgroundColor: 'rgba(0,0,0,0.2)',
-  },
-  histHead: {
-    flexDirection: 'row',
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border,
-    gap: 4,
-    alignItems: 'flex-start',
-  },
-  histTh: { fontSize: 6, color: C.dim, letterSpacing: 1, fontWeight: '700', textTransform: 'uppercase' },
-  histColUtc: { flex: 0.7, minWidth: 0 },
-  histColDir: { flex: 0.4, minWidth: 0 },
-  histColType: {
-    flex: 0.9,
-    minWidth: 0,
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    paddingTop: 1,
-  },
-  histColEntry: { flex: 1, minWidth: 0, flexShrink: 1, paddingRight: 2 },
-  histColSl: { flex: 0.8, minWidth: 0 },
-  histColBe: { flex: 0.8, minWidth: 0 },
-  histColPl: { flex: 0.9, minWidth: 0 },
-  histColRes: { flex: 0.7, minWidth: 0 },
-  histBreakMsg: { color: C.red, fontSize: 7, lineHeight: 11, fontWeight: '600' },
-  histDashCell: { color: C.dim2, fontSize: 7, textAlign: 'center' },
-  histRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 8,
-    paddingVertical: 7,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(30,23,0,0.4)',
-    alignItems: 'flex-start',
-    gap: 4,
-  },
-  histTd: { fontSize: 8, fontWeight: '500', color: C.text },
-  tBuy: { color: C.green, fontWeight: '800' },
-  tSell: { color: C.red, fontWeight: '800' },
-  tWin: { color: C.green, fontWeight: '600' },
-  tLoss: { color: C.red, fontWeight: '600' },
-  tOpen: { color: C.gold, fontWeight: '600' },
-  eb: { fontSize: 6, paddingVertical: 1, paddingHorizontal: 5, borderRadius: DR.mini, fontWeight: '700', overflow: 'hidden' },
-  ebW: { backgroundColor: 'rgba(255,61,87,0.1)', color: C.red },
-  ebB: { backgroundColor: 'rgba(64,196,255,0.1)', color: C.blue },
-  ebF: { backgroundColor: 'rgba(255,179,0,0.1)', color: C.amber },
-
-  pnlHero: { alignItems: 'center', paddingVertical: 14 },
-  pnlTag: { fontSize: 7, color: C.dim, letterSpacing: 2, marginBottom: 5, fontWeight: '600' },
-  pnlNum: { fontSize: 32, fontWeight: '800' },
-  pnlPips: { fontSize: 8, color: C.dim, marginTop: 3 },
-  pnlMini: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
-  pmC: {
-    flexGrow: 1,
-    flexBasis: '45%',
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    borderWidth: 1,
-    borderColor: C.border,
-    padding: 8,
-    borderRadius: DR.block,
-    alignItems: 'center',
-  },
-  pmL: { fontSize: 7, color: C.dim, letterSpacing: 1, marginBottom: 3, fontWeight: '600' },
-  pmV: { fontSize: 15, fontWeight: '800', color: C.gold },
-
-  rmHdr: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
-  rmL: { fontSize: 7, color: C.dim, fontWeight: '600' },
-  rmV: { fontSize: 7, color: C.green, fontWeight: '600' },
-  rmBar: { height: 4, backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: DR.mini, overflow: 'hidden', marginBottom: 10 },
-  rmFill: { height: '100%', borderRadius: DR.mini, backgroundColor: C.gold },
-
-  yieldPct: { fontSize: 14, fontWeight: '900', color: C.purple },
-  yieldBarBg: { height: 6, backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: DR.mini, overflow: 'hidden', marginBottom: 6 },
-  yieldFill: { height: '100%', borderRadius: DR.mini, backgroundColor: C.purple },
-  yieldMarkers: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
-  yieldMk: { fontSize: 7, color: C.dim, fontWeight: '500' },
-
-  dayCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: C.border,
-    backgroundColor: 'rgba(0,0,0,0.2)',
-    borderRadius: DR.block,
-    marginBottom: 8,
-  },
-  dayIcon: { fontSize: 20 },
-  dayName: { fontSize: 13, fontWeight: '800', color: C.gold },
-  dayMode: { fontSize: 7, color: C.dim, letterSpacing: 1, marginTop: 2 },
-  dayRule: { fontSize: 8, color: C.green, marginTop: 3, fontWeight: '600' },
-
-  spreadGuard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 8,
-    paddingHorizontal: 11,
-    borderRadius: DR.block,
-    marginBottom: 8,
-  },
-  sgOk: { backgroundColor: C.greenD, borderWidth: 1, borderColor: 'rgba(0,230,118,0.2)' },
-  sgWarn: { backgroundColor: C.redD, borderWidth: 1, borderColor: 'rgba(255,61,87,0.25)' },
-  sgLabel: { fontSize: 7, color: C.dim, letterSpacing: 1, marginBottom: 2, fontWeight: '600' },
-  sgSpread: { fontSize: 20, fontWeight: '800' },
-  sgTiny: { fontSize: 7, color: C.dim },
-  sgTiny2: { fontSize: 7, color: C.dim, marginTop: 2 },
-  sgStatus: { fontSize: 8, letterSpacing: 1 },
-
-  newsClear: {
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    backgroundColor: C.greenD,
-    borderWidth: 1,
-    borderColor: 'rgba(0,230,118,0.2)',
-    borderRadius: DR.block,
-    fontSize: 7,
-    color: C.green,
-    letterSpacing: 1,
-    marginBottom: 7,
-    textAlign: 'center',
-    fontWeight: '700',
-  },
-  ni: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 5,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(30,23,0,0.4)',
-    gap: 6,
-  },
-  niTime: { fontSize: 8, color: C.dim, fontWeight: '500', minWidth: 36 },
-  niName: { flex: 1, fontSize: 8, color: C.text, fontWeight: '500' },
-  niImpact: { fontSize: 6, paddingVertical: 2, paddingHorizontal: 6, borderRadius: DR.mini, letterSpacing: 1, fontWeight: '700' },
-  niH: { color: C.red, borderWidth: 1, borderColor: 'rgba(255,61,87,0.3)', backgroundColor: 'rgba(255,61,87,0.05)' },
-  niM: { color: C.amber, borderWidth: 1, borderColor: 'rgba(255,179,0,0.3)', backgroundColor: 'rgba(255,179,0,0.05)' },
-  niOk: { fontSize: 6, color: C.green, fontWeight: '700' },
-  niPast: { fontSize: 6, color: C.dim, fontWeight: '500' },
-  niBlock: { fontSize: 6, color: C.red, letterSpacing: 1, fontWeight: '700' },
-  newsFoot: {
-    marginTop: 7,
-    paddingTop: 7,
-    borderTopWidth: 1,
-    borderTopColor: C.border,
-    fontSize: 7,
-    color: C.dim,
-    lineHeight: 14,
-  },
-});
+  return (
+    <View style={styles.appShell}>
+      <View style={styles.appUnderlay} pointerEvents={splashDone ? 'auto' : 'none'}>
+        <AppContent onEngineReady={() => setEngineReady(true)} />
+      </View>
+      {!splashDone ? (
+        <View style={styles.splashOverlay}>
+          <CinematicSplash appReady={engineReady} onComplete={() => setSplashDone(true)} />
+        </View>
+      ) : null}
+    </View>
+  );
+}
 
 export default function App() {
   return (
     <SafeAreaProvider>
-      <AppContent />
+      <ThemeProvider>
+        <Mt5BridgeProvider>
+          <AppRoot />
+        </Mt5BridgeProvider>
+      </ThemeProvider>
     </SafeAreaProvider>
   );
 }

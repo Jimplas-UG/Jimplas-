@@ -72,6 +72,29 @@ def api_status():
     return {"connected": True, "account": info}
 
 
+@app.get("/api/symbol/{symbol}")
+def api_resolve_symbol(symbol: str, pip_size: float = 0.1):
+    sym = connector.resolve_symbol(symbol)
+    if sym is None:
+        raise HTTPException(status_code=503, detail="Symbol not found on broker")
+    spec = connector.symbol_spec(symbol, pip_size=pip_size)
+    if spec is None:
+        return {"requested": symbol, "resolved": sym}
+    return {"requested": symbol, "resolved": sym, **spec}
+
+
+@app.get("/api/bars/{symbol}")
+def api_bars(symbol: str, count: int = 320, from_ms: int | None = None, to_ms: int | None = None):
+    if from_ms is not None and to_ms is not None:
+        bars = connector.bars_m30_range(symbol, from_ms, to_ms)
+    else:
+        bars = connector.bars_m30(symbol, count)
+    if not bars:
+        raise HTTPException(status_code=503, detail="No bars — login, symbol, or chart history")
+    sym = connector.resolve_symbol(symbol) or symbol
+    return {"symbol": sym, "timeframe": "M30", "bars": bars}
+
+
 @app.get("/api/tick/{symbol}")
 def api_tick(symbol: str):
     t = connector.tick(symbol)

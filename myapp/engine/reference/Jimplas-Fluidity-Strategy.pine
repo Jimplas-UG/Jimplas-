@@ -1,0 +1,280 @@
+//@version=5
+// BILSHENZ — Jimplas Market Fluidity (matches myapp/engine/jimplasFluiditySignalEngine.ts)
+// Chart: XAUUSD M30 recommended. Sessions: America/New_York.
+// Live app: lots sized on journalSizingSlPips (20); place broker SL near that distance for live parity.
+strategy("BILSHENZ — Jimplas Fluidity (P1/P2/P3)", overlay=true, max_labels_count=500,
+     pyramiding=0, calc_on_every_tick=false, process_orders_on_close=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+     initial_capital=1000, commission_type=strategy.commission.cash_per_order, commission_value=0)
+
+// ── Setups ─────────────────────────────────────────────────────────────────────
+enableP1 = input.bool(true, "P1 — S/R Breakout & Retest", group="Setups")
+enableP2 = input.bool(true, "P2 — Wick Fill", group="Setups")
+enableP3 = input.bool(true, "P3 — Session Open Impulse", group="Setups")
+p2Strict = input.bool(false, "P2 strict filters (~30–100 trades/yr)", group="Setups",
+     tooltip="Off = loose wick ratio + break prior H/L (~500+ trades/yr, matches backtest default)")
+
+// ── Risk / journal (engine defaults) ─────────────────────────────────────────
+pipSize       = input.float(0.1, "Pip size (XAU)", group="Risk")
+slBufPips     = input.float(2.0, "SL buffer (pips)", group="Risk")
+journalSlPips = input.float(20.0, "Journal sizing SL (pips) — lot risk model", group="Risk")
+useTpClamp    = input.bool(true, "Legacy TP clamp 10–28 pips", group="Risk")
+tpMinPips     = input.float(10, "TP min (pips)", group="Risk")
+tpMaxPips     = input.float(28, "TP max (pips)", group="Risk")
+maxDaily      = input.int(3, "Max trades per NY day", minval=1, maxval=20, group="Risk")
+p3RR          = input.float(2.0, "P3 reward:risk", group="P3")
+
+// ── P1 / P2 parameters ───────────────────────────────────────────────────────
+p1VolMult     = input.float(1.15, "P1 min range vs ATR", group="P1")
+p1ConsolLb    = input.int(20, "P1 consolidation lookback", group="P1")
+p1ConsolMin   = input.int(2, "P1 consolidation min bars", group="P1")
+p1ConsolMax   = input.int(18, "P1 consolidation max bars", group="P1")
+zoneHalfPips  = input.float(3.0, "Zone half-width (pips)", group="Levels")
+p2WickMin     = input.float(0.55, "P2 min wick ratio", group="P2")
+p2MaxBody     = input.float(0.53, "P2 max body ratio (strict)", group="P2")
+p2MinVoid     = input.float(4.0, "P2 min void pips (strict)", group="P2")
+p2MaxVoid     = input.float(42.0, "P2 max void pips (strict)", group="P2")
+
+// ── Sessions (NY) — matches sessionEngine.ts ───────────────────────────────────
+preLondon = not na(time("30", "1900-2300", "America/New_York"))
+london    = not na(time("30", "0200-0600", "America/New_York"))
+newYork   = not na(time("30", "0700-1200", "America/New_York"))
+inSession = preLondon or london or newYork
+p3Session = london or newYork
+sessionStarted = p3Session and not p3Session[1]
+
+// ── M30 S/R pivots (3,3) ─────────────────────────────────────────────────────
+ph = ta.pivothigh(high, 3, 3)
+pl = ta.pivotlow(low, 3, 3)
+var float r1 = na, var float r2 = na, var float r3 = na
+var float s1 = na, var float s2 = na, var float s3 = na
+if not na(ph)
+    r3 := r2, r2 := r1, r1 := ph
+if not na(pl)
+    s3 := s2, s2 := s1, s1 := pl
+
+nearestRes() =>
+    float r = na
+    if not na(r1) and r1 > close
+        r := r1
+    else if not na(r2) and r2 > close
+        r := r2
+    else if not na(r3) and r3 > close
+        r := r3
+    r
+
+nearestSup() =>
+    float s = na
+    if not na(s1) and s1 < close
+        s := s1
+    else if not na(s2) and s2 < close
+        s := s2
+    else if not na(s3) and s3 < close
+        s := s3
+    s
+
+prevRes = nearestRes()[1]
+prevSup = nearestSup()[1]
+zoneHalf = zoneHalfPips * pipSize
+atrVal = ta.atr(14)
+
+// ── Wick metrics ─────────────────────────────────────────────────────────────
+bodyTop = math.max(open, close)
+bodyBot = math.min(open, close)
+rng = math.max(high - low, syminfo.mintick)
+bodyR = math.abs(close - open) / rng
+uw = high - bodyTop
+lw = bodyBot - low
+uwR = uw / rng
+lwR = lw / rng
+wickR = math.max(uw, lw) / rng
+jimplasFlipBuy  = open[1] > close[1] and close > open and lw > 0
+jimplasFlipSell = open[1] < close[1] and close < open and uw > 0
+
+// ── HTF bias (H4 EMA50 + daily HH/HL) ────────────────────────────────────────
+emaH4 = request.security(syminfo.tickerid, "240", ta.ema(close, 50), barmerge.gaps_off, barmerge.lookahead_off)
+dHi0 = request.security(syminfo.tickerid, "D", high, barmerge.gaps_off, barmerge.lookahead_off)
+dHi1 = request.security(syminfo.tickerid, "D", high[1], barmerge.gaps_off, barmerge.lookahead_off)
+dLo0 = request.security(syminfo.tickerid, "D", low, barmerge.gaps_off, barmerge.lookahead_off)
+dLo1 = request.security(syminfo.tickerid, "D", low[1], barmerge.gaps_off, barmerge.lookahead_off)
+bullBias = close > emaH4 and dHi0 > dHi1 and dLo0 > dLo1
+bearBias = close < emaH4 and dHi0 < dHi1 and dLo0 < dLo1
+
+h4Hi = request.security(syminfo.tickerid, "240", ta.highest(high, 4), barmerge.gaps_off, barmerge.lookahead_off)
+h4Lo = request.security(syminfo.tickerid, "240", ta.lowest(low, 4), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Consolidation count in zone (P1)
+consolBars(level) =>
+    zLo = level - zoneHalf
+    zHi = level + zoneHalf
+    cnt = 0
+    for i = 1 to p1ConsolLb
+        bh = math.max(open[i], close[i])
+        bl = math.min(open[i], close[i])
+        if bh <= zHi and bl >= zLo
+            cnt += 1
+    cnt
+
+clampTp(isBuy, entry, sl, rawTp) =>
+    minRp = tpMinPips * pipSize
+    maxRp = tpMaxPips * pipSize
+    float tp = rawTp
+    if not useTpClamp
+        tp
+    else if isBuy
+        if na(tp) or tp <= entry
+            tp := entry + minRp
+        rew = tp - entry
+        if rew < minRp
+            tp := entry + minRp
+        else if rew > maxRp
+            tp := entry + maxRp
+        tp
+    else
+        if na(tp) or tp >= entry
+            tp := entry - minRp
+        rew = entry - tp
+        if rew < minRp
+            tp := entry - minRp
+        else if rew > maxRp
+            tp := entry - maxRp
+        tp
+
+// Broker SL cap for realistic live parity (optional display)
+capSl(isBuy, entry, structSl) =>
+    cap = journalSlPips * pipSize
+    risk = isBuy ? entry - structSl : structSl - entry
+    if risk <= cap
+        structSl
+    else
+        isBuy ? entry - cap : entry + cap
+
+// ── P1: Breakout + retest ─────────────────────────────────────────────────────
+bo = 1
+volOk = (high[bo] - low[bo]) >= atrVal[bo] * p1VolMult
+consolRes = not na(prevRes) ? consolBars(prevRes) : 0
+consolSup = not na(prevSup) ? consolBars(prevSup) : 0
+inRangeRes = consolRes >= p1ConsolMin and consolRes <= p1ConsolMax
+inRangeSup = consolSup >= p1ConsolMin and consolSup <= p1ConsolMax
+
+p1BuyTrig = high > high[bo] or (open > prevRes and close[bo] > prevRes)
+p1SellTrig = low < low[bo] or (open < prevSup and close[bo] < prevSup)
+
+p1Buy = enableP1 and inSession and not na(prevRes) and
+     close[bo] > prevRes and open[bo] <= prevRes and bodyR[bo] >= 0.4 and
+     volOk and inRangeRes and p1BuyTrig
+
+p1Sell = enableP1 and inSession and not na(prevSup) and
+     close[bo] < prevSup and open[bo] >= prevSup and bodyR[bo] >= 0.4 and
+     volOk and inRangeSup and p1SellTrig
+
+slP1Buy  = math.min(low[bo], prevRes) - slBufPips * pipSize
+slP1Sell = math.max(high[bo], prevSup) + slBufPips * pipSize
+tpP1Buy  = clampTp(true, close, slP1Buy, nearestRes())
+tpP1Sell = clampTp(false, close, slP1Sell, nearestSup())
+exitSlP1Buy  = capSl(true, close, slP1Buy)
+exitSlP1Sell = capSl(false, close, slP1Sell)
+
+// ── P2: Wick fill (loose default) ───────────────────────────────────────────
+prevBar = 1
+buyZoneLo  = low[prevBar]
+buyZoneHi  = math.max(open[prevBar], close[prevBar])
+sellZoneLo = math.min(open[prevBar], close[prevBar])
+sellZoneHi = high[prevBar]
+voidBuyPips  = (buyZoneHi - buyZoneLo) / pipSize
+voidSellPips = (sellZoneHi - sellZoneLo) / pipSize
+
+looseBuyWick  = lwR[prevBar] >= p2WickMin
+looseSellWick = uwR[prevBar] >= p2WickMin
+strictBuyWick  = lwR[prevBar] >= p2WickMin and bodyR[prevBar] <= p2MaxBody and voidBuyPips >= p2MinVoid and voidBuyPips <= p2MaxVoid
+strictSellWick = uwR[prevBar] >= p2WickMin and bodyR[prevBar] <= p2MaxBody and voidSellPips >= p2MinVoid and voidSellPips <= p2MaxVoid
+hasBuyWick  = p2Strict ? strictBuyWick : looseBuyWick
+hasSellWick = p2Strict ? strictSellWick : looseSellWick
+
+inBuyZone  = low <= buyZoneHi and high >= buyZoneLo
+inSellZone = high >= sellZoneLo and low <= sellZoneHi
+p2BuyTrig  = p2Strict ? (high > high[prevBar] and close > open and jimplasFlipBuy) : high > high[prevBar]
+p2SellTrig = p2Strict ? (low < low[prevBar] and close < open and jimplasFlipSell) : low < low[prevBar]
+
+voidBuyPx  = buyZoneHi - low[prevBar]
+voidSellPx = high[prevBar] - sellZoneLo
+tpP2BuyBase = close + math.max(voidBuyPx, tpMinPips * pipSize)
+tpP2SellBase = close - math.max(voidSellPx, tpMinPips * pipSize)
+nr = nearestRes()
+ns = nearestSup()
+tpP2BuyRaw = not na(nr) and nr > close ? math.min(tpP2BuyBase, nr) : tpP2BuyBase
+tpP2SellRaw = not na(ns) and ns < close ? math.max(tpP2SellBase, ns) : tpP2SellBase
+
+slP2Buy  = low[prevBar] - slBufPips * pipSize
+slP2Sell = high[prevBar] + slBufPips * pipSize
+tpP2Buy  = clampTp(true, close, slP2Buy, tpP2BuyRaw)
+tpP2Sell = clampTp(false, close, slP2Sell, tpP2SellRaw)
+exitSlP2Buy  = capSl(true, close, slP2Buy)
+exitSlP2Sell = capSl(false, close, slP2Sell)
+
+alignBuy  = not p2Strict or bullBias or jimplasFlipBuy
+alignSell = not p2Strict or bearBias or jimplasFlipSell
+
+p2Buy = enableP2 and inSession and hasBuyWick and inBuyZone and p2BuyTrig and alignBuy and close > slP2Buy
+p2Sell = enableP2 and inSession and hasSellWick and inSellZone and p2SellTrig and alignSell and slP2Sell > close
+
+// ── P3: Session impulse ─────────────────────────────────────────────────────
+p3Buy = enableP3 and sessionStarted and p3Session and bullBias and jimplasFlipBuy and high > h4Hi
+p3Sell = enableP3 and sessionStarted and p3Session and bearBias and jimplasFlipSell and low < h4Lo
+
+slP3Buy = low - slBufPips * pipSize
+slP3Sell = high + slBufPips * pipSize
+tpP3Buy = close + (close - slP3Buy) * p3RR
+tpP3Sell = close - (slP3Sell - close) * p3RR
+tpP3Buy := clampTp(true, close, slP3Buy, tpP3Buy)
+tpP3Sell := clampTp(false, close, slP3Sell, tpP3Sell)
+
+// ── Daily cap (NY calendar day) ───────────────────────────────────────────────
+nyDay = str.format("{0}{1}{2}", year, month, dayofmonth)
+var string lastNyDay = na
+var int dayTrades = 0
+if nyDay != lastNyDay
+    lastNyDay := nyDay
+    dayTrades := 0
+
+signalBuy  = p1Buy or (p2Buy and not p1Buy and not p1Sell) or (p3Buy and not p1Buy and not p1Sell and not p2Buy and not p2Sell)
+signalSell = p1Sell or (p2Sell and not p1Buy and not p1Sell) or (p3Sell and not p1Buy and not p1Sell and not p2Buy and not p2Sell)
+canTrade = dayTrades < maxDaily
+
+// ── Execution (priority P1 > P2 > P3) — exits use journal SL cap when set ─────
+if canTrade and p1Buy
+    dayTrades += 1
+    strategy.entry("P1_BUY", strategy.long, comment="P1 BUY")
+    strategy.exit("P1_BUY_X", "P1_BUY", stop=exitSlP1Buy, limit=tpP1Buy)
+else if canTrade and p1Sell
+    dayTrades += 1
+    strategy.entry("P1_SELL", strategy.short, comment="P1 SELL")
+    strategy.exit("P1_SELL_X", "P1_SELL", stop=exitSlP1Sell, limit=tpP1Sell)
+else if canTrade and p2Buy
+    dayTrades += 1
+    strategy.entry("P2_BUY", strategy.long, comment="P2 BUY")
+    strategy.exit("P2_BUY_X", "P2_BUY", stop=exitSlP2Buy, limit=tpP2Buy)
+else if canTrade and p2Sell
+    dayTrades += 1
+    strategy.entry("P2_SELL", strategy.short, comment="P2 SELL")
+    strategy.exit("P2_SELL_X", "P2_SELL", stop=exitSlP2Sell, limit=tpP2Sell)
+else if canTrade and p3Buy
+    dayTrades += 1
+    strategy.entry("P3_BUY", strategy.long, comment="P3 BUY")
+    strategy.exit("P3_BUY_X", "P3_BUY", stop=slP3Buy, limit=tpP3Buy)
+else if canTrade and p3Sell
+    dayTrades += 1
+    strategy.entry("P3_SELL", strategy.short, comment="P3 SELL")
+    strategy.exit("P3_SELL_X", "P3_SELL", stop=slP3Sell, limit=tpP3Sell)
+
+// ── Visuals ───────────────────────────────────────────────────────────────────
+plot(r1, "R1", color.new(color.red, 40))
+plot(s1, "S1", color.new(color.green, 40))
+plotshape(p1Buy, "P1 Buy", shape.triangleup, location.belowbar, color.green, size=size.tiny, text="P1")
+plotshape(p1Sell, "P1 Sell", shape.triangledown, location.abovebar, color.red, size=size.tiny, text="P1")
+plotshape(p2Buy, "P2 Buy", shape.circle, location.belowbar, color.teal, size=size.tiny, text="P2")
+plotshape(p2Sell, "P2 Sell", shape.circle, location.abovebar, color.orange, size=size.tiny, text="P2")
+plotshape(p3Buy, "P3 Buy", shape.diamond, location.belowbar, color.blue, size=size.tiny, text="P3")
+plotshape(p3Sell, "P3 Sell", shape.diamond, location.abovebar, color.purple, size=size.tiny, text="P3")
+
+bgcolor(inSession ? color.new(color.gray, 92) : na, title="In session")

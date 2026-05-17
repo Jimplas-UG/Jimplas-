@@ -55,11 +55,11 @@ export function computeRisk(
 
   const m30n = m30.length;
   const lastM30 = m30n > 0 ? m30[m30n - 1] : null;
-  const barRangePips =
-    lastM30 != null ? (lastM30.h - lastM30.l) / pip : 0;
+  const barRangePips = lastM30 != null ? (lastM30.h - lastM30.l) / pip : 0;
   const barRangeBlocked = barRangePips > cfg.maxSpreadPips * 10;
   const brokerSpreadBlocked = cfg.currentSpreadPips > cfg.maxSpreadPips;
-  const spreadBlocked = brokerSpreadBlocked || barRangeBlocked;
+  /** Pine: spread_blocked = current_spread > 3.5 only (no bar-range gate). */
+  const spreadBlocked = brokerSpreadBlocked;
   const dxyRising = !!(dxyClose != null && dxyClose3BarsAgo != null && dxyClose > dxyClose3BarsAgo);
   const dxyBlocksBuy = cfg.useDxyFilter && dxyRising;
   const yieldHigh = cfg.useYieldFilter && us10yClose != null && us10yClose > cfg.yieldHighThreshold;

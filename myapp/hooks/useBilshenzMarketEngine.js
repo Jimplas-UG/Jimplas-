@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { InteractionManager, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import {
@@ -8,6 +9,7 @@ import {
   defaultBilshenzConfig,
   nyYmdKey,
   patchBundleLast,
+  m30ToM15Bars,
   resolveJournalOnBar,
   sliceMarketBundleToM30End,
 } from '../engine';
@@ -15,6 +17,145 @@ import {
 const STORAGE_JOURNAL = '@bilshenz_v1/journalRows';
 const STORAGE_TRADES = '@bilshenz_v1/tradeCount';
 const STORAGE_DAY = '@bilshenz_v1/nyYmd';
+
+/** Lightweight placeholder until synthetic bundle is built off the UI thread. */
+const BOOT_SNAPSHOT = {
+  asOf: 0,
+  session: {
+    preLondon: false,
+    london: false,
+    newYork: false,
+    inSession: false,
+    name: 'DEAD',
+    sessionLabel: 'STANDBY',
+  },
+  bias: {
+    ema50H4: null,
+    ema21M30: null,
+    dHigh0: null,
+    dHigh1: null,
+    dLow0: null,
+    dLow1: null,
+    bullStructure: false,
+    bearStructure: false,
+    isBullish: false,
+    isBearish: false,
+  },
+  sr: {
+    r1: null,
+    r2: null,
+    r3: null,
+    s1: null,
+    s2: null,
+    s3: null,
+    r1Flipped: false,
+    r2Flipped: false,
+    r3Flipped: false,
+    s1Flipped: false,
+    s2Flipped: false,
+    s3Flipped: false,
+    nearestRes: null,
+    nearestSup: null,
+    poiRes: null,
+    poiSup: null,
+    flipSupLevel: null,
+    flipResLevel: null,
+    prevNearestRes: null,
+    prevNearestSup: null,
+    zonePip: 0,
+  },
+  range: {
+    bullPips: 0,
+    bearPips: 0,
+    bullRangeOk: false,
+    bearRangeOk: false,
+    bullClean: false,
+    bearClean: false,
+    bullChop: 0,
+    bearChop: 0,
+  },
+  wick: {
+    candleRange: 0,
+    bodySize: 0,
+    upperWick: 0,
+    lowerWick: 0,
+    bodyRatio: 0,
+    wickRatio: 0,
+    upperWickRatio: 0,
+    lowerWickRatio: 0,
+    isDoji: false,
+    isValidBreakout: false,
+    isValidRejection: false,
+    jimplasFlipBuy: false,
+    jimplasFlipSell: false,
+  },
+  risk: {
+    atrVal: null,
+    atrPips: null,
+    atrMode: '—',
+    chopZone: false,
+    brokerSpreadBlocked: false,
+    barRangeBlocked: false,
+    spreadBlocked: false,
+    dxyRising: false,
+    dxyBlocksBuy: false,
+    yieldHigh: false,
+    athZoneBlocked: false,
+    geoMedium: false,
+    geoHigh: false,
+    h4SwingHigh1: null,
+    h4SwingHigh2: null,
+    h4SwingLow1: null,
+    h4SwingLow2: null,
+  },
+  gates: {
+    hasStructure: false,
+    structureOk: false,
+    masterBlock: true,
+    sessionGate: false,
+    liveGateBuy: false,
+    liveGateSell: false,
+    hardBlockBuy: true,
+    hardBlockSell: true,
+    maxTradesReached: false,
+  },
+  signals: {
+    p1Buy: false,
+    p1Sell: false,
+    p2Buy: false,
+    p2Sell: false,
+    p3Buy: false,
+    p3Sell: false,
+    anyBuy: false,
+    anySell: false,
+  },
+  winRate: {
+    totalWins: 0,
+    totalLosses: 0,
+    winRatePct: 0,
+    p1Wr: 0,
+    p2Wr: 0,
+    p3Wr: 0,
+    journal: [],
+  },
+  trade: {
+    allowed: false,
+    side: null,
+    setup: null,
+    entry: null,
+    sl: null,
+    tp1: null,
+    rr: null,
+    confidencePct: 0,
+    reason: '',
+    blocks: [],
+  },
+  structureLevels: { pdh: null, pdl: null, wh: null, wl: null, mh: null, ml: null },
+  dxyClose: null,
+  us10yClose: null,
+  labelGap: 0,
+  slBuffer: 0,
+};
 
 function rowsEqual(a, b) {
   if (a.length !== b.length) return false;
@@ -71,9 +212,20 @@ function engineReducer(state, action) {
     const bar = bundle.m30[bundle.m30.length - 1];
     const idx = bundle.m30.length - 1;
     const timeStr = new Date(now.getTime()).toISOString().slice(11, 16) + ' UTC';
-    const row = buildManualJournalEntry({ trade: t, barIndex: idx, timeStr });
+    const row = buildManualJournalEntry({
+      trade: t,
+      barIndex: idx,
+      timeStr,
+      m30: bundle.m30,
+      cfg: action.cfg ?? defaultBilshenzConfig,
+    });
     if (!row) return state;
-    const resolved = resolveJournalOnBar(state.journalRows, bar, idx);
+    const m15 = m30ToM15Bars(bundle.m30);
+    const resolved = resolveJournalOnBar(state.journalRows, bar, idx, {
+      m30: bundle.m30,
+      m15,
+      cfg: action.cfg ?? defaultBilshenzConfig,
+    });
     const nextRows = [row, ...resolved].slice(0, 20);
     return {
       ...state,
@@ -82,17 +234,19 @@ function engineReducer(state, action) {
     };
   }
   if (action.type === 'TICK') {
-    const { bundle, snapshot, cfg, now } = action;
+    const { bundle, snapshot, cfg, now, countSignalTowardCap = true } = action;
     const bar = bundle.m30[bundle.m30.length - 1];
     const idx = bundle.m30.length - 1;
-    const resolved = resolveJournalOnBar(state.journalRows, bar, idx);
+    const m15 = m30ToM15Bars(bundle.m30);
+    const journalCtx = { m30: bundle.m30, m15, cfg: action.cfg ?? defaultBilshenzConfig };
+    const resolved = resolveJournalOnBar(state.journalRows, bar, idx, journalCtx);
     const sig = snapshot.signals.anyBuy || snapshot.signals.anySell;
 
     if (sig && state.lastBarSig !== bar.t) {
       const maxDailyTrades = action.cfg?.maxDailyTrades ?? 5;
       let nextRows = resolved;
       let nextCount = state.tradeCount;
-      if (state.tradeCount < maxDailyTrades) {
+      if (countSignalTowardCap && state.tradeCount < maxDailyTrades) {
         const tr = snapshot.trade;
         const sideMatch =
           (tr?.side === 'BUY' && snapshot.signals.anyBuy) ||
@@ -103,6 +257,18 @@ function engineReducer(state, action) {
           if (row) {
             nextRows = [row, ...resolved].slice(0, 20);
             nextCount = Math.min(maxDailyTrades, state.tradeCount + 1);
+          }
+        }
+      } else if (!countSignalTowardCap && state.tradeCount < maxDailyTrades) {
+        const tr = snapshot.trade;
+        const sideMatch =
+          (tr?.side === 'BUY' && snapshot.signals.anyBuy) ||
+          (tr?.side === 'SELL' && snapshot.signals.anySell);
+        if (tr?.allowed && sideMatch) {
+          const timeStr = new Date(now.getTime()).toISOString().slice(11, 16) + ' UTC';
+          const row = buildManualJournalEntry({ trade: tr, barIndex: idx, timeStr });
+          if (row) {
+            nextRows = [row, ...resolved].slice(0, 20);
           }
         }
       }
@@ -137,6 +303,10 @@ function engineReducer(state, action) {
  * @param {number} [p.initialTradeCount]
  * @param {'live'|'backtest'} [p.runMode]
  * @param {number} [p.backtestEndIndex] — inclusive M30 index into the full synthetic series (only when runMode === 'backtest')
+ * @param {import('../engine').MarketBundle | null} [p.mt5MarketBundle] — live M30 bundle from MT5 API (replaces synthetic when set)
+ * @param {boolean} [p.useMt5Data] — when true in live mode, do not build synthetic bars (wait for MT5 bundle)
+ * @param {boolean} [p.mt5Connected] — blocks synthetic bundle while MT5 bridge is on (live mode)
+ * @param {boolean} [p.countSignalTowardCap] — when false, journal row on signal but daily cap increments only via broker ACK
  */
 export function useBilshenzMarketEngine({
   price,
@@ -152,11 +322,55 @@ export function useBilshenzMarketEngine({
   initialTradeCount = 0,
   runMode = 'live',
   backtestEndIndex = 0,
+  mt5MarketBundle = null,
+  useMt5Data = false,
+  mt5Connected = false,
+  countSignalTowardCap = true,
 }) {
+  const anchorPriceRef = useRef(price);
   const baseRef = useRef(null);
-  if (!baseRef.current) {
-    baseRef.current = buildSyntheticMarketBundle({ anchorClose: price, count: 480 });
-  }
+  const prevUseMt5Ref = useRef(useMt5Data);
+  const [bundleReady, setBundleReady] = useState(false);
+
+  useEffect(() => {
+    if (runMode !== 'live') return;
+    if (useMt5Data) {
+      if (!mt5MarketBundle?.m30?.length) {
+        baseRef.current = null;
+        setBundleReady(false);
+        return;
+      }
+      baseRef.current = mt5MarketBundle;
+      anchorPriceRef.current = mt5MarketBundle.m30[mt5MarketBundle.m30.length - 1].c;
+      setBundleReady(true);
+      return;
+    }
+    if (prevUseMt5Ref.current && !useMt5Data) {
+      baseRef.current = null;
+      setBundleReady(false);
+    }
+    prevUseMt5Ref.current = useMt5Data;
+  }, [mt5MarketBundle, runMode, useMt5Data]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const barCount = Platform.OS === 'web' ? 480 : 320;
+    const build = () => {
+      if (cancelled || baseRef.current) return;
+      if (runMode === 'live' && (useMt5Data || mt5Connected)) return;
+      if (runMode === 'live' && mt5MarketBundle?.m30?.length) return;
+      baseRef.current = buildSyntheticMarketBundle({
+        anchorClose: anchorPriceRef.current,
+        count: barCount,
+      });
+      setBundleReady(true);
+    };
+    const handle = InteractionManager.runAfterInteractions(build);
+    return () => {
+      cancelled = true;
+      handle.cancel?.();
+    };
+  }, [runMode, mt5MarketBundle, useMt5Data, mt5Connected]);
 
   const [state, dispatch] = useReducer(engineReducer, {
     journalRows: [],
@@ -179,21 +393,28 @@ export function useBilshenzMarketEngine({
     prevRunMode.current = runMode;
   }, [runMode]);
 
-  const baseM30Len = baseRef.current.m30.length;
+  const baseM30Len = baseRef.current?.m30?.length ?? 0;
   const clampedBtEnd = useMemo(() => {
+    if (!bundleReady || baseM30Len < 1) return 0;
     if (runMode !== 'backtest') return baseM30Len - 1;
     const max = baseM30Len - 1;
     const min = Math.min(80, max);
     const raw = Number.isFinite(backtestEndIndex) ? Math.floor(backtestEndIndex) : max;
     return Math.max(min, Math.min(max, raw));
-  }, [runMode, backtestEndIndex, baseM30Len]);
+  }, [bundleReady, runMode, backtestEndIndex, baseM30Len]);
 
   const bundle = useMemo(() => {
+    if (!bundleReady || !baseRef.current) return null;
+    const base = baseRef.current;
     if (runMode === 'backtest') {
-      return sliceMarketBundleToM30End(baseRef.current, clampedBtEnd);
+      return sliceMarketBundleToM30End(base, clampedBtEnd);
     }
-    return patchBundleLast(baseRef.current, price, dxy, us10y ?? 4.35);
-  }, [runMode, clampedBtEnd, price, dxy, us10y]);
+    const lastDx = base.dxyCloseSeries?.length ? base.dxyCloseSeries[base.dxyCloseSeries.length - 1] : 99;
+    const lastUy = base.us10yCloseSeries?.length ? base.us10yCloseSeries[base.us10yCloseSeries.length - 1] : 4.35;
+    const dx = useMt5Data ? (dxy ?? lastDx) : dxy;
+    const uy = useMt5Data ? (us10y ?? lastUy) : (us10y ?? 4.35);
+    return patchBundleLast(base, price, dx, uy);
+  }, [bundleReady, runMode, clampedBtEnd, price, dxy, us10y, useMt5Data]);
 
   const cfg = useMemo(() => {
     const cap = Number.isFinite(maxDailyTrades) ? Math.max(1, Math.min(10, Math.floor(maxDailyTrades))) : 5;
@@ -213,23 +434,22 @@ export function useBilshenzMarketEngine({
   }, [spread, geoRisk, newsActive, nfpBlackout, maxDailyTrades, simUsdPerEnginePip]);
 
   const nowUtcMs = useMemo(() => {
-    if (runMode === 'backtest' && bundle.m30.length) {
+    if (runMode === 'backtest' && bundle?.m30?.length) {
       return bundle.m30[bundle.m30.length - 1].t;
     }
     return now.getTime();
-  }, [runMode, bundle.m30, now]);
+  }, [runMode, bundle, now]);
 
-  const snapshot = useMemo(
-    () =>
-      computeBilshenzSnapshot({
-        bundle,
-        cfg,
-        dailyTradeCount: state.tradeCount,
-        journalRows: state.journalRows,
-        nowUtcMs,
-      }),
-    [bundle, cfg, state.tradeCount, state.journalRows, nowUtcMs]
-  );
+  const snapshot = useMemo(() => {
+    if (!bundle) return BOOT_SNAPSHOT;
+    return computeBilshenzSnapshot({
+      bundle,
+      cfg,
+      dailyTradeCount: state.tradeCount,
+      journalRows: state.journalRows,
+      nowUtcMs,
+    });
+  }, [bundle, cfg, state.tradeCount, state.journalRows, nowUtcMs]);
 
   const bundleRef = useRef(bundle);
   const snapshotRef = useRef(snapshot);
@@ -295,27 +515,29 @@ export function useBilshenzMarketEngine({
     }
   }, [now, state.liveFrozen]);
 
-  const lastBar = bundle.m30[bundle.m30.length - 1];
+  const lastBar = bundle?.m30?.length ? bundle.m30[bundle.m30.length - 1] : null;
   const tickNow = useMemo(() => {
-    if (runMode === 'backtest' && bundle.m30.length) {
+    if (runMode === 'backtest' && bundle?.m30?.length) {
       return new Date(bundle.m30[bundle.m30.length - 1].t);
     }
     return now;
-  }, [runMode, bundle.m30, now]);
+  }, [runMode, bundle, now]);
 
   useEffect(() => {
+    if (!lastBar || !bundleRef.current) return;
     dispatch({
       type: 'TICK',
       bundle: bundleRef.current,
       snapshot: snapshotRef.current,
       cfg,
       now: tickNow,
+      countSignalTowardCap,
     });
   }, [
-    lastBar.t,
-    lastBar.c,
-    lastBar.h,
-    lastBar.l,
+    lastBar?.t,
+    lastBar?.c,
+    lastBar?.h,
+    lastBar?.l,
     snapshot.signals.anyBuy,
     snapshot.signals.anySell,
     snapshot.trade?.allowed,
@@ -329,11 +551,13 @@ export function useBilshenzMarketEngine({
     cfg,
     tickNow.getTime(),
     runMode,
+    countSignalTowardCap,
   ]);
 
   const incrementExecuteTrade = useCallback(() => {
     const b = bundleRef.current;
-    const simNow = runMode === 'backtest' && b.m30.length ? new Date(b.m30[b.m30.length - 1].t) : new Date();
+    if (!b?.m30?.length) return;
+    const simNow = runMode === 'backtest' ? new Date(b.m30[b.m30.length - 1].t) : new Date();
     dispatch({
       type: 'EXEC',
       maxDailyTrades: cfg.maxDailyTrades,
@@ -357,9 +581,10 @@ export function useBilshenzMarketEngine({
     bundle,
     cfg,
     hydrated: state.hydrated,
+    bundleReady,
     backtestActive: !!state.liveFrozen,
     m30BaseLength: baseM30Len,
     backtestEndClamped: clampedBtEnd,
-    backtestWarmupMin: Math.min(80, baseM30Len - 1),
+    backtestWarmupMin: Math.min(80, Math.max(0, baseM30Len - 1)),
   };
 }

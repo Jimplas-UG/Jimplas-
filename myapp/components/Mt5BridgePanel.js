@@ -1,8 +1,14 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useMt5Bridge } from '../contexts/Mt5BridgeContext';
+import { useBilshenzTheme } from '../contexts/ThemeContext';
+import { formatMt5NetworkError, getMetroLanHost, isLocalhostApiUrl } from '../utils/mt5ApiUrl';
 
-const DEFAULT_API =
-  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_MT5_API_URL) || 'http://127.0.0.1:8765';
+const STORAGE_MT5_SERVER = '@bilshenz_v1/mt5Server';
+const STORAGE_MT5_LOGIN = '@bilshenz_v1/mt5Login';
+const STORAGE_MT5_PASSWORD = '@bilshenz_v1/mt5Password';
+const STORAGE_MT5_REMEMBER = '@bilshenz_v1/mt5RememberCreds';
 
 const styles = StyleSheet.create({
   title: { fontSize: 11, fontWeight: '800', color: '#c9b87c', letterSpacing: 1.2, marginTop: 14 },
@@ -42,20 +48,78 @@ const styles = StyleSheet.create({
   miniBtn: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center', backgroundColor: 'rgba(60,120,200,0.35)' },
   miniBtnR: { backgroundColor: 'rgba(200,60,60,0.35)' },
   miniTxt: { fontWeight: '800', fontSize: 11, color: '#eee' },
+  lanBtn: {
+    marginTop: 8,
+    paddingVertical: 9,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(212,180,90,0.45)',
+    alignItems: 'center',
+    backgroundColor: 'rgba(212,180,90,0.12)',
+  },
+  lanBtnTxt: { fontSize: 10, fontWeight: '800', color: '#e8d4a0', letterSpacing: 0.8 },
+  testBtn: {
+    marginTop: 8,
+    paddingVertical: 9,
+    borderRadius: 8,
+    alignItems: 'center',
+    backgroundColor: 'rgba(80,120,80,0.25)',
+    borderWidth: 1,
+    borderColor: 'rgba(120,200,120,0.35)',
+  },
+  testBtnTxt: { fontSize: 10, fontWeight: '800', color: '#b8e8b8', letterSpacing: 0.6 },
+  pwRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6, gap: 8 },
+  pwInp: { flex: 1, marginTop: 0, paddingRight: 8 },
+  eyeBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    backgroundColor: 'rgba(0,0,0,0.22)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  eyeTxt: { fontSize: 18, color: 'rgba(242,226,197,0.85)' },
+  rememberRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
+  rememberLbl: { fontSize: 10, color: 'rgba(255,255,255,0.55)', flex: 1, paddingRight: 8 },
+  forgetBtn: { marginTop: 4, alignSelf: 'flex-start' },
+  forgetTxt: { fontSize: 10, color: 'rgba(212,180,90,0.75)', textDecorationLine: 'underline' },
 });
 
-export function Mt5BridgePanel() {
-  const [baseUrl, setBaseUrl] = useState(DEFAULT_API.replace(/\/$/, ''));
+function Mt5BridgePanel() {
+  const { colors: C } = useBilshenzTheme();
+  const metroLan = getMetroLanHost();
+  const { baseUrl, setBaseUrl, connected, setConnected } = useMt5Bridge();
+  const skin = useMemo(
+    () => ({
+      title: { color: C.gold },
+      card: { borderColor: C.border, backgroundColor: 'rgba(0,0,0,0.28)' },
+      rowLab: { color: C.dim },
+      inp: { borderColor: C.border, color: C.text, backgroundColor: 'rgba(0,0,0,0.22)' },
+      hint: { color: C.dim },
+      posTxt: { color: C.text },
+      btnTxt: { color: '#f2e6c5' },
+    }),
+    [C]
+  );
+
+  useEffect(() => {
+    if (metroLan && isLocalhostApiUrl(baseUrl)) setBaseUrl(`http://${metroLan}:8765`);
+  }, [metroLan, baseUrl, setBaseUrl]);
   const [server, setServer] = useState('');
   const [login, setLogin] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [rememberCreds, setRememberCreds] = useState(true);
+  const [credsHydrated, setCredsHydrated] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [connected, setConnected] = useState(false);
   const [account, setAccount] = useState(null);
   const [positions, setPositions] = useState([]);
   const [tick, setTick] = useState(null);
   const pollRef = useRef(null);
+  const autoConnectTried = useRef(false);
 
   const stopPoll = () => {
     if (pollRef.current) {
@@ -79,17 +143,95 @@ export function Mt5BridgePanel() {
       setTick(tk);
       setErr('');
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+      const raw = e instanceof Error ? e.message : String(e);
+      setErr(formatMt5NetworkError(raw, b));
     }
   }, [baseUrl]);
 
   useEffect(() => () => stopPoll(), []);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [[, srv], [, log], [, pwd], [, rem]] = await AsyncStorage.multiGet([
+          STORAGE_MT5_SERVER,
+          STORAGE_MT5_LOGIN,
+          STORAGE_MT5_PASSWORD,
+          STORAGE_MT5_REMEMBER,
+        ]);
+        if (cancelled) return;
+        const remember = rem !== '0';
+        setRememberCreds(remember);
+        if (remember) {
+          if (srv) setServer(srv);
+          if (log) setLogin(log);
+          if (pwd) setPassword(pwd);
+        }
+      } catch {
+        /* ignore */
+      } finally {
+        if (!cancelled) setCredsHydrated(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const persistCredentials = useCallback(async (srv, log, pwd, remember) => {
+    try {
+      if (!remember) {
+        await AsyncStorage.multiRemove([STORAGE_MT5_SERVER, STORAGE_MT5_LOGIN, STORAGE_MT5_PASSWORD]);
+        await AsyncStorage.setItem(STORAGE_MT5_REMEMBER, '0');
+        return;
+      }
+      await AsyncStorage.multiSet([
+        [STORAGE_MT5_SERVER, srv],
+        [STORAGE_MT5_LOGIN, log],
+        [STORAGE_MT5_PASSWORD, pwd],
+        [STORAGE_MT5_REMEMBER, '1'],
+      ]);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!credsHydrated || !rememberCreds) return;
+    const t = setTimeout(() => {
+      void persistCredentials(server.trim(), login.trim(), password, true);
+    }, 600);
+    return () => clearTimeout(t);
+  }, [server, login, password, rememberCreds, credsHydrated, persistCredentials]);
+
+  const onForgetCredentials = () => {
+    setServer('');
+    setLogin('');
+    setPassword('');
+    setRememberCreds(false);
+    void persistCredentials('', '', '', false);
+  };
+
+  const ensureApiReachable = async (b) => {
+    const health = await fetch(`${b}/health`, { method: 'GET' });
+    if (!health.ok) {
+      const txt = await health.text().catch(() => '');
+      throw new Error(`API not running (HTTP ${health.status}${txt ? `: ${txt}` : ''})`);
+    }
+  };
+
   const onConnect = async () => {
     setBusy(true);
     setErr('');
+    const b = baseUrl.trim();
+    if (!b) {
+      setErr('Set API BASE URL first (e.g. http://127.0.0.1:8765 on this PC, or http://PC_IP:8765 from phone).');
+      setBusy(false);
+      return;
+    }
     try {
-      const b = baseUrl.trim();
+      await ensureApiReachable(b);
       const res = await fetch(`${b}/api/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -103,16 +245,26 @@ export function Mt5BridgePanel() {
       if (!res.ok) throw new Error(j.detail || JSON.stringify(j));
       setConnected(true);
       setAccount(j.account || null);
+      await persistCredentials(server.trim(), login.trim(), password, rememberCreds);
       stopPoll();
       pollRef.current = setInterval(refresh, 3000);
       await refresh();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+      const raw = e instanceof Error ? e.message : String(e);
+      setErr(formatMt5NetworkError(raw, b));
       setConnected(false);
     } finally {
       setBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (!credsHydrated || connected || busy || autoConnectTried.current) return;
+    if (!server.trim() || !login.trim() || !password) return;
+    autoConnectTried.current = true;
+    void onConnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot auto login on launch
+  }, [credsHydrated, connected, busy, server, login, password]);
 
   const onDisconnect = async () => {
     setBusy(true);
@@ -143,24 +295,58 @@ export function Mt5BridgePanel() {
       if (!res.ok) throw new Error(typeof j.detail === 'string' ? j.detail : JSON.stringify(j));
       await refresh();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+      const raw = e instanceof Error ? e.message : String(e);
+      setErr(formatMt5NetworkError(raw, b));
+    }
+  };
+
+  const applyLanUrl = () => {
+    if (metroLan) setBaseUrl(`http://${metroLan}:8765`);
+  };
+
+  const onTestApi = async () => {
+    setBusy(true);
+    setErr('');
+    const b = baseUrl.trim();
+    try {
+      const res = await fetch(`${b}/health`, { method: 'GET' });
+      const txt = await res.text();
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${txt}`);
+      setErr('');
+      setConnected(false);
+      Alert.alert('API reachable', `${txt}\n\nNow tap CONNECT MT5.`);
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e);
+      setErr(formatMt5NetworkError(raw, b));
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
     <View>
-      <Text style={styles.title}>MT5 PYTHON API</Text>
-      <View style={styles.card}>
-        <Text style={styles.rowLab}>API BASE URL</Text>
+      <Text style={[styles.title, skin.title]}>MT5 PYTHON API</Text>
+      <View style={[styles.card, skin.card]}>
+        <Text style={[styles.rowLab, skin.rowLab]}>API BASE URL</Text>
         <TextInput
-          style={styles.inp}
+          style={[styles.inp, skin.inp]}
           value={baseUrl}
-          onChangeText={setBaseUrl}
+          onChangeText={(t) => setBaseUrl(t)}
           autoCapitalize="none"
           autoCorrect={false}
-          placeholder="http://PC-IP:8765"
+          placeholder={metroLan ? `http://${metroLan}:8765` : 'http://192.168.x.x:8765'}
           placeholderTextColor="#666"
         />
+        {Platform.OS !== 'web' && isLocalhostApiUrl(baseUrl) ? (
+          <Text style={[styles.hint, { color: '#ffb86c', marginTop: 6 }]}>
+            127.0.0.1 will not reach your PC from a phone. Use your Windows LAN IP (same Wi‑Fi as Expo).
+          </Text>
+        ) : null}
+        {metroLan ? (
+          <Pressable style={styles.lanBtn} onPress={applyLanUrl}>
+            <Text style={styles.lanBtnTxt}>USE PC IP FROM EXPO ({metroLan})</Text>
+          </Pressable>
+        ) : null}
         <Text style={styles.rowLab}>SERVER</Text>
         <TextInput
           style={styles.inp}
@@ -173,14 +359,49 @@ export function Mt5BridgePanel() {
         <Text style={styles.rowLab}>LOGIN</Text>
         <TextInput style={styles.inp} value={login} onChangeText={setLogin} keyboardType="numeric" placeholder="12345678" placeholderTextColor="#666" />
         <Text style={styles.rowLab}>PASSWORD</Text>
-        <TextInput
-          style={styles.inp}
-          value={password}
-          onChangeText={setPassword}
-          secureTextEntry
-          placeholder="••••••••"
-          placeholderTextColor="#666"
-        />
+        <View style={styles.pwRow}>
+          <TextInput
+            style={[styles.inp, styles.pwInp]}
+            value={password}
+            onChangeText={setPassword}
+            secureTextEntry={!showPassword}
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="••••••••"
+            placeholderTextColor="#666"
+          />
+          <Pressable
+            style={styles.eyeBtn}
+            onPress={() => setShowPassword((v) => !v)}
+            accessibilityRole="button"
+            accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}>
+            <Text style={styles.eyeTxt}>{showPassword ? '🙈' : '👁'}</Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.rememberRow}>
+          <Text style={styles.rememberLbl}>Remember login on this device</Text>
+          <Pressable
+            onPress={() => {
+              const next = !rememberCreds;
+              setRememberCreds(next);
+              if (!next) void persistCredentials('', '', '', false);
+            }}
+            hitSlop={8}>
+            <Text style={[styles.status, { color: rememberCreds ? '#6dffb0' : '#888', marginTop: 0 }]}>
+              {rememberCreds ? 'ON' : 'OFF'}
+            </Text>
+          </Pressable>
+        </View>
+        {rememberCreds && (server || login) ? (
+          <Pressable style={styles.forgetBtn} onPress={onForgetCredentials}>
+            <Text style={styles.forgetTxt}>Clear saved credentials</Text>
+          </Pressable>
+        ) : null}
+
+        <Pressable style={styles.testBtn} onPress={onTestApi} disabled={busy}>
+          <Text style={styles.testBtnTxt}>TEST API (must pass before CONNECT)</Text>
+        </Pressable>
 
         {!connected ? (
           <Pressable style={styles.btn} onPress={onConnect} disabled={busy}>
@@ -236,9 +457,12 @@ export function Mt5BridgePanel() {
 
         {err ? <Text style={[styles.hint, { color: '#ff7a8a', marginTop: 8 }]}>{err}</Text> : null}
         <Text style={[styles.hint, { marginTop: 10 }]}>
-          Run Python API on the same Windows PC as MT5 (see mt5_trading_system/install.md). Set EXPO_PUBLIC_MT5_API_URL when building Expo.
+          On PC: run npm run mt5-api (or start-api.ps1) with MT5 open and logged in. Phone API URL = PC LAN IP:8765
+          (not 127.0.0.1). Profile → AUTO-EXECUTE sends real orders when CONNECTED (demo first).
         </Text>
       </View>
     </View>
   );
 }
+
+export default Mt5BridgePanel;

@@ -63,7 +63,12 @@ export async function postBrokerOrderWebhook(
 /** Build JSON body for a webhook bridge (only when `trade.side` is BUY or SELL). */
 export function buildBrokerOrderIntent(
   trade: TradeRecommendation,
-  opts: { barTimeMs: number | null; runMode: 'live' | 'backtest'; trigger?: 'manual' | 'auto' }
+  opts: {
+    barTimeMs: number | null;
+    runMode: 'live' | 'backtest';
+    trigger?: 'manual' | 'auto';
+    symbol?: string;
+  }
 ): BrokerOrderIntent | null {
   if (trade.side !== 'BUY' && trade.side !== 'SELL') return null;
   const setup = trade.setup === 'P1' || trade.setup === 'P2' || trade.setup === 'P3' ? trade.setup : 'NONE';
@@ -72,7 +77,7 @@ export function buildBrokerOrderIntent(
   return {
     source: 'bilshenz_v3',
     intentAtIso,
-    symbol: 'XAUUSD',
+    symbol: opts.symbol?.trim() || 'XAUUSD',
     side: trade.side,
     setup,
     entry: trade.entry,

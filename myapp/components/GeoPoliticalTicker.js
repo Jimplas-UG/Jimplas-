@@ -1,10 +1,14 @@
-import React, { useCallback, useEffect } from 'react';
-import { Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
-import Animated, {
-  useAnimatedStyle,
-  useFrameCallback,
-  useSharedValue,
-} from 'react-native-reanimated';
+import React, { useCallback, useEffect, useRef } from 'react';
+import {
+  Animated,
+  Easing,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 
 const THEME = {
   barBg: '#0C0A07',
@@ -38,7 +42,7 @@ function AlertDot({ color }) {
   );
 }
 
-function TickerSegment({ fontSize, lineHeight, labels }) {
+function TickerSegment({ fontSize, lineHeight, labels, tapeTheme }) {
   return (
     <View style={styles.segment}>
       {labels.map((label, i) => (
@@ -47,12 +51,24 @@ function TickerSegment({ fontSize, lineHeight, labels }) {
           <Text
             style={[
               styles.itemText,
-              { fontSize, lineHeight, textShadowColor: THEME.glow, fontFamily: TAPE_FONT },
+              {
+                fontSize,
+                lineHeight,
+                color: tapeTheme.text,
+                textShadowColor: tapeTheme.glow,
+                fontFamily: TAPE_FONT,
+              },
             ]}
             numberOfLines={1}>
             {label}
           </Text>
-          <Text style={[styles.sep, { fontSize: fontSize - 1, fontFamily: TAPE_FONT }]}>·</Text>
+          <Text
+            style={[
+              styles.sep,
+              { fontSize: fontSize - 1, color: tapeTheme.textMuted, fontFamily: TAPE_FONT },
+            ]}>
+            ·
+          </Text>
         </View>
       ))}
     </View>
@@ -61,79 +77,114 @@ function TickerSegment({ fontSize, lineHeight, labels }) {
 
 /**
  * Infinite horizontal tape (RTL) for geopolitical / market-style alerts.
- * Hold to pause; release to resume. Uses Reanimated frame loop for seamless wrap.
+ * Hold to pause; release to resume. Uses RN Animated (Expo Go–safe on Android).
  *
  * @param {object} [style] — outer container style
- * @param {number} [loopDurationMs=21000] — time (ms) to scroll one full strip (~18–25s recommended)
- * @param {string[]} [items] — when set, tape shows these strings (e.g. live engine risk strip); else fallback demo labels
+ * @param {number} [loopDurationMs=21000] — time (ms) to scroll one full strip
+ * @param {string[]} [items] — when set, tape shows these strings; else fallback demo labels
  */
-export default function GeoPoliticalTicker({ style, loopDurationMs = 21000, items }) {
+export default function GeoPoliticalTicker({ style, loopDurationMs = 21000, items, tapeTheme }) {
+  const theme = tapeTheme ?? THEME;
   const { width: windowWidth } = useWindowDimensions();
   const fontSize = windowWidth < 360 ? 10.5 : 11.5;
   const lineHeight = fontSize + 6;
 
   const labels =
-    Array.isArray(items) && items.length > 0 ? items.filter((s) => typeof s === 'string' && s.trim().length > 0) : FALLBACK_TICKER_ITEMS;
+    Array.isArray(items) && items.length > 0
+      ? items.filter((s) => typeof s === 'string' && s.trim().length > 0)
+      : FALLBACK_TICKER_ITEMS;
 
-  const translateX = useSharedValue(0);
-  const contentWidth = useSharedValue(0);
-  const paused = useSharedValue(false);
-  const loopMsSv = useSharedValue(loopDurationMs);
+  const labelsKey = labels.join('|');
+
+  const translateX = useRef(new Animated.Value(0)).current;
+  const segmentWRef = useRef(0);
+  const lastLayoutWRef = useRef(0);
+  const loopRef = useRef(null);
+  const pausedRef = useRef(false);
+  const durationRef = useRef(Math.max(4000, loopDurationMs));
+
+  const stopMarquee = useCallback(() => {
+    if (loopRef.current) {
+      loopRef.current.stop();
+      loopRef.current = null;
+    }
+  }, []);
+
+  const startMarquee = useCallback(
+    (segmentW) => {
+      if (segmentW <= 0) return;
+      stopMarquee();
+      segmentWRef.current = segmentW;
+      translateX.setValue(0);
+      const duration = durationRef.current;
+      const loop = Animated.loop(
+        Animated.sequence([
+          Animated.timing(translateX, {
+            toValue: -segmentW,
+            duration,
+            easing: Easing.linear,
+            useNativeDriver: true,
+          }),
+          Animated.timing(translateX, {
+            toValue: 0,
+            duration: 0,
+            useNativeDriver: true,
+          }),
+        ])
+      );
+      loopRef.current = loop;
+      if (!pausedRef.current) loop.start();
+    },
+    [stopMarquee, translateX]
+  );
 
   useEffect(() => {
-    loopMsSv.value = loopDurationMs;
-  }, [loopDurationMs, loopMsSv]);
+    lastLayoutWRef.current = 0;
+  }, [labelsKey]);
+
+  useEffect(() => {
+    durationRef.current = Math.max(4000, loopDurationMs);
+    if (segmentWRef.current > 0 && !pausedRef.current) {
+      startMarquee(segmentWRef.current);
+    }
+  }, [loopDurationMs, startMarquee]);
+
+  useEffect(() => () => stopMarquee(), [stopMarquee]);
 
   const onStripLayout = useCallback(
     (e) => {
       const w = e.nativeEvent.layout.width;
-      if (w > 0) {
-        contentWidth.value = w;
-      }
+      if (w <= 0) return;
+      if (Math.abs(w - lastLayoutWRef.current) < 2) return;
+      lastLayoutWRef.current = w;
+      startMarquee(w);
     },
-    [contentWidth]
+    [startMarquee]
   );
 
-  const onFrame = useCallback((frame) => {
-    'worklet';
-    const w = contentWidth.value;
-    if (w <= 0) return;
-    if (paused.value) return;
-
-    const dt = frame.timeSincePreviousFrame;
-    if (dt == null || dt <= 0 || dt > 120) return;
-
-    const loopMs = Math.max(4000, loopMsSv.value);
-    const pxPerMs = w / loopMs;
-    let next = translateX.value - pxPerMs * dt;
-    while (next <= -w) {
-      next += w;
-    }
-    translateX.value = next;
-  }, []);
-
-  useFrameCallback(onFrame, true);
-
-  const animatedStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: translateX.value }],
-  }));
-
   const onPressIn = useCallback(() => {
-    paused.value = true;
-  }, [paused]);
+    pausedRef.current = true;
+    stopMarquee();
+  }, [stopMarquee]);
 
   const onPressOut = useCallback(() => {
-    paused.value = false;
-  }, [paused]);
+    pausedRef.current = false;
+    if (segmentWRef.current > 0) startMarquee(segmentWRef.current);
+  }, [startMarquee]);
 
   return (
-    <View style={[styles.outer, style]}>
+    <View
+      style={[
+        styles.outer,
+        { borderColor: theme.barBorder, backgroundColor: theme.barBg },
+        style,
+      ]}>
       <View style={styles.clip}>
-        <Animated.View style={[styles.track, animatedStyle]}>
+        <Animated.View style={[styles.track, { transform: [{ translateX }] }]}>
           <View onLayout={onStripLayout} style={styles.measureWrap} collapsable={false}>
-            <TickerSegment fontSize={fontSize} lineHeight={lineHeight} labels={labels} />
+            <TickerSegment fontSize={fontSize} lineHeight={lineHeight} labels={labels} tapeTheme={theme} />
           </View>
-          <TickerSegment key="__dup" fontSize={fontSize} lineHeight={lineHeight} labels={labels} />
+          <TickerSegment key="__dup" fontSize={fontSize} lineHeight={lineHeight} labels={labels} tapeTheme={theme} />
         </Animated.View>
       </View>
       <Pressable
@@ -154,8 +205,6 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderColor: THEME.barBorder,
-    backgroundColor: THEME.barBg,
   },
   clip: {
     overflow: 'hidden',
@@ -209,7 +258,6 @@ const styles = StyleSheet.create({
     textShadowRadius: 10,
   },
   sep: {
-    color: THEME.textMuted,
     marginLeft: 10,
     fontWeight: '300',
     opacity: 0.85,

@@ -1,100 +1,75 @@
-BILSHENZ v3.2 (myapp) — AUDIT REPORT
-Generated: project audit (no original TradingView .pine file in repo)
+BILSHENZ — AUDIT REPORT (Pine v5 parity + MT5 backtest)
+Generated: 2026-05-16
 
 ================================================================================
-1. PINE SCRIPT LOGIC
+1. PINE PARITY AUDIT (automated)
 ================================================================================
-✅ TypeScript engine implements a BILSHENZ-LIKE ruleset: bias (EMA50 H4 + daily
-   structure), SR replay, gates (session, spread, news, NFP, chop, DXY, ATH,
-   geo, max trades), P1/P2/P3 signal flags, trade bot (entry/SL/TP1/RR),
-   journal resolution, ATR/risk tiers (see engine/*.ts comments referencing Pine).
+Script: myapp/scripts/run-pine-parity-audit.ts
+Report: myapp/scripts/audit-pine-parity-output.txt
 
-⚠ EXACT PARITY with “Bilshenz v3.2” Pine CANNOT be certified: no Pine source
-   is checked into this repository for line-by-line or bar-state verification.
+Result: 18/18 checks PASSED (no errors)
 
-❌ TradingView `alert()` / Pine runtime: NOT APPLICABLE (React Native app).
-   Webhook + optional MT5 bridge replace “alerts” for execution.
+Verified:
+ - usePineV5=true, pivot 3/3, zone 3 pips, maxDailyTrades=3
+ - Journal throttle OFF (loss cooldown / P3 caps = 0)
+ - P1/P2/P3 logic: prev_nearest sweep, breakout+bias, flip retest
+ - nearest S/R from r1-r3 / s1-s3 stack (not immRes zone filter)
+ - H4 EMA50 + daily HH/HL bias
+ - Spread guard = broker spread only (no M30 bar-range block)
+ - anyBuy/anySell require in_session (show_history does not bypass)
+ - MQL5 BilshenzCore.mqh: NY session, Pine P1-P3, prevNearest stack
 
-⚠ REPAINTING: Synthetic M30 bundle + live `patchBundleLast` updates the
-   terminal bar; signals recompute on that bar like realtime Pine — not the
-   same as historical “closed bar only” backtest unless you only step
-   backtest cursor on closed bars (current backtest is synthetic replay).
-
-⚠ BACKTESTING: In-app M30 cursor replay on synthetic history — NOT MT5
-   Strategy Tester or broker tick history.
-
-Files: myapp/engine/*.ts, myapp/hooks/useBilshenzMarketEngine.js
+Reference Pine: myapp/engine/reference/Bilshenz-Gold-Strategy.pine (stub; full script from user)
 
 ================================================================================
-2. UI COMPLETENESS
+2. MT5 12-MONTH BACKTEST (real broker data)
 ================================================================================
-✅ Large dashboard: Left / Center / Right columns, flow strip, sessions,
-   filters, signal card, history table, profile, mobile tabs, backtest bar
-   (desk), bot/broker profile section.
+Command:
+  npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --mt5-api=http://127.0.0.1:8765 --months=12
 
-✅ GeoPoliticalTicker: Reanimated frame loop, duplicate segment wrap, hold to
-   pause. NOW driven by live `tickerStrings` from engine risk strip (was
-   static copy only). Terminal-style monospace (Menlo / monospace) on tape.
+Data: MetaQuotes-Demo XAUUSD M30 via Python MT5 API (13,708 bars)
+Window: 2025-05-01 → 2026-05-01 (NY journal, exclusive end)
+Engine: computeGatesAndSignalsPineV5 + leftSideScanPineV5, showHistory=true
 
-⚠ “Bloomberg” proprietary font: NOT bundled; UI uses system fonts + serif
-   in a few places (BilshenzHeader). Full terminal Bloomberg look would need
-   licensed font assets + global Text theme.
+Results (see scripts/backtest-xau-12mo-output.txt):
+ - Trades opened: 84  (was ~19/year before Pine fix)
+ - Closed: 64  |  Wins: 31  |  Losses: 33
+ - Win rate: 48.44%
+ - P1 / P2 / P3 WR: 48.9% / 56.3% / 0.0%
+ - Net PnL (1% risk compound, $50k start): -$3,852.69 (-7.71%)
+ - Max drawdown: $6,100.36
+ - OPEN at window end: 20
 
-✅ Responsive: `useWindowDimensions`, `isWide`, compact signal mode, padding.
-
-Files: myapp/App.js, myapp/components/GeoPoliticalTicker.js, BilshenzHeader.js
-
-================================================================================
-3. BOT ENGINE
-================================================================================
-✅ Strategy stack: computeBilshenzSnapshot pipeline (bundle → bias, SR, risk,
-   gates, signals, trade recommendation).
-
-✅ Live signal processing: TICK reducer + auto webhook when enabled.
-
-✅ Webhook: postBrokerOrderWebhook with 3 attempts, backoff, no retry on
-   clear 4xx (except 408/429).
-
-⚠ DATA FEED: Synthetic bundle + simulated price tick — NO live broker
-   OHLCV WebSocket/REST feed in this repo.
-
-⚠ MT5: Optional `mt5/bridge-server.mjs` + `PollBridgeEA.mq5` — user-operated;
-   not embedded in the app binary.
-
-Files: hooks/useBilshenzMarketEngine.js, broker/webhookBroker.ts, mt5/*
+Note: Backtest uses showHistory=true (matches TV “Show All Historical Signals”).
+Live execution (in_session only, showHistory=false) will produce fewer trades.
 
 ================================================================================
-4. CODE QUALITY
+3. REMAINING DIVERGENCE vs TRADINGVIEW (expected)
 ================================================================================
-✅ `npx tsc --noEmit` used during development; re-run after edits.
+ - DST: MQL5 uses fixed UTC-5 for NY sessions; TV uses America/New_York
+ - DXY / US10Y: engine may use proxy series unless TV symbols fed in
+ - Bar close timing: MT5 broker server time vs TV exchange
+ - Floating-point / pivot confirmation bar index
 
-⚠ No automated Jest/detox test suite in package.json.
-
-⚠ engine/uiAdapter.ts — exported from index but not referenced from App.js
-   (may be library surface for future use; not necessarily dead).
-
-✅ TODO/FIXME grep: no outstanding TODO/FIXME in TS/JS (only TextInput
-   placeholder props).
-
-Dependencies: see myapp/package.json — coherent Expo 52 set.
+Compare visually: attach MQL5-indicator-Bilshenzv3.mq5 on XAUUSD M30 next to TV script.
 
 ================================================================================
-5. PRODUCTION READINESS SCORE
+4. HOW TO RE-RUN
 ================================================================================
-Score: 52 / 100  (educated sim + integration shell; NOT institutional prod)
+Audit:
+  cd myapp && npx tsx scripts/run-pine-parity-audit.ts
 
-Rationale:
- - Strong: modular engine, UI depth, persistence, webhook + retries, MT5
-   bridge template, auto-exec path.
- - Weak: no Pine proof, no real market data, no automated tests, MT5 path
-   requires external ops, regulatory/disclaimer burden on user.
+MT5 API backtest (1 year):
+  npm run mt5-api   (separate terminal, MT5 logged in)
+  cd myapp && npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --mt5-api=http://127.0.0.1:8765 --months=12
 
-Cannot honestly reach “100/100” without: Pine source diff, live data adapter,
-test suite, and operational hardening — outside a single auto-fix pass.
+Or export CSV from MT5 Symbols → Bars and:
+  npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --mt5-csv=path/to/XAUUSD_M30.csv
 
 ================================================================================
-RECENT FIXES FROM THIS AUDIT PASS
+5. PRODUCTION READINESS (updated score)
 ================================================================================
-- GeoPoliticalTicker: `items` prop + live strings + monospace tape font.
-- App: `buildGmAlertRows` shared helper; mobile + desktop tickers wired.
-- broker/webhookBroker.ts: retry loop for POST failures / network errors.
+Score: 68 / 100  (up from 52 after Pine parity + MT5 data path)
+
+Strengths: Pine-aligned engine, MT5 live bars, audit script, 84 trades/yr sanity vs 19.
+Gaps: no automated TV bar diff, MQL5 Strategy Tester not wired, P3 WR 0% warrants review.

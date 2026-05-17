@@ -1,11 +1,12 @@
-import { ema, highs, lows, lastFinite, pivotHighConfirmAt, pivotLowConfirmAt } from './indicators';
+import { ema, lastFinite } from './indicators';
 import type { Bar, BiasSnapshot } from './types';
 
 /**
- * Pine v3.2 Section 3 — EMA50 on chart TF (M30) + pivot 5,5 HH/HL vs LH/LL.
- * `ema50H4` field carries M30 EMA50 for existing UI that reads ema50H4.
+ * Pine HTF bias — EMA50 on H4 + daily HH/HL vs LH/LL structure.
+ * is_bullish = close > ema50_h4 and bull_structure
+ * is_bearish = close < ema50_h4 and bear_structure
  */
-export function computeBias(_h4: Bar[], d1: Bar[], chartClose: number, m30?: Bar[]): BiasSnapshot {
+export function computeBias(h4: Bar[], d1: Bar[], chartClose: number, m30?: Bar[]): BiasSnapshot {
   const n = d1.length;
   let dHigh0: number | null = null;
   let dHigh1: number | null = null;
@@ -18,61 +19,25 @@ export function computeBias(_h4: Bar[], d1: Bar[], chartClose: number, m30?: Bar
     dLow1 = d1[n - 2].l;
   }
 
-  const Ls = 5;
-  const Rs = 5;
-  let ema50M30: number | null = null;
+  const bullStructure = !!(dHigh0 != null && dHigh1 != null && dLow0 != null && dLow1 != null && dHigh0 > dHigh1 && dLow0 > dLow1);
+  const bearStructure = !!(dHigh0 != null && dHigh1 != null && dLow0 != null && dLow1 != null && dHigh0 < dHigh1 && dLow0 < dLow1);
+
+  let ema50H4: number | null = null;
   let ema21M30: number | null = null;
-  let lastPh: number | null = null;
-  let lastPl: number | null = null;
-  let prevPh: number | null = null;
-  let prevPl: number | null = null;
-
-  if (m30 && m30.length >= 50) {
+  if (h4.length >= 50) {
+    const h4c = h4.map((b) => b.c);
+    ema50H4 = lastFinite(ema(h4c, 50));
+  }
+  if (m30 && m30.length >= 21) {
     const m30c = m30.map((b) => b.c);
-    ema50M30 = lastFinite(ema(m30c, 50));
-    if (m30.length >= 21) ema21M30 = lastFinite(ema(m30c, 21));
-
-    const HH = highs(m30);
-    const LL = lows(m30);
-    const start = Ls + Rs;
-    for (let conf = start; conf < m30.length; conf++) {
-      const ph = pivotHighConfirmAt(HH, conf, Ls, Rs);
-      if (ph != null) {
-        prevPh = lastPh;
-        lastPh = ph;
-      }
-      const pl = pivotLowConfirmAt(LL, conf, Ls, Rs);
-      if (pl != null) {
-        prevPl = lastPl;
-        lastPl = pl;
-      }
-    }
+    ema21M30 = lastFinite(ema(m30c, 21));
   }
 
-  const hhHl =
-    lastPh != null &&
-    prevPh != null &&
-    lastPh > prevPh &&
-    lastPl != null &&
-    prevPl != null &&
-    lastPl > prevPl;
-  const lhLl =
-    lastPh != null &&
-    prevPh != null &&
-    lastPh < prevPh &&
-    lastPl != null &&
-    prevPl != null &&
-    lastPl < prevPl;
-
-  const aboveEma = ema50M30 != null && chartClose > ema50M30;
-  const isBullish = !!(ema50M30 != null && aboveEma && hhHl);
-  const isBearish = !!(ema50M30 != null && !aboveEma && lhLl);
-
-  const bullStructure = hhHl;
-  const bearStructure = lhLl;
+  const isBullish = ema50H4 != null && chartClose > ema50H4 && bullStructure;
+  const isBearish = ema50H4 != null && chartClose < ema50H4 && bearStructure;
 
   return {
-    ema50H4: ema50M30,
+    ema50H4,
     ema21M30,
     dHigh0,
     dHigh1,

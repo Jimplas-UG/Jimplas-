@@ -9,7 +9,8 @@ This pack adds **native MQL5** (indicator + EA), a **Python MetaTrader5 REST bri
 | Path | Role |
 |------|------|
 | `mt5_trading_system/mql5/Include/Bilshenz/BilshenzCore.mqh` | Shared S/R replay + P1–P3 signals |
-| `mt5_trading_system/mql5/Indicators/Bilshenz/Indicator.mq5` | Chart indicator + dashboard labels |
+| `mt5_trading_system/mql5/Indicators/Bilshenz/MQL5-indicator-Bilshenzv3.mq5` | Chart indicator + dashboard labels (Bilshenz v3) |
+| `mt5_trading_system/mql5/Indicators/Bilshenz/Indicator.mq5` | Legacy copy (same logic; optional) |
 | `mt5_trading_system/mql5/Experts/Bilshenz/ExpertAdvisor.mq5` | Auto-trading EA |
 | `mt5_trading_system/python/` | FastAPI + `mt5_connector.py` |
 | `myapp/components/Mt5BridgePanel.js` | Profile tab UI |
@@ -24,14 +25,20 @@ This pack adds **native MQL5** (indicator + EA), a **Python MetaTrader5 REST bri
    - From: `mt5_trading_system/mql5/Include/Bilshenz/`
    - To: `<DataFolder>/MQL5/Include/Bilshenz/`
 4. Copy **Indicator**:
-   - From: `mt5_trading_system/mql5/Indicators/Bilshenz/Indicator.mq5`
-   - To: `<DataFolder>/MQL5/Indicators/Bilshenz/Indicator.mq5` (create `Bilshenz` subfolder if needed)
+   - From: `mt5_trading_system/mql5/Indicators/Bilshenz/MQL5-indicator-Bilshenzv3.mq5`
+   - To: `<DataFolder>/MQL5/Indicators/Bilshenz/MQL5-indicator-Bilshenzv3.mq5` (create `Bilshenz` subfolder if needed)
 5. Copy **EA**:
    - From: `mt5_trading_system/mql5/Experts/Bilshenz/ExpertAdvisor.mq5`
    - To: `<DataFolder>/MQL5/Experts/Bilshenz/ExpertAdvisor.mq5`
 6. Open **MetaEditor**, open each `.mq5`, press **Compile** (F7). Fix any “cannot open include” by rechecking step 3 path (`#include <Bilshenz/BilshenzCore.mqh>`).
-7. Attach **Indicator** to an **M30** chart of your symbol (e.g. `XAUUSD` / `XAUUSDm`).
+7. Attach **MQL5-indicator-Bilshenzv3** (Navigator → Indicators → Bilshenz) to an **M30** chart (e.g. `XAUUSD` / `XAUUSDm`).
 8. For **EA**: enable **Algo Trading**, attach to **M30** chart, review **Inputs** (lots, SL pips, magic). **Use demo only** until validated.
+
+### EA not in Navigator, not attaching, or no trades
+
+1. **Compile first:** MetaEditor → open `ExpertAdvisor.mq5` → **Compile** (F7). Fix any *cannot open include file* by recopying `MQL5/Include/Bilshenz/BilshenzCore.mqh`. In MT5 **Navigator → Experts**, right‑click → **Refresh** if the EA name does not appear.
+2. **Drag the EA from** `Experts → Bilshenz → ExpertAdvisor` onto the chart (subfolder under `MQL5/Experts/` is valid). Allow **Algo Trading** (toolbar **green** button). If the corner icon is a **sad face**, open the **Experts** tab in the **Toolbox** and read the error text.
+3. **Chart status:** the EA writes a multi‑line **Comment** on the chart (top‑left) and `[BilshenzEA]` lines in the **Experts** log — use these to see *Bot Connected*, *MT5 Connected*, *Trading Enabled*, or *Initialization Failed* and the permission flags.
 
 ### WebRequest / old bridge
 
@@ -128,7 +135,7 @@ Without Pine source, automated diff is not shipped. Export MT5 indicator signal 
 ## 9. Quick compile checklist
 
 - [ ] `BilshenzCore.mqh` under `MQL5/Include/Bilshenz/`
-- [ ] `Indicator.mq5` compiles (0 errors)
+- [ ] `MQL5-indicator-Bilshenzv3.mq5` compiles (0 errors)
 - [ ] `ExpertAdvisor.mq5` compiles (0 errors)
 - [ ] `python main.py` + `/health` OK
 - [ ] Expo Profile connects and shows balance / tick

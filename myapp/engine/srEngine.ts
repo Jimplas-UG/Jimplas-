@@ -56,6 +56,22 @@ function fPoiSup(arrPl: number[], close: number, zone: number, imm: number | nul
   return s;
 }
 
+/** Pine: nearest resistance above price from r1,r2,r3. */
+export function nearestResStack(r1: number | null, r2: number | null, r3: number | null, close: number): number | null {
+  if (r1 != null && r1 > close) return r1;
+  if (r2 != null && r2 > close) return r2;
+  if (r3 != null && r3 > close) return r3;
+  return null;
+}
+
+/** Pine: nearest support below price from s1,s2,s3. */
+export function nearestSupStack(s1: number | null, s2: number | null, s3: number | null, close: number): number | null {
+  if (s1 != null && s1 < close) return s1;
+  if (s2 != null && s2 < close) return s2;
+  if (s3 != null && s3 < close) return s3;
+  return null;
+}
+
 /** Pine BILSHENZ v3.2 Section 4 — pivot arrays, immediate S/R, POI, flip levels. */
 export function replaySrEngine(m30: Bar[], cfg: BilshenzEngineConfig): SrReplayResult {
   const H = highs(m30);
@@ -126,29 +142,38 @@ export function replaySrEngine(m30: Bar[], cfg: BilshenzEngineConfig): SrReplayR
   }
 
   const close = C[n - 1];
+  const r1 = arrPh[0] ?? null;
+  const r2 = arrPh[1] ?? null;
+  const r3 = arrPh[2] ?? null;
+  const s1 = arrPl[0] ?? null;
+  const s2 = arrPl[1] ?? null;
+  const s3 = arrPl[2] ?? null;
+  const nearestRes = nearestResStack(r1, r2, r3, close);
+  const nearestSup = nearestSupStack(s1, s2, s3, close);
   const immRes = histImmRes[n - 1];
   const immSup = histImmSup[n - 1];
   const poiRes = fPoiRes(arrPh, close, zone, immRes);
   const poiSup = fPoiSup(arrPl, close, zone, immSup);
 
-  const prevNearestRes = n >= 2 ? histImmRes[n - 2] : null;
-  const prevNearestSup = n >= 2 ? histImmSup[n - 2] : null;
+  const prevClose = n >= 2 ? C[n - 2] : close;
+  const prevNearestRes = nearestResStack(r1, r2, r3, prevClose);
+  const prevNearestSup = nearestSupStack(s1, s2, s3, prevClose);
 
   return {
-    r1: arrPh[0] ?? null,
-    r2: arrPh[1] ?? null,
-    r3: arrPh[2] ?? null,
-    s1: arrPl[0] ?? null,
-    s2: arrPl[1] ?? null,
-    s3: arrPl[2] ?? null,
+    r1,
+    r2,
+    r3,
+    s1,
+    s2,
+    s3,
     r1Flipped,
     r2Flipped,
     r3Flipped,
     s1Flipped,
     s2Flipped,
     s3Flipped,
-    nearestRes: immRes,
-    nearestSup: immSup,
+    nearestRes,
+    nearestSup,
     poiRes,
     poiSup,
     flipSupLevel,
@@ -246,20 +271,29 @@ export function replaySrBarByBar(m30: Bar[], cfg: BilshenzEngineConfig): SrRepla
     if (sh != null) r1Flipped = false;
     if (sl != null) s1Flipped = false;
 
+    const r1 = arrPh[0] ?? null;
+    const r2 = arrPh[1] ?? null;
+    const r3 = arrPh[2] ?? null;
+    const s1 = arrPl[0] ?? null;
+    const s2 = arrPl[1] ?? null;
+    const s3 = arrPl[2] ?? null;
+    const nearestRes = nearestResStack(r1, r2, r3, cl);
+    const nearestSup = nearestSupStack(s1, s2, s3, cl);
     const immRes = fImmRes(arrPh, cl, zone);
     const immSup = fImmSup(arrPl, cl, zone);
     const poiRes = fPoiRes(arrPh, cl, zone, immRes);
     const poiSup = fPoiSup(arrPl, cl, zone, immSup);
-    const prevNearestRes = conf >= 1 ? out[conf - 1].nearestRes : null;
-    const prevNearestSup = conf >= 1 ? out[conf - 1].nearestSup : null;
+    const prevClose = conf >= 1 ? C[conf - 1] : cl;
+    const prevNearestRes = nearestResStack(r1, r2, r3, prevClose);
+    const prevNearestSup = nearestSupStack(s1, s2, s3, prevClose);
 
     out[conf] = {
-      r1: arrPh[0] ?? null,
-      r2: arrPh[1] ?? null,
-      r3: arrPh[2] ?? null,
-      s1: arrPl[0] ?? null,
-      s2: arrPl[1] ?? null,
-      s3: arrPl[2] ?? null,
+      r1,
+      r2,
+      r3,
+      s1,
+      s2,
+      s3,
       r1Flipped,
       r2Flipped,
       r3Flipped,

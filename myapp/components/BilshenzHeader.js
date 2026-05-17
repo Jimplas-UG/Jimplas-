@@ -12,21 +12,7 @@ import Svg, {
   Text as SvgText,
 } from 'react-native-svg';
 
-const VB = 80;
-const CX = 40;
-const CY = 40;
-
-const MAIN_HEX = '40,10 64,23.5 64,56.5 40,70 16,56.5 16,23.5';
-const INNER_HEX = '40,18 58,28.5 58,51.5 40,62 22,51.5 22,28.5';
-
-const DIAMONDS = [
-  '40,12.5 41.2,13.7 40,14.9 38.8,13.7',
-  '40,65.1 41.2,66.3 40,67.5 38.8,66.3',
-  '12.5,40 13.7,41.2 14.9,40 13.7,38.8',
-  '65.1,40 66.3,41.2 67.5,40 66.3,38.8',
-  '20.5,20.5 21.7,21.7 20.5,22.9 19.3,21.7',
-  '59.5,59.5 60.7,60.7 59.5,61.9 58.3,60.7',
-];
+import { CX, CY, DIAMONDS, INNER_HEX, MAIN_HEX, VB } from './logo/hexLogoGeometry';
 
 /** Plain Svg + rAF (Animated.createAnimatedComponent often breaks on Expo Go). */
 function AnimatedSvgLogo() {
@@ -193,7 +179,7 @@ export default function BilshenzHeader() {
       <View style={styles.textStack}>
         <Text style={[styles.h1, { fontFamily: serifHeading }]}>BILSHENZ</Text>
         <Text style={styles.sub}>Jimplas Capital Management · XAUUSD Spot Intelligence</Text>
-        <Text style={styles.vtag}>v3.2 GODMODE · WICKS DON'T LIE · S&R ENGINE</Text>
+        <Text style={styles.vtag}>JIMPLAS FLUIDITY · P1/P2/P3 · M30 ENGINE</Text>
       </View>
     </View>
   );

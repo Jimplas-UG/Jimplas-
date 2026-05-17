@@ -2,10 +2,11 @@ import type { Bar, BiasSnapshot, BilshenzEngineConfig, GateSnapshot, RangeCleanS
 import type { SrReplayResult } from './srEngine';
 import { wickMetricsAt } from './wickEngine';
 
-/** Recompute anyBuy / anySell from P1–P3 flags and the same guards as Pine Section 9. */
+/** Recompute anyBuy / anySell from P1–P3 flags (Pine: requires in_session, not show_history). */
 export function recomputeSignalAggregates(
   s: Pick<SignalSnapshot, 'p1Buy' | 'p1Sell' | 'p2Buy' | 'p2Sell' | 'p3Buy' | 'p3Sell'>,
   deps: {
+    /** Pine any_buy/any_sell: in_session only. */
     sessionOk: boolean;
     maxTradesReached: boolean;
     newsActive: boolean;
@@ -120,7 +121,7 @@ export function rangeClean(
 
 /**
  * Pine v3.2 Section 9 — E1 wick sweep, E2 M30 breakout, E3 flip retest.
- * Bias / raja filters are not in Pine entries; M30 HTF bias is dashboard-only.
+ * Bias / jimplas filters are not in Pine entries; M30 HTF bias is dashboard-only.
  */
 export function computeGatesAndSignals(args: {
   cfg: BilshenzEngineConfig;

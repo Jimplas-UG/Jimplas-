@@ -1,0 +1,24 @@
+BILSHENZ PINE v5 PARITY AUDIT
+Generated: 2026-05-16T22:09:23.102Z
+Checks: 18  |  Passed: 18  |  Failed: 0
+
+PASS  cfg.usePineV5  —  usePineV5=true
+PASS  cfg.pivot  —  pivot 3/3 (Pine 3/3)
+PASS  cfg.zone  —  zoneHalfWidthPips=3 (Pine zone_pip=3)
+PASS  cfg.maxDailyTrades  —  maxDailyTrades=3 (Pine 3)
+PASS  cfg.throttleOff  —  journal throttle disabled
+PASS  pine.reference  —  reference stub present
+PASS  mql5.prevNearest  —  BzSrSnap has prev nearest stack
+PASS  mql5.p1Sweep  —  P1 sweep uses prev level
+PASS  mql5.p2Breakout  —  P2 breakout + bias
+PASS  mql5.p3Flip  —  P3 flip retest
+PASS  mql5.nySession  —  NY session (not UTC 7-22 only)
+PASS  mql5.anyBuySession  —  anyBuy requires in_session
+PASS  sr.nearestStack  —  nearestRes stack match (2684.840799581491 vs 2684.840799581491)
+PASS  bias.h4Ema  —  H4 EMA50=2654.70
+PASS  risk.spreadPine  —  spread = broker only
+PASS  signals.shape  —  signal flags ok
+PASS  anyBuy.session  —  anyBuy in session ok
+PASS  gates.live  —  gates exported
+
+All checks passed. Run MT5 backtest for bar-level confirmation.

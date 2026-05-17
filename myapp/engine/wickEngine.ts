@@ -46,8 +46,8 @@ export function wickMetricsAt(bars: Bar[], idx: number): WickMetrics {
 
   const o1 = idx >= 1 ? bars[idx - 1].o : b.o;
   const c1 = idx >= 1 ? bars[idx - 1].c : b.c;
-  const rajaFlipBuy = o1 > c1 && b.c > b.o && lowerWick > 0;
-  const rajaFlipSell = o1 < c1 && b.c < b.o && upperWick > 0;
+  const jimplasFlipBuy = o1 > c1 && b.c > b.o && lowerWick > 0;
+  const jimplasFlipSell = o1 < c1 && b.c < b.o && upperWick > 0;
 
   return {
     candleRange,
@@ -61,7 +61,7 @@ export function wickMetricsAt(bars: Bar[], idx: number): WickMetrics {
     isDoji,
     isValidBreakout,
     isValidRejection,
-    rajaFlipBuy,
-    rajaFlipSell,
+    jimplasFlipBuy,
+    jimplasFlipSell,
   };
 }

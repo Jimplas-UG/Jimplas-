@@ -13,10 +13,9 @@ import {
   View,
 } from 'react-native';
 import Svg, { Defs, LinearGradient, Polyline, Stop } from 'react-native-svg';
-import { BlurView } from 'expo-blur';
-import Slider from '@react-native-community/slider';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import BilshenzHeader from './components/BilshenzHeader';
+import PanelBlur from './components/PanelBlur';
 
 const C = {
   gold: '#D4B45A',
@@ -518,7 +517,7 @@ function CenterColumn({
       <Row style={styles.wickInd}>
         <Text style={styles.wiIcon}>🕯️</Text>
         <View style={{ flex: 1 }}>
-          <Text style={styles.wiMain}>WICK CREATED ✓ — Candle filled. Entry confirmed by Raja Flip Rule.</Text>
+          <Text style={styles.wiMain}>WICK CREATED ✓ — Candle filled. Entry confirmed by Jimplas Flip Rule.</Text>
           <Text style={styles.wiSub}>M30 started RED → bottom wick at $4,597 → closed GREEN above $4,608 · Wick: 22p · Body: 65%</Text>
         </View>
       </Row>
@@ -879,7 +878,7 @@ function ProfileTab({ pad, width }) {
       showsVerticalScrollIndicator={false}>
       <View style={styles.psProfileCard}>
         {Platform.OS === 'ios' ? (
-          <BlurView intensity={22} tint="dark" style={[StyleSheet.absoluteFillObject, { borderRadius: 14 }]} />
+          <PanelBlur intensity={22} tint="dark" style={[StyleSheet.absoluteFillObject, { borderRadius: 14 }]} />
         ) : null}
         <View style={styles.psProfileTint} />
         <View style={styles.psProfileGlow} />
@@ -1094,7 +1093,7 @@ function GodmodeHome({
     <View style={styles.ghWrap}>
       <View style={[styles.ghPriceCard, { marginHorizontal: pad, marginTop: 4 }]}>
         {Platform.OS === 'ios' ? (
-          <BlurView intensity={28} tint="dark" style={StyleSheet.absoluteFill} />
+          <PanelBlur intensity={28} tint="dark" style={StyleSheet.absoluteFill} />
         ) : (
           <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(10,9,0,0.92)' }]} />
         )}
@@ -1204,7 +1203,7 @@ function MobileBottomNav({ tab, onChange, bottomInset }) {
     <View style={[styles.bottomNavOuter, { paddingBottom: Math.max(bottomInset, 4) }]}>
       <View style={styles.bottomNavBar}>
         {Platform.OS === 'ios' ? (
-          <BlurView intensity={28} tint="dark" style={StyleSheet.absoluteFillObject} />
+          <PanelBlur intensity={28} tint="dark" style={StyleSheet.absoluteFillObject} />
         ) : null}
         <View style={styles.bottomNavBarTint} />
         <Row style={styles.bottomNavRow}>

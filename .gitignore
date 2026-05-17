@@ -39,3 +39,13 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Python / local tooling
+**/__pycache__/
+*.py[cod]
+.venv/
+mt5_trading_system/python/.venv/
+
+# App dev artifacts
+myapp/.tmp-*/
+myapp/.expo-export-test/

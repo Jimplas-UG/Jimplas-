@@ -72,11 +72,36 @@ export function buildSyntheticMarketBundle(opts: {
   return { m30, h4, d1, w1, mn1, dxyCloseSeries, us10yCloseSeries };
 }
 
-/** Build HTF + macro stubs from an arbitrary M30 series (e.g. Yahoo GC=F). */
-export function buildBundleFromM30Bars(m30: Bar[]): MarketBundle {
+function syntheticMacroSeries(m30: Bar[]): { dxyCloseSeries: number[]; us10yCloseSeries: number[] } {
   const L = m30.length;
   const dxyCloseSeries = m30.map((_, i) => 99 + Math.sin(i / 17) * 0.6 + (i / Math.max(L, 1)) * 0.05);
   const us10yCloseSeries = m30.map((_, i) => 4.15 + Math.sin(i / 31) * 0.12);
+  return { dxyCloseSeries, us10yCloseSeries };
+}
+
+/** Align macro M30 closes to gold bar count (pad with last value). */
+function alignMacroCloses(m30Len: number, macroBars: Bar[]): number[] {
+  if (!macroBars.length || m30Len < 1) return [];
+  const closes = macroBars.map((b) => b.c);
+  const out: number[] = [];
+  for (let i = 0; i < m30Len; i++) {
+    const j = macroBars.length - m30Len + i;
+    out.push(j >= 0 ? closes[j]! : closes[closes.length - 1]!);
+  }
+  return out;
+}
+
+/** Build HTF bundle from gold M30; optional real DXY / US10Y M30 for macro series. */
+export function buildBundleFromM30Bars(
+  m30: Bar[],
+  opts?: { dxyM30?: Bar[]; us10yM30?: Bar[] }
+): MarketBundle {
+  const L = m30.length;
+  const syn = syntheticMacroSeries(m30);
+  const dxyCloseSeries =
+    opts?.dxyM30?.length ? alignMacroCloses(L, opts.dxyM30) : syn.dxyCloseSeries;
+  const us10yCloseSeries =
+    opts?.us10yM30?.length ? alignMacroCloses(L, opts.us10yM30) : syn.us10yCloseSeries;
   return {
     m30,
     h4: compressBars(m30, 8),

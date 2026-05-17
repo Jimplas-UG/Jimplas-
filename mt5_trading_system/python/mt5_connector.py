@@ -76,19 +76,125 @@ class MT5Connector:
             mt5.shutdown()
         self._logged_in = False
 
+    def resolve_symbol(self, symbol: str) -> str | None:
+        """Pick first broker symbol that exists (XAUUSD vs XAUUSDm, etc.)."""
+        if not self._alive():
+            return None
+        import os
+
+        env_sym = (os.environ.get("MT5_SYMBOL") or "").strip()
+        base = (symbol or "XAUUSD").strip()
+        candidates: list[str] = []
+        for s in (env_sym, base, f"{base}m", f"{base}.m", f"{base}_m", "GOLD", "XAUUSDm", "XAUUSD"):
+            s = s.strip()
+            if s and s not in candidates:
+                candidates.append(s)
+        for s in candidates:
+            info = mt5.symbol_info(s)
+            if info is not None:
+                if not info.visible:
+                    mt5.symbol_select(s, True)
+                return s
+        return None
+
     def tick(self, symbol: str) -> dict[str, Any] | None:
         if not self._alive():
             return None
-        t = mt5.symbol_info_tick(symbol)
+        sym = self.resolve_symbol(symbol) or symbol
+        t = mt5.symbol_info_tick(sym)
         if t is None:
             return None
         return {
+            "symbol": sym,
             "bid": t.bid,
             "ask": t.ask,
             "last": t.last,
             "time": int(t.time),
             "volume": int(t.volume),
         }
+
+    def symbol_spec(self, symbol: str, pip_size: float = 0.1) -> dict[str, Any] | None:
+        """Broker symbol metrics for realistic backtest / sizing (spread, $/pip/lot)."""
+        if not self._alive():
+            return None
+        sym = self.resolve_symbol(symbol) or symbol
+        info = mt5.symbol_info(sym)
+        if info is None:
+            return None
+        point = float(info.point) if info.point else 0.0
+        spread_pts = int(info.spread) if info.spread is not None else 0
+        spread_price = spread_pts * point if point > 0 else 0.0
+        tick = mt5.symbol_info_tick(sym)
+        if tick is not None and tick.ask > 0 and tick.bid > 0:
+            spread_live = max(spread_price, float(tick.ask) - float(tick.bid))
+        else:
+            spread_live = spread_price
+        pip = pip_size if pip_size > 0 else 0.1
+        spread_pips = spread_live / pip if pip > 0 else 0.0
+        tick_size = float(info.trade_tick_size) if info.trade_tick_size else point
+        tick_value = float(info.trade_tick_value) if info.trade_tick_value else 0.0
+        usd_per_pip_per_lot = (tick_value * (pip / tick_size)) if tick_size > 0 and tick_value > 0 else None
+        return {
+            "symbol": sym,
+            "point": point,
+            "digits": int(info.digits),
+            "spread_points": spread_pts,
+            "spread_pips": round(spread_pips, 2),
+            "spread_price": spread_live,
+            "pip_size": pip,
+            "usd_per_pip_per_lot": round(usd_per_pip_per_lot, 4) if usd_per_pip_per_lot else None,
+            "volume_min": float(info.volume_min),
+            "volume_step": float(info.volume_step),
+            "volume_max": float(info.volume_max),
+        }
+
+    def _rates_to_bars(self, rates) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        if rates is None:
+            return out
+        for r in rates:
+            out.append(
+                {
+                    "t": int(r["time"]) * 1000,
+                    "o": float(r["open"]),
+                    "h": float(r["high"]),
+                    "l": float(r["low"]),
+                    "c": float(r["close"]),
+                }
+            )
+        return out
+
+    def bars_m30(self, symbol: str, count: int = 320) -> list[dict[str, Any]]:
+        if not self._alive():
+            return []
+        sym = self.resolve_symbol(symbol)
+        if not sym:
+            return []
+        n = max(50, min(2000, int(count)))
+        rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M30, 0, n)
+        if rates is None:
+            log.warning("copy_rates_from_pos failed: %s", mt5.last_error())
+            return []
+        return self._rates_to_bars(rates)
+
+    def bars_m30_range(self, symbol: str, from_ms: int, to_ms: int) -> list[dict[str, Any]]:
+        """M30 OHLC from broker history (UTC epoch ms). Used for long backtests."""
+        if not self._alive():
+            return []
+        sym = self.resolve_symbol(symbol)
+        if not sym:
+            return []
+        from datetime import datetime, timezone
+
+        t0 = max(0, int(from_ms))
+        t1 = max(t0 + 1, int(to_ms))
+        dt_from = datetime.fromtimestamp(t0 / 1000, tz=timezone.utc)
+        dt_to = datetime.fromtimestamp(t1 / 1000, tz=timezone.utc)
+        rates = mt5.copy_rates_range(sym, mt5.TIMEFRAME_M30, dt_from, dt_to)
+        if rates is None or len(rates) == 0:
+            log.warning("copy_rates_range failed: %s", mt5.last_error())
+            return []
+        return self._rates_to_bars(rates)
 
     def account_info(self) -> dict[str, Any] | None:
         if not self._alive():
@@ -131,6 +237,13 @@ class MT5Connector:
             )
         return out
 
+    def has_open_position(self, symbol: str, magic: int | None = None) -> bool:
+        sym = self.resolve_symbol(symbol) or symbol
+        for p in self.positions(sym):
+            if magic is None or int(p.get("magic") or 0) == int(magic):
+                return True
+        return False
+
     def order_market(
         self,
         symbol: str,
@@ -145,10 +258,16 @@ class MT5Connector:
             return {"ok": False, "error": "not_connected"}
         side_u = side.upper()
         order_type = mt5.ORDER_TYPE_BUY if side_u == "BUY" else mt5.ORDER_TYPE_SELL
-        price = mt5.symbol_info_tick(symbol).ask if side_u == "BUY" else mt5.symbol_info_tick(symbol).bid
+        sym = self.resolve_symbol(symbol) or symbol
+        if self.has_open_position(sym, magic):
+            return {"ok": False, "error": "position_already_open"}
+        tick = mt5.symbol_info_tick(sym)
+        if tick is None:
+            return {"ok": False, "error": f"no tick for {sym}"}
+        price = tick.ask if side_u == "BUY" else tick.bid
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
+            "symbol": sym,
             "volume": float(volume),
             "type": order_type,
             "price": price,
