@@ -1,0 +1,15 @@
+BILSHENZ JIMPLAS FLUIDITY AUDIT
+Generated: 2026-05-17T22:59:23.395Z
+Checks: 9  |  Passed: 9  |  Failed: 0
+
+PASS  cfg.jimplasActive  —  usePineV5 routes Jimplas engine
+PASS  cfg.p2Loose  —  P2 loose (volume mode)
+PASS  cfg.tpClamp  —  TP clamp 10–28 pips
+PASS  cfg.journalSizing  —  journalSizingSlPips=20
+PASS  pine.reference  —  Jimplas Pine reference present
+PASS  riskSizing.util  —  live lot sizing helper present
+PASS  signals.shape  —  signal flags ok
+PASS  gates.shape  —  gates ok
+PASS  levels.nullOrSetup  —  setup levels when signal
+
+All Jimplas checks passed.

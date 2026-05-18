@@ -1,5 +1,5 @@
 {
-  "name": "myapp",
+  "name": "bilshenz-frontend",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
@@ -16,19 +16,7 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "web:mobile": "node scripts/start-web-mobile.js",
-    "mt5-bridge": "node ./mt5/bridge-server.mjs",
-    "mt5-api": "powershell -ExecutionPolicy Bypass -File ../mt5_trading_system/python/start-api.ps1",
-    "mt5:live": "powershell -ExecutionPolicy Bypass -File ../mt5_trading_system/python/start-api.ps1",
-    "backtest:3yr": "npx tsx scripts/run-3yr-backtest.ts",
-    "backtest:3mo": "npx tsx scripts/run-3mo-autotrade-backtest.ts",
-    "backtest:xau12mo": "npx tsx scripts/run-xau-12mo-yahoo-backtest.ts",
-    "backtest:xau12mo:mt5": "npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --mt5-api=http://127.0.0.1:8765 --equity-from-mt5 --risk-pct=1",
-    "backtest:xau12mo:realistic": "npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --mt5-api=http://127.0.0.1:8765 --equity-from-mt5 --risk-pct=1 --realistic --broker-sl-pips=20",
-    "backtest:xau1mo": "npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --months=1 --window=start",
-    "monte-carlo:stress": "npx tsx scripts/run-monte-carlo-stress.ts",
-    "desk-api": "npx tsx strategy-api/server.ts",
-    "security:audit": "node scripts/security-duplication-audit.mjs"
+    "web:mobile": "node scripts/start-web-mobile.js"
   },
   "dependencies": {
     "@expo/ngrok": "^4.1.3",

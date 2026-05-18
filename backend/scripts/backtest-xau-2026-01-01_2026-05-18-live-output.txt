@@ -1,0 +1,16 @@
+BILSHENZ — XAU backtest (M30 engine, journal + throttle) · LIVE profile (session-only)
+Data: MT5 live API http://127.0.0.1:8765 — XAUUSD M30 (6200 bars)
+Journal window: 2026-01-01 → 2026-05-18
+Max daily trades (NY day cap): 3
+Window (journal entries): 2026-01-01 → 2026-05-18 exclusive end
+M30 bars loaded: 6200  |  Main loop: 9.25s
+
+Starting equity: $1,000
+Ending equity (closed trades, compounding 1.00%): $3403.79
+Net PnL: $+2403.79 (+240.38%)
+Max drawdown (on equity curve): $69.11
+
+Trades opened in window: 207  (OPEN at end: 0)
+Closed in window: 207  |  Wins: 139  |  Losses: 68 (incl. 0 half-loss M15 exits)
+Win rate (closed): 67.15%
+P1 / P2 / P3 WR: 0.0% / 67.1% / 0.0%

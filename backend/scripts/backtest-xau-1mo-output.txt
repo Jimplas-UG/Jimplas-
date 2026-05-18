@@ -1,0 +1,16 @@
+BILSHENZ — 1-month XAU backtest (M30 engine, journal + throttle)
+Data: Yahoo GC=F 1h → 2948 M30 bars (upsampled)
+Journal window mode: start (1 month(s))
+Max daily trades (NY day cap): 3
+Window (journal entries): 2025-05-01 → 2025-06-01 exclusive end
+M30 bars loaded: 2948  |  Main loop: 2.07s
+
+Starting equity: $50,000
+Ending equity (closed trades, compounding 1.00%): $78470.25
+Net PnL: $+28470.25 (+56.94%)
+Max drawdown (on equity curve): $2088.85
+
+Trades opened in window: 71  (OPEN at end: 0)
+Closed in window: 71  |  Wins: 50  |  Losses: 21 (incl. 0 half-loss M15 exits)
+Win rate (closed): 70.42%
+P1 / P2 / P3 WR: 0.0% / 70.4% / 0.0%

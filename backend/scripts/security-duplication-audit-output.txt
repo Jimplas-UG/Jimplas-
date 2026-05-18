@@ -1,0 +1,94 @@
+BILSHENZ DUPLICATION-RISK AUDIT
+Generated: 2026-05-17T22:58:26.749Z
+
+=== CLIENT BUNDLE (Metro ships when EXPO_PUBLIC_DESK_REMOTE is not 1) ===
+engine/*.ts — FULL strategy (critical) unless remote mode + metro stub
+hooks/deskComputeLocal.js — re-exports engine
+App.js — INTEL panels gated by SHOW_STRATEGY_INTEL (__DEV__ only by default)
+
+=== MITIGATIONS IN PLACE ===
+- security/sanitizeDesk.js strips snapshot for production UI
+- security/publicLabels.js — BUY/SELL/WAIT, opaque block codes
+- strategy-api/server.ts — optional server-side compute (npm run desk-api)
+- metro.config.js — blocks engine when EXPO_PUBLIC_DESK_REMOTE=1
+- client/engineStub.js — replaces engine in remote bundle
+
+=== FILES MATCHING SENSITIVE PATTERNS ===
+App.js
+  /jimplas/i, /riskPctAtr/, /athZoneLow/, /hard_block/i
+AUDIT_REPORT.txt
+  /pineV5/i, /leftSideScan/i
+client/engineStub.js
+  /defaultBilshenzConfig/, /riskPctAtr/, /athZoneLow/, /computeBilshenzSnapshot/
+components/BilshenzHeader.js
+  /jimplas/i
+engine/bilshenzEngine.ts
+  /jimplas/i, /pineV5/i, /leftSideScan/i, /leftScanBars/, /computeBilshenzSnapshot/, /signalEngine/
+engine/index.ts
+  /jimplas/i, /pineV5/i, /signalEngine/
+engine/jimplasFluiditySignalEngine.ts
+  /jimplas/i, /p1VolumeAtrMult/, /signalEngine/
+engine/pineV5SignalEngine.ts
+  /jimplas/i, /pineV5/i, /leftSideScan/i, /signalEngine/
+engine/reference/Bilshenz-Gold-Strategy.pine
+  /leftSideScan/i, /signalEngine/, /\.pine$/
+engine/reference/Jimplas-Fluidity-Strategy.pine
+  /jimplas/i, /\.pine$/
+engine/riskEngine.ts
+  /riskPctAtr/, /athZoneLow/, /yieldHighThreshold/
+engine/signalEngine.ts
+  /jimplas/i, /leftSideScan/i, /signalEngine/
+engine/signalThrottle.ts
+  /signalEngine/
+engine/tradeBot.ts
+  /jimplas/i, /pineV5/i
+engine/tradeGeometry.ts
+  /jimplas/i
+engine/types.ts
+  /jimplas/i, /pineV5/i, /defaultBilshenzConfig/, /riskPctAtr/, /p1VolumeAtrMult/, /wickRatioMin/, /athZoneLow/, /yieldHighThreshold/, /leftScanBars/
+engine/wickEngine.ts
+  /jimplas/i
+hooks/deskComputeLocal.js
+  /defaultBilshenzConfig/, /computeBilshenzSnapshot/
+hooks/useBilshenzMarketEngine.js
+  /jimplas/i, /defaultBilshenzConfig/, /computeBilshenzSnapshot/
+hooks/useMt5LiveFeed.js
+  /defaultBilshenzConfig/
+scripts/audit-jimplas-output.txt
+  /jimplas/i, /pineV5/i
+scripts/audit-pine-parity-output.txt
+  /pineV5/i
+scripts/backtest-jimplas-12mo-output.txt
+  /jimplas/i
+scripts/backtest-jimplas-geometry-12mo.txt
+  /jimplas/i
+scripts/run-3mo-autotrade-backtest.ts
+  /leftSideScan/i, /defaultBilshenzConfig/, /athZoneLow/, /leftScanBars/, /signalEngine/
+scripts/run-3yr-backtest.ts
+  /leftSideScan/i, /defaultBilshenzConfig/, /athZoneLow/, /leftScanBars/, /signalEngine/
+scripts/run-jimplas-audit.ts
+  /jimplas/i, /pineV5/i, /defaultBilshenzConfig/
+scripts/run-loss-analysis.ts
+  /pineV5/i, /leftSideScan/i, /defaultBilshenzConfig/
+scripts/run-monte-carlo-stress.ts
+  /defaultBilshenzConfig/
+scripts/run-pine-parity-audit.ts
+  /pineV5/i, /leftSideScan/i, /defaultBilshenzConfig/
+scripts/run-xau-12mo-yahoo-backtest.ts
+  /jimplas/i, /pineV5/i, /leftSideScan/i, /defaultBilshenzConfig/
+scripts/security-duplication-audit-output.txt
+  /jimplas/i, /pineV5/i, /leftSideScan/i, /defaultBilshenzConfig/, /riskPctAtr/, /p1VolumeAtrMult/, /wickRatioMin/, /athZoneLow/, /yieldHighThreshold/, /leftScanBars/, /hard_block/i, /computeBilshenzSnapshot/, /signalEngine/
+scripts/security-duplication-audit.mjs
+  /jimplas/i, /pineV5/i, /leftSideScan/i, /defaultBilshenzConfig/, /riskPctAtr/, /p1VolumeAtrMult/, /wickRatioMin/, /athZoneLow/, /yieldHighThreshold/, /leftScanBars/, /hard_block/i, /computeBilshenzSnapshot/, /signalEngine/
+security/sanitizeDesk.js
+  /defaultBilshenzConfig/
+
+=== REMAINING HIGH RISK (even after changes) ===
+1. Dev builds (__DEV__) still bundle full engine — use release + DESK_REMOTE=1 for phones
+2. engine/reference/*.pine in repo — exclude from distribution zips
+3. scripts/* backtest + *.txt outputs — private CI only
+4. Lot sizing formula in utils/riskSizing.js — reveals risk÷(pips×$/pip)
+5. Webhook/Telegram payloads may include entry/SL/TP — server should sign orders
+6. Hermes bundle is decompilable — remote API is the real protection
+
+Total flagged paths: 34
