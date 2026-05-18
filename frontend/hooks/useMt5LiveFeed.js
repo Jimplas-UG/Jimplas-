@@ -62,9 +62,15 @@ function bundleFromGold(gold, dxyBars, uyBars) {
 
 /**
  * Live MT5 quotes, account, and M30 history for the app engine + UI.
- * @param {{ baseUrl: string, connected: boolean, enabled?: boolean, symbol?: string }} p
+ * @param {{ baseUrl: string, connected: boolean, enabled?: boolean, symbol?: string, pollTicks?: boolean }} p
  */
-export function useMt5LiveFeed({ baseUrl, connected, enabled = true, symbol = 'XAUUSD' }) {
+export function useMt5LiveFeed({
+  baseUrl,
+  connected,
+  enabled = true,
+  symbol = 'XAUUSD',
+  pollTicks = true,
+}) {
   const [price, setPrice] = useState(null);
   const [bid, setBid] = useState(null);
   const [ask, setAsk] = useState(null);
@@ -293,7 +299,7 @@ export function useMt5LiveFeed({ baseUrl, connected, enabled = true, symbol = 'X
   }, [enabled, connected, baseUrl, symbol, bootstrap, loadHistory]);
 
   useEffect(() => {
-    if (!enabled || !connected || !baseUrl?.trim()) return undefined;
+    if (!pollTicks || !enabled || !connected || !baseUrl?.trim()) return undefined;
     const b = baseUrl.trim();
     let cancelled = false;
     const poll = async () => {
@@ -307,7 +313,7 @@ export function useMt5LiveFeed({ baseUrl, connected, enabled = true, symbol = 'X
       cancelled = true;
       clearInterval(id);
     };
-  }, [enabled, connected, baseUrl]);
+  }, [pollTicks, enabled, connected, baseUrl]);
 
   return {
     price,

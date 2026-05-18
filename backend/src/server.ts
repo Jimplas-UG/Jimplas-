@@ -88,6 +88,12 @@ function sanitizeForClient(raw: ReturnType<typeof computeBilshenzSnapshot>, geoR
     signals: {
       anyBuy: !!raw.signals?.anyBuy,
       anySell: !!raw.signals?.anySell,
+      p1Buy: !!raw.signals?.p1Buy,
+      p1Sell: !!raw.signals?.p1Sell,
+      p2Buy: !!raw.signals?.p2Buy,
+      p2Sell: !!raw.signals?.p2Sell,
+      p3Buy: !!raw.signals?.p3Buy,
+      p3Sell: !!raw.signals?.p3Sell,
     },
     _internal: {
       gates: raw.gates,

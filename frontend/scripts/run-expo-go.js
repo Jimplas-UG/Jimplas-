@@ -94,10 +94,12 @@ function adbReverseMetro() {
   }
 }
 
+const portArgs = passThru.includes('--port') ? [] : ['--port', String(metroPort)];
+
 let expoArgs;
 
 if (forceTunnel) {
-  expoArgs = ['expo', 'start', '--tunnel', '--go', ...passThru];
+  expoArgs = ['expo', 'start', '--tunnel', '--go', ...portArgs, ...passThru];
   console.log('');
   console.log('[expo-go] Mode: TUNNEL (EXPO_FORCE_TUNNEL=1)');
   console.log('[expo-go] Use the QR / URL from this terminal. Requires ngrok reachable from this PC.');
@@ -108,7 +110,7 @@ if (forceTunnel) {
   adbHasDevice() &&
   adbReverseMetro()
 ) {
-  expoArgs = ['expo', 'start', '--localhost', '--go', ...passThru];
+  expoArgs = ['expo', 'start', '--localhost', '--go', ...portArgs, ...passThru];
   console.log('');
   console.log('[expo-go] Mode: USB / adb reverse tcp:' + metroPort + ' → Metro on localhost');
   console.log('[expo-go] In Expo Go, use the QR from THIS terminal (often exp://127.0.0.1:' + metroPort + ').');
@@ -122,7 +124,8 @@ if (forceTunnel) {
   }
   const ip = pickLanIp();
   process.env.REACT_NATIVE_PACKAGER_HOSTNAME = ip;
-  expoArgs = ['expo', 'start', '--lan', '--go', ...passThru];
+  // Use --go only (not --lan): EXPO_OFFLINE skips expo.dev checks but cannot combine with --lan.
+  expoArgs = ['expo', 'start', '--go', ...portArgs, ...passThru];
   console.log('');
   console.log('[expo-go] Mode: LAN  REACT_NATIVE_PACKAGER_HOSTNAME=' + ip);
   console.log('[expo-go] After Metro starts, open: exp://' + ip + ':' + metroPort);
@@ -130,7 +133,7 @@ if (forceTunnel) {
   if (process.platform === 'win32') {
     console.log('');
     console.log('[expo-go] If Expo Go 52 shows "Failed to download remote update" on same Wi‑Fi:');
-    console.log('[expo-go]   A) Admin PowerShell in myapp: npm run fix:metro-firewall  (allows TCP ' + metroPort + ' inbound)');
+    console.log('[expo-go]   A) Admin PowerShell in frontend: npm run fix:metro-firewall  (allows TCP ' + metroPort + ' inbound)');
     console.log('[expo-go]   B) Plug USB + adb in PATH → npm run start:usb → open exp://127.0.0.1:' + metroPort + ' from this terminal');
     console.log('[expo-go]   C) Works through most Wi‑Fi blocks: npm run start:tunnel  (uses ngrok via @expo/ngrok)');
     console.log('[expo-go]   D) Some routers isolate clients (guest/AP isolation) → use USB or tunnel, not LAN.');
@@ -138,10 +141,25 @@ if (forceTunnel) {
   console.log('');
 }
 
+// Skip expo.dev API version checks when offline / behind firewall (Metro still bundles).
+// Tunnel mode needs outbound network for ngrok — do not force offline there.
+const childEnv = { ...process.env };
+if (!forceTunnel && childEnv.EXPO_OFFLINE == null) {
+  childEnv.EXPO_OFFLINE = '1';
+}
+if (!childEnv.EXPO_PUBLIC_DESK_API_URL?.trim()) {
+  const apiHost = childEnv.REACT_NATIVE_PACKAGER_HOSTNAME || pickLanIp();
+  childEnv.EXPO_PUBLIC_DESK_API_URL = `http://${apiHost}:8791`;
+}
+console.log('[expo-go] desk-api URL:', childEnv.EXPO_PUBLIC_DESK_API_URL);
+console.log('[expo-go] Start strategy server: cd ..\\backend && npm run desk-api');
+
+childEnv.CI = childEnv.CI ?? '1';
+
 const child = spawn('npx', expoArgs, {
   stdio: 'inherit',
   shell: true,
-  env: process.env,
+  env: childEnv,
 });
 
 child.on('exit', (code, signal) => {

@@ -11,4 +11,4 @@ export {
   m30ToM15Bars,
   resolveJournalOnBar,
   sliceMarketBundleToM30End,
-} from '../engine';
+} from '../client/engineClient';

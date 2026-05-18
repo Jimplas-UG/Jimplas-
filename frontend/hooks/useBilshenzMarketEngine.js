@@ -14,10 +14,9 @@ import {
   sliceMarketBundleToM30End,
 } from './deskComputeLocal';
 import { fetchDeskSnapshot } from '../client/deskRemote';
+import { ensureDeskSnapshot } from '../lib/snapshotDefaults';
 import { buildDeskPrefs, sanitizeSnapshot } from '../security/sanitizeDesk';
-import { ENABLE_DESK_DIAGNOSTICS, IS_PRODUCTION_DESK } from '../security/deskMode';
-
-const USE_REMOTE_DESK = process.env.EXPO_PUBLIC_DESK_REMOTE === '1';
+import { ENABLE_DESK_DIAGNOSTICS, IS_PRODUCTION_DESK, USE_REMOTE_DESK } from '../security/deskMode';
 
 const STORAGE_JOURNAL = '@bilshenz_v1/journalRows';
 const STORAGE_TRADES = '@bilshenz_v1/tradeCount';
@@ -245,7 +244,7 @@ function engineReducer(state, action) {
     const m15 = m30ToM15Bars(bundle.m30);
     const journalCtx = { m30: bundle.m30, m15, cfg: action.cfg ?? defaultBilshenzConfig };
     const resolved = resolveJournalOnBar(state.journalRows, bar, idx, journalCtx);
-    const sig = snapshot.signals.anyBuy || snapshot.signals.anySell;
+    const sig = snapshot.signals?.anyBuy || snapshot.signals?.anySell;
 
     if (sig && state.lastBarSig !== bar.t) {
       const maxDailyTrades = action.cfg?.maxDailyTrades ?? 5;
@@ -254,8 +253,8 @@ function engineReducer(state, action) {
       if (countSignalTowardCap && state.tradeCount < maxDailyTrades) {
         const tr = snapshot.trade;
         const sideMatch =
-          (tr?.side === 'BUY' && snapshot.signals.anyBuy) ||
-          (tr?.side === 'SELL' && snapshot.signals.anySell);
+          (tr?.side === 'BUY' && snapshot.signals?.anyBuy) ||
+          (tr?.side === 'SELL' && snapshot.signals?.anySell);
         if (tr?.allowed && sideMatch) {
           const timeStr = new Date(now.getTime()).toISOString().slice(11, 16) + ' UTC';
           const row = buildManualJournalEntry({ trade: tr, barIndex: idx, timeStr });
@@ -267,8 +266,8 @@ function engineReducer(state, action) {
       } else if (!countSignalTowardCap && state.tradeCount < maxDailyTrades) {
         const tr = snapshot.trade;
         const sideMatch =
-          (tr?.side === 'BUY' && snapshot.signals.anyBuy) ||
-          (tr?.side === 'SELL' && snapshot.signals.anySell);
+          (tr?.side === 'BUY' && snapshot.signals?.anyBuy) ||
+          (tr?.side === 'SELL' && snapshot.signals?.anySell);
         if (tr?.allowed && sideMatch) {
           const timeStr = new Date(now.getTime()).toISOString().slice(11, 16) + ' UTC';
           const row = buildManualJournalEntry({ trade: tr, barIndex: idx, timeStr });
@@ -338,23 +337,24 @@ export function useBilshenzMarketEngine({
   const [bundleReady, setBundleReady] = useState(false);
 
   useEffect(() => {
-    if (runMode !== 'live') return;
-    if (useMt5Data) {
-      if (!mt5MarketBundle?.m30?.length) {
+    if (!useMt5Data) {
+      if (prevUseMt5Ref.current && runMode === 'live') {
         baseRef.current = null;
         setBundleReady(false);
-        return;
       }
-      baseRef.current = mt5MarketBundle;
-      anchorPriceRef.current = mt5MarketBundle.m30[mt5MarketBundle.m30.length - 1].c;
-      setBundleReady(true);
+      prevUseMt5Ref.current = false;
       return;
     }
-    if (prevUseMt5Ref.current && !useMt5Data) {
+    if (runMode !== 'live' && runMode !== 'backtest') return;
+    if (!mt5MarketBundle?.m30?.length) {
       baseRef.current = null;
       setBundleReady(false);
+      return;
     }
-    prevUseMt5Ref.current = useMt5Data;
+    baseRef.current = mt5MarketBundle;
+    anchorPriceRef.current = mt5MarketBundle.m30[mt5MarketBundle.m30.length - 1].c;
+    setBundleReady(true);
+    prevUseMt5Ref.current = true;
   }, [mt5MarketBundle, runMode, useMt5Data]);
 
   useEffect(() => {
@@ -362,8 +362,9 @@ export function useBilshenzMarketEngine({
     const barCount = Platform.OS === 'web' ? 480 : 320;
     const build = () => {
       if (cancelled || baseRef.current) return;
+      if (useMt5Data && mt5MarketBundle?.m30?.length) return;
       if (runMode === 'live' && (useMt5Data || mt5Connected)) return;
-      if (runMode === 'live' && mt5MarketBundle?.m30?.length) return;
+      if (runMode === 'backtest' && useMt5Data) return;
       baseRef.current = buildSyntheticMarketBundle({
         anchorClose: anchorPriceRef.current,
         count: barCount,
@@ -506,10 +507,10 @@ export function useBilshenzMarketEngine({
 
   const rawSnapshot = USE_REMOTE_DESK ? remoteSnapshot ?? BOOT_SNAPSHOT : localSnapshot;
 
-  const snapshot = useMemo(
-    () => sanitizeSnapshot(rawSnapshot, { geoRisk }) ?? BOOT_SNAPSHOT,
-    [rawSnapshot, geoRisk]
-  );
+  const snapshot = useMemo(() => {
+    const sanitized = sanitizeSnapshot(rawSnapshot, { geoRisk });
+    return ensureDeskSnapshot(sanitized ?? rawSnapshot, BOOT_SNAPSHOT);
+  }, [rawSnapshot, geoRisk]);
 
   const bundleRef = useRef(bundle);
   const snapshotRef = useRef(snapshot);
@@ -598,16 +599,16 @@ export function useBilshenzMarketEngine({
     lastBar?.c,
     lastBar?.h,
     lastBar?.l,
-    snapshot.signals.anyBuy,
-    snapshot.signals.anySell,
+    snapshot.signals?.anyBuy,
+    snapshot.signals?.anySell,
     snapshot.trade?.allowed,
     snapshot.trade?.side,
     snapshot.trade?.rr,
     snapshot.winRate.totalWins,
     snapshot.winRate.totalLosses,
     snapshot.slBuffer,
-    snapshot.sr.nearestRes,
-    snapshot.sr.nearestSup,
+    snapshot.sr?.nearestRes,
+    snapshot.sr?.nearestSup,
     cfg,
     tickNow.getTime(),
     runMode,

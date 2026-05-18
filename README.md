@@ -31,6 +31,10 @@ $env:EXPO_PUBLIC_DESK_API_KEY = "your-secret"
 npm start
 ```
 
+From repo root you can also run `npm start` (delegates to `frontend/`).
+
+If `expo start` fails with `TypeError: fetch failed`, Metro is usually fine — the CLI could not reach expo.dev. `npm start` sets `EXPO_OFFLINE=1` automatically; or run `npx expo start --offline` from `frontend/`.
+
 For local dev with full INTEL panels, omit `EXPO_PUBLIC_DESK_REMOTE` — Metro loads the engine from `../backend/engine`.
 
 See `frontend/README.md` and `backend/README.md` for details.

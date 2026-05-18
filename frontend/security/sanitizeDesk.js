@@ -7,9 +7,10 @@ import {
   publicStatusLine,
   publicTradeStatus,
 } from './publicLabels';
+import { EMPTY_SIGNALS, EMPTY_WIN_RATE } from '../lib/snapshotDefaults';
 import { SHOW_STRATEGY_INTEL } from './deskMode';
 
-const EMPTY_TRADE = {
+const EMPTY_TRADE_SANITIZE = {
   allowed: false,
   side: null,
   setup: null,
@@ -67,20 +68,21 @@ export function sanitizeSnapshot(raw, opts = {}) {
       london: !!raw.session?.london,
       newYork: !!raw.session?.newYork,
     },
-    signals: raw.signals
-      ? {
-          anyBuy: !!raw.signals.anyBuy,
-          anySell: !!raw.signals.anySell,
-          p1Buy: !!raw.signals.p1Buy,
-          p1Sell: !!raw.signals.p1Sell,
-          p2Buy: !!raw.signals.p2Buy,
-          p2Sell: !!raw.signals.p2Sell,
-          p3Buy: !!raw.signals.p3Buy,
-          p3Sell: !!raw.signals.p3Sell,
-        }
-      : {},
+    signals: {
+      ...EMPTY_SIGNALS,
+      ...(raw.signals ?? {}),
+      anyBuy: !!raw.signals?.anyBuy,
+      anySell: !!raw.signals?.anySell,
+      p1Buy: !!raw.signals?.p1Buy,
+      p1Sell: !!raw.signals?.p1Sell,
+      p2Buy: !!raw.signals?.p2Buy,
+      p2Sell: !!raw.signals?.p2Sell,
+      p3Buy: !!raw.signals?.p3Buy,
+      p3Sell: !!raw.signals?.p3Sell,
+    },
     trade: publicTrade,
     winRate: {
+      ...EMPTY_WIN_RATE,
       totalWins: raw.winRate?.totalWins ?? 0,
       totalLosses: raw.winRate?.totalLosses ?? 0,
       winRatePct: raw.winRate?.winRatePct ?? 0,

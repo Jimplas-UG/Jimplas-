@@ -1,44 +1,50 @@
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const path = require('path');
-const { getDefaultConfig } = require('expo/metro-config');
-
-/** @type {import('expo/metro-config').MetroConfig} */
-const config = getDefaultConfig(__dirname);
-
-const useRemoteDesk = process.env.EXPO_PUBLIC_DESK_REMOTE === '1';
-const engineStub = path.resolve(__dirname, 'client', 'engineStub.js');
-const backendEngine = path.resolve(__dirname, '..', 'backend', 'engine', 'index.ts');
-
-function isEngineModule(moduleName) {
-  return (
-    moduleName === '../engine' ||
-    moduleName === './engine' ||
-    moduleName.endsWith('/engine') ||
-    moduleName.endsWith('/engine/index') ||
-    moduleName.endsWith('/engine/index.ts') ||
-    moduleName.startsWith('./engine/') ||
-    moduleName.startsWith('../engine/')
-  );
-}
-
-const prevResolve = config.resolver.resolveRequest;
-config.resolver.resolveRequest = (context, moduleName, platform) => {
-  if (isEngineModule(moduleName)) {
-    const filePath = useRemoteDesk ? engineStub : backendEngine;
-    return { type: 'sourceFile', filePath };
-  }
-  if (prevResolve) {
-    return prevResolve(context, moduleName, platform);
-  }
-  return context.resolveRequest(context, moduleName, platform);
-};
-
-if (useRemoteDesk) {
-  config.resolver.blockList = [
-    ...(Array.isArray(config.resolver.blockList) ? config.resolver.blockList : []),
-    /backend[\\/]engine[\\/].*\.ts$/,
-    /backend[\\/]engine[\\/]reference[\\/]/,
-  ];
-}
-
-module.exports = config;
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const path = require('path');
+const { getDefaultConfig } = require('expo/metro-config');
+
+const projectRoot = __dirname;
+const monorepoRoot = path.resolve(projectRoot, '..');
+const backendRoot = path.resolve(monorepoRoot, 'backend');
+const engineClient = path.resolve(projectRoot, 'client', 'engineClient.js');
+
+/** @type {import('expo/metro-config').MetroConfig} */
+const config = getDefaultConfig(projectRoot);
+
+config.resolver.nodeModulesPaths = [
+  path.resolve(projectRoot, 'node_modules'),
+  path.resolve(monorepoRoot, 'node_modules'),
+];
+
+// Never ship backend TypeScript to Expo Go — strategy runs on desk-api only.
+config.resolver.blockList = [
+  ...(Array.isArray(config.resolver.blockList) ? config.resolver.blockList : []),
+  new RegExp(`${backendRoot.replace(/\\/g, '[\\\\/]')}[\\\\/]engine[\\\\/].*\\.(ts|tsx)$`),
+  /[\\/]backend[\\/]engine[\\/]/,
+];
+
+function isEngineModule(moduleName) {
+  return (
+    moduleName === '../engine' ||
+    moduleName === './engine' ||
+    moduleName.endsWith('/engine') ||
+    moduleName.endsWith('/engine/index') ||
+    moduleName.endsWith('/engine/index.ts') ||
+    moduleName.endsWith('/engine/index.js') ||
+    moduleName.startsWith('./engine/') ||
+    moduleName.startsWith('../engine/')
+  );
+}
+
+const prevResolve = config.resolver.resolveRequest;
+config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (isEngineModule(moduleName)) {
+    return { type: 'sourceFile', filePath: engineClient };
+  }
+  if (prevResolve) {
+    return prevResolve(context, moduleName, platform);
+  }
+  return context.resolveRequest(context, moduleName, platform);
+};
+
+module.exports = config;
+

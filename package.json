@@ -3,12 +3,14 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "expo start",
-    "start:clear": "expo start --clear",
-    "qr": "node scripts/make-expo-qr.js",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
-    "web": "expo start --web"
+    "start": "npm run start --prefix frontend",
+    "start:clear": "npm run start:clear --prefix frontend",
+    "qr": "npm run qr --prefix frontend",
+    "android": "npm run android --prefix frontend",
+    "ios": "npm run ios --prefix frontend",
+    "web": "npm run web --prefix frontend",
+    "legacy:start": "expo start",
+    "legacy:web": "expo start --web"
   },
   "dependencies": {
     "@expo/metro-runtime": "~4.0.1",

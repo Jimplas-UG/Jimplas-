@@ -26,7 +26,12 @@ import BilshenzHeader from './components/BilshenzHeader';
 import GeoPoliticalTicker from './components/GeoPoliticalTicker';
 
 const Mt5BridgePanelLazy = lazy(() => import('./components/Mt5BridgePanel'));
-import { buildBrokerOrderIntent, canExecuteTrade, executeBrokerRoutes, postTelegramSignalRelay } from './broker';
+import {
+  buildBrokerOrderIntent,
+  canExecuteTrade,
+  executeBrokerRoutes,
+  postTelegramSignalRelay,
+} from './brokerClient';
 import { Mt5BridgeProvider, useMt5Bridge } from './contexts/Mt5BridgeContext';
 import { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';
 import { mapJournalToHistRows, mapSessionBitsFromEngine, mapSrFromEngine } from './hooks/deskComputeLocal';
@@ -102,6 +107,7 @@ function mapSrForUi(snap, livePrice, C) {
 
 const STORAGE_BROKER_HOOK_URL = '@bilshenz_v1/brokerHookUrl';
 const STORAGE_AUTO_EXEC = '@bilshenz_v1/autoExecSignals';
+const STORAGE_PAPER_BT_AUTO = '@bilshenz_v1/paperBtAutoExec';
 const STORAGE_TELEGRAM_RELAY_URL = '@bilshenz_v1/telegramRelayUrl';
 const STORAGE_TELEGRAM_RELAY_SECRET = '@bilshenz_v1/telegramRelaySecret';
 const STORAGE_TELEGRAM_NOTIFY = '@bilshenz_v1/telegramNotifyEnabled';
@@ -319,7 +325,8 @@ function LeftColumn({ sr, dxy }) {
   const eng = useContext(BilshenzEngineCtx);
   const snap = eng?.snapshot;
   const useRealMt5 = !!eng?.useRealMt5;
-  const dxyLive = snap?.dxyClose ?? (useRealMt5 ? null : dxy);
+  const useMt5Paper = !!eng?.useMt5PaperBacktest;
+  const dxyLive = snap?.dxyClose ?? (useRealMt5 || useMt5Paper ? null : dxy);
   const cfg = eng?.cfg;
   const bias = snap?.bias;
   const risk = snap?.risk;
@@ -376,7 +383,7 @@ function LeftColumn({ sr, dxy }) {
         ? '⚠ MEDIUM GEO — monitor headlines\nSize capped per protocol'
         : 'GEO filter clear — full protocol sizing';
 
-  const liveBadge = useRealMt5 ? 'MT5 LIVE' : 'SIM';
+  const liveBadge = useRealMt5 ? 'MT5 LIVE' : useMt5Paper ? 'MT5 PAPER BT' : 'SIM';
 
   return (
     <View style={styles.leftCol}>
@@ -625,9 +632,9 @@ function DxyRow({ l, v, vc }) {
 
 function ScannerRows({ sr, bull }) {
   const { colors: C, styles } = useBilshenzTheme();
-  const pips = bull ? sr.bullPips : sr.bearPips;
-  const chop = bull ? sr.bullChop : sr.bearChop;
-  const clean = bull ? sr.bullClean : sr.bearClean;
+  const pips = bull ? (sr.bullPips ?? 0) : (sr.bearPips ?? 0);
+  const chop = bull ? (sr.bullChop ?? 0) : (sr.bearChop ?? 0);
+  const clean = bull ? !!sr.bullClean : !!sr.bearClean;
   const qualOk = pips >= 25;
   const chopOk = chop <= 3;
   const row = (a, b, bc) => (
@@ -1706,6 +1713,9 @@ function ProfileTab({
   autoExecuteSignals,
   onAutoExecuteSignalsChange,
   mt5Connected,
+  paperBtAutoExec,
+  onPaperBtAutoExecChange,
+  useMt5PaperBacktest,
 }) {
   const { colors: C, styles } = useBilshenzTheme();
   const [profileId, setProfileId] = useState('p1');
@@ -2075,7 +2085,10 @@ function ProfileTab({
         <Row style={styles.psSegRow}>
           {[
             { id: 'live', lab: 'LIVE SIM' },
-            ...(SHOW_STRATEGY_INTEL ? [{ id: 'backtest', lab: 'BACKTEST' }] : []),
+            {
+              id: 'backtest',
+              lab: useMt5PaperBacktest ? 'MT5 PAPER BT' : 'BACKTEST',
+            },
           ].map((m) => (
             <Pressable
               key={m.id}
@@ -2097,8 +2110,35 @@ function ProfileTab({
           <Text style={[styles.psToggleHint, { marginTop: 6 }]}>Wait for engine sync before backtest.</Text>
         )}
         <Text style={[styles.psToggleHint, { marginTop: 8, lineHeight: 16 }]}>
-          Backtest replays synthetic M30 history: desk shows a scrub bar. Live journal is frozen while in backtest and restored when you return to LIVE SIM.
+          {useMt5PaperBacktest
+            ? 'MT5 paper backtest: replays real M30 bars from your terminal. Journal fills on signals — no orders sent to MT5.'
+            : 'Backtest replays M30 history (synthetic unless MT5 is connected in Profile). Live journal is frozen during backtest and restored when you return to LIVE SIM.'}
         </Text>
+
+        {runMode === 'backtest' ? (
+          <>
+            <View style={styles.psRowDivider} />
+            <Row style={styles.psToggleRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.psToggleLbl}>PAPER AUTO-EXEC (BACKTEST)</Text>
+                <Text style={styles.psToggleHint}>
+                  {paperBtAutoExec
+                    ? 'ON — adds journal rows when signals fire on each replay bar (no MT5 orders).'
+                    : 'OFF — manual EXEC only during backtest.'}
+                  {!mt5Connected ? ' Connect MT5 for real historical bars.' : ''}
+                </Text>
+              </View>
+              <Switch
+                value={paperBtAutoExec}
+                onValueChange={onPaperBtAutoExecChange}
+                disabled={!engineHydrated || runMode !== 'backtest'}
+                trackColor={{ false: C.border, true: 'rgba(212,180,90,0.45)' }}
+                thumbColor={paperBtAutoExec ? C.goldL : C.dim2}
+                style={{ transform: [{ scaleX: 1.05 }, { scaleY: 1.05 }] }}
+              />
+            </Row>
+          </>
+        ) : null}
 
         <View style={styles.psRowDivider} />
         <Row style={styles.psToggleRow}>
@@ -2493,6 +2533,7 @@ function AppContent({ onEngineReady }) {
   const [telegramNotifyEnabled, setTelegramNotifyEnabled] = useState(false);
   const [lastBrokerMsg, setLastBrokerMsg] = useState('');
   const [autoExecuteSignals, setAutoExecuteSignals] = useState(false);
+  const [paperBtAutoExec, setPaperBtAutoExec] = useState(true);
   const prevMt5ConnectedRef = useRef(false);
   const userDisabledAutoExecRef = useRef(false);
 
@@ -2501,13 +2542,20 @@ function AppContent({ onEngineReady }) {
     setAutoExecuteSignals(!!enabled);
   }, []);
 
+  const onPaperBtAutoExecChange = useCallback((enabled) => {
+    setPaperBtAutoExec(!!enabled);
+  }, []);
+
+  const useMt5PaperBacktest = mt5Connected && runMode === 'backtest';
+  const useMt5ForEngine = mt5Connected && (runMode === 'live' || runMode === 'backtest');
+  const useRealMt5 = mt5Connected && runMode === 'live';
+
   const mt5Live = useMt5LiveFeed({
     baseUrl: mt5BaseUrl,
     connected: mt5Connected,
-    enabled: runMode === 'live',
+    enabled: useMt5ForEngine,
+    pollTicks: runMode === 'live',
   });
-
-  const useRealMt5 = mt5Connected && runMode === 'live';
 
   const accountEquity = useMemo(() => {
     if (!useRealMt5) return SIM_DESK_EQUITY;
@@ -2529,6 +2577,7 @@ function AppContent({ onEngineReady }) {
           STORAGE_TELEGRAM_RELAY_SECRET,
           STORAGE_TELEGRAM_NOTIFY,
           STORAGE_AUTO_EXEC,
+          STORAGE_PAPER_BT_AUTO,
         ]);
         if (cancelled) return;
         const m = Object.fromEntries(pairs);
@@ -2543,6 +2592,8 @@ function AppContent({ onEngineReady }) {
           userDisabledAutoExecRef.current = true;
           setAutoExecuteSignals(false);
         }
+        if (m[STORAGE_PAPER_BT_AUTO] === '0') setPaperBtAutoExec(false);
+        else if (m[STORAGE_PAPER_BT_AUTO] === '1') setPaperBtAutoExec(true);
       } catch {
         /* ignore */
       }
@@ -2583,6 +2634,10 @@ function AppContent({ onEngineReady }) {
   }, [autoExecuteSignals]);
 
   useEffect(() => {
+    AsyncStorage.setItem(STORAGE_PAPER_BT_AUTO, paperBtAutoExec ? '1' : '0').catch(() => {});
+  }, [paperBtAutoExec]);
+
+  useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
@@ -2604,21 +2659,23 @@ function AppContent({ onEngineReady }) {
     initialTradeCount: 0,
     runMode,
     backtestEndIndex,
-    mt5MarketBundle: useRealMt5 ? mt5Live.marketBundle : null,
-    useMt5Data: useRealMt5,
-    mt5Connected: useRealMt5,
-    countSignalTowardCap: !autoExecuteSignals,
+    mt5MarketBundle: useMt5ForEngine ? mt5Live.marketBundle : null,
+    useMt5Data: useMt5ForEngine,
+    mt5Connected: useMt5ForEngine,
+    countSignalTowardCap: runMode === 'backtest' ? paperBtAutoExec : !autoExecuteSignals,
   });
 
   const engineCtxValue = useMemo(
     () => ({
       ...bilshenzEngine,
       useRealMt5,
+      useMt5PaperBacktest,
+      useMt5ForEngine,
       mt5Connected,
       mt5Account: useRealMt5 ? mt5Live.account : null,
       accountEquity: sizingEquity,
     }),
-    [bilshenzEngine, useRealMt5, mt5Connected, mt5Live.account, sizingEquity]
+    [bilshenzEngine, useRealMt5, useMt5PaperBacktest, useMt5ForEngine, mt5Connected, mt5Live.account, sizingEquity]
   );
   const bzSnapshot = bilshenzEngine.snapshot;
   const tradeCount = bilshenzEngine.tradeCount;
@@ -2693,7 +2750,7 @@ function AppContent({ onEngineReady }) {
     const m30 = bilshenzEngine.bundle?.m30;
     if (!m30?.length) return;
     const bar = m30[m30.length - 1];
-    const sig = bzSnapshot.signals.anyBuy || bzSnapshot.signals.anySell;
+    const sig = bzSnapshot.signals?.anyBuy || bzSnapshot.signals?.anySell;
     if (!sig || lastSig !== bar.t) return;
     if (autoHookDoneBarRef.current === bar.t) return;
     if (autoHookInFlight.current) return;
@@ -2756,8 +2813,8 @@ function AppContent({ onEngineReady }) {
     bilshenzEngine.bundle?.m30?.length
       ? bilshenzEngine.bundle.m30[bilshenzEngine.bundle.m30.length - 1].t
       : null,
-    bzSnapshot.signals.anyBuy,
-    bzSnapshot.signals.anySell,
+    bzSnapshot.signals?.anyBuy,
+    bzSnapshot.signals?.anySell,
     bzSnapshot.trade,
     tradeCount,
     dailyTradeCap,
@@ -2794,10 +2851,10 @@ function AppContent({ onEngineReady }) {
   }, [bilshenzEngine.journalRows, useRealMt5]);
 
   const engineWinRatePctStr =
-    bzSnapshot.winRate.totalWins + bzSnapshot.winRate.totalLosses > 0
-      ? `${bzSnapshot.winRate.winRatePct.toFixed(1)}%`
+    (bzSnapshot.winRate?.totalWins ?? 0) + (bzSnapshot.winRate?.totalLosses ?? 0) > 0
+      ? `${(bzSnapshot.winRate?.winRatePct ?? 0).toFixed(1)}%`
       : '—';
-  const engineClosedTradesStr = String(bzSnapshot.winRate.totalWins + bzSnapshot.winRate.totalLosses);
+  const engineClosedTradesStr = String((bzSnapshot.winRate?.totalWins ?? 0) + (bzSnapshot.winRate?.totalLosses ?? 0));
 
   const sessionBits = useMemo(() => mapSessionBitsFromEngine(bzSnapshot.session), [bzSnapshot.session]);
 
@@ -2870,11 +2927,11 @@ function AppContent({ onEngineReady }) {
 
   useEffect(() => {
     if (!useRealMt5) return;
-    const ap = bzSnapshot.risk.atrPips;
+    const ap = bzSnapshot.risk?.atrPips;
     if (ap == null || !Number.isFinite(ap)) return;
     setAtr(ap);
     setAtrFillPct(Math.min(100, ((ap - 30) / 120) * 100));
-  }, [useRealMt5, bzSnapshot.risk.atrPips]);
+  }, [useRealMt5, bzSnapshot.risk?.atrPips]);
 
   useEffect(() => {
     if (runMode !== 'live' || useRealMt5) return undefined;
@@ -2920,7 +2977,7 @@ function AppContent({ onEngineReady }) {
 
   const atrModePill = useMemo(() => {
     const cfg = bilshenzEngine.cfg;
-    const ap = bzSnapshot.risk.atrPips;
+    const ap = bzSnapshot.risk?.atrPips;
     const rn = cfg?.riskPctAtrNormal ?? 1;
     const re = cfg?.riskPctAtrElevated ?? 0.7;
     const rc = cfg?.riskPctAtrCrisis ?? 0.5;
@@ -2928,7 +2985,7 @@ function AppContent({ onEngineReady }) {
     if (ap < 50) return { text: `✓ NORMAL MODE — RISK: ${rn}%`, cls: 'std' };
     if (ap < 100) return { text: `⚠ ELEVATED MODE — RISK: ${re}%`, cls: 'amb' };
     return { text: `✗ CRISIS MODE — RISK: ${rc}%`, cls: 'red' };
-  }, [bzSnapshot.risk.atrPips, bilshenzEngine.cfg]);
+  }, [bzSnapshot.risk?.atrPips, bilshenzEngine.cfg]);
 
   const chartPts = useMemo(() => {
     const m30 = bilshenzEngine.bundle?.m30;
@@ -2971,9 +3028,9 @@ function AppContent({ onEngineReady }) {
     if (!SHOW_STRATEGY_INTEL) {
       return { text: publicSetupPill(t), variant: 'wick' };
     }
-    if (t.setup === 'P1') return { text: '🟩 P1 — S/R BREAKOUT & RETEST', variant: 'break' };
-    if (t.setup === 'P2') return { text: '🟦 P2 — WICK FILL (FLUIDITY)', variant: 'wick' };
-    if (t.setup === 'P3') return { text: '🟡 P3 — SESSION IMPULSE', variant: 'flip' };
+    if (t?.setup === 'P1') return { text: '🟩 P1 — S/R BREAKOUT & RETEST', variant: 'break' };
+    if (t?.setup === 'P2') return { text: '🟦 P2 — WICK FILL (FLUIDITY)', variant: 'wick' };
+    if (t?.setup === 'P3') return { text: '🟡 P3 — SESSION IMPULSE', variant: 'flip' };
     if (bzSnapshot.risk?.chopZone) return { text: '⚠ H4 CHOP — advisory', variant: 'wick' };
     return { text: '⬡ SCANNING — NO PRIORITY SETUP', variant: 'wick' };
   }, [bzSnapshot.trade, bzSnapshot.risk?.chopZone]);
@@ -3002,6 +3059,11 @@ function AppContent({ onEngineReady }) {
         return;
       }
       incrementExecuteTrade();
+      if (runModeRef.current === 'backtest') {
+        setLastBrokerMsg('Paper BT: journal entry recorded (no MT5 order)');
+        setExecBusy(false);
+        return;
+      }
       const hookUrl = brokerWebhookUrl.trim();
       const intent = buildBrokerOrderIntent(tradeSnap, {
         barTimeMs: barT,
@@ -3133,12 +3195,12 @@ function AppContent({ onEngineReady }) {
     newsActive,
   ]);
 
-  if (!bundleReady || (useRealMt5 && !mt5Live.feedReady)) {
+  if (!bundleReady || (useMt5ForEngine && !mt5Live.feedReady)) {
     return (
       <View style={[styles.safeRoot, { alignItems: 'center', justifyContent: 'center', padding: 24 }]}>
         <Text style={{ color: C.dim, fontSize: 12, textAlign: 'center' }}>
-          {useRealMt5
-            ? mt5Live.feedError || 'Connecting to MT5…'
+          {useMt5ForEngine
+            ? mt5Live.feedError || 'Loading MT5 history…'
             : 'Loading market engine…'}
         </Text>
       </View>
@@ -3185,7 +3247,13 @@ function AppContent({ onEngineReady }) {
                     <Row style={styles.livePill}>
                       <BlinkDot color={C.green} />
                       <Text style={styles.livePillTxt}>
-                        {runMode === 'backtest' ? 'BACKTEST' : useRealMt5 ? 'MT5 LIVE' : 'LIVE SIM'}
+                        {runMode === 'backtest'
+                          ? useMt5PaperBacktest
+                            ? 'MT5 PAPER BT'
+                            : 'BACKTEST'
+                          : useRealMt5
+                            ? 'MT5 LIVE'
+                            : 'LIVE SIM'}
                       </Text>
                     </Row>
                     <View style={styles.clockBox}>
@@ -3313,7 +3381,8 @@ function AppContent({ onEngineReady }) {
                     <Text style={styles.btMiniBtnTxt}>{backtestPlaying ? '❚❚' : '▶'}</Text>
                   </TouchableOpacity>
                   <Text style={styles.btBarMeta}>
-                    Bar {bilshenzEngine.backtestEndClamped + 1}/{bilshenzEngine.m30BaseLength} · BT journal (not persisted)
+                    Bar {bilshenzEngine.backtestEndClamped + 1}/{bilshenzEngine.m30BaseLength} ·{' '}
+                    {useMt5PaperBacktest ? 'MT5 paper journal' : 'BT journal'} (not persisted)
                   </Text>
                 </Row>
                 <Slider
@@ -3506,6 +3575,9 @@ function AppContent({ onEngineReady }) {
                   autoExecuteSignals={autoExecuteSignals}
                   onAutoExecuteSignalsChange={onAutoExecuteSignalsChange}
                   mt5Connected={mt5Connected}
+                  paperBtAutoExec={paperBtAutoExec}
+                  onPaperBtAutoExecChange={onPaperBtAutoExecChange}
+                  useMt5PaperBacktest={useMt5PaperBacktest}
                 />
               </View>
             ) : mobileTab === 'risk' ? (
