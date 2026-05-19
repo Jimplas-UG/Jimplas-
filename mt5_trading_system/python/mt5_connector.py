@@ -133,7 +133,15 @@ class MT5Connector:
         spread_pips = spread_live / pip if pip > 0 else 0.0
         tick_size = float(info.trade_tick_size) if info.trade_tick_size else point
         tick_value = float(info.trade_tick_value) if info.trade_tick_value else 0.0
-        usd_per_pip_per_lot = (tick_value * (pip / tick_size)) if tick_size > 0 and tick_value > 0 else None
+        usd_per_pip_per_lot: float | None = None
+        # tick_value formula under-reports on some demo symbols (e.g. XAUUSD → $1 vs ~$10/lot).
+        ref_price = float(tick.ask) if tick is not None and tick.ask > 0 else 0.0
+        if ref_price > 0:
+            profit = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, sym, 1.0, ref_price, ref_price + pip)
+            if profit is not None and profit != 0:
+                usd_per_pip_per_lot = abs(float(profit))
+        if usd_per_pip_per_lot is None and tick_size > 0 and tick_value > 0:
+            usd_per_pip_per_lot = tick_value * (pip / tick_size)
         return {
             "symbol": sym,
             "point": point,
@@ -315,8 +323,26 @@ class MT5Connector:
             )
         return rows
 
+    def try_attach_existing(self) -> bool:
+        """Use an already-logged-in MT5 terminal (no POST /api/login required)."""
+        if mt5 is None:
+            return False
+        if self._logged_in:
+            return True
+        if not self.ensure_init():
+            return False
+        a = mt5.account_info()
+        if a is None:
+            return False
+        self._logged_in = True
+        self._login = int(a.login)
+        self._server = str(a.server)
+        return True
+
     def _alive(self) -> bool:
-        if mt5 is None or not self._logged_in:
+        if mt5 is None:
+            return False
+        if not self._logged_in and not self.try_attach_existing():
             return False
         t = mt5.terminal_info()
         if t is None or not t.connected:

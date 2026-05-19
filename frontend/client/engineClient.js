@@ -15,8 +15,10 @@ export const defaultBilshenzConfig = {
   athZoneLow: 0,
   athZoneHigh: 0,
   useLegacyTpClampOnly: true,
-  tp1MinRewardPips: 10,
-  tp1MaxRewardPips: 28,
+  tp1MinRewardPips: 14,
+  tp1MaxRewardPips: 32,
+  enableM15AdverseExit: true,
+  m15MinRiskPctBeforeExit: 0.45,
 };
 
 export function nyYmdKey(tUtcMs) {

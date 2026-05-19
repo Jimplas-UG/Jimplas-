@@ -1,10 +1,11 @@
 BILSHENZ JIMPLAS FLUIDITY AUDIT
-Generated: 2026-05-17T22:59:23.395Z
-Checks: 9  |  Passed: 9  |  Failed: 0
+Generated: 2026-05-19T00:23:53.388Z
+Checks: 10  |  Passed: 10  |  Failed: 0
 
 PASS  cfg.jimplasActive  —  usePineV5 routes Jimplas engine
 PASS  cfg.p2Loose  —  P2 loose (volume mode)
-PASS  cfg.tpClamp  —  TP clamp 10–28 pips
+PASS  cfg.tpClamp  —  TP clamp 14–32 pips (m15+tp14/32 live profile)
+PASS  cfg.m15Exit  —  M15 adverse half-loss exit enabled
 PASS  cfg.journalSizing  —  journalSizingSlPips=20
 PASS  pine.reference  —  Jimplas Pine reference present
 PASS  riskSizing.util  —  live lot sizing helper present

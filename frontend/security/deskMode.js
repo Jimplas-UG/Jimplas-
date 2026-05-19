@@ -24,6 +24,7 @@ export function getDeskApiBase() {
 
 export function deskApiHeaders() {
   const key = process.env.EXPO_PUBLIC_DESK_API_KEY?.trim();
-  if (!key) return {};
-  return { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json' };
+  if (key) headers.Authorization = `Bearer ${key}`;
+  return headers;
 }

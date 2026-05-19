@@ -1,5 +1,6 @@
 import type {
   BilshenzEngineConfig,
+  EquityRiskContext,
   GateSnapshot,
   RiskSnapshot,
   SessionSnapshot,
@@ -9,7 +10,7 @@ import type {
 import { computeConfidencePct } from './confidenceEngine';
 import { applyBalancedClampGeometry, clampTp1ForJournal, rewardRiskRatio } from './tradeGeometry';
 import { closedM15BarsInWindow, M30_MS } from './m15Bars';
-import { halfLossExitPrice, isAdverseM15Close } from './m15AdverseExit';
+import { halfLossExitPrice, isAdverseM15Close, underwaterRiskFraction } from './m15AdverseExit';
 import type { Bar, TradeJournalRow } from './types';
 
 export function buildTradeRecommendation(args: {
@@ -30,6 +31,7 @@ export function buildTradeRecommendation(args: {
   openJournalRow?: TradeJournalRow | null;
   m30?: Bar[];
   m15?: Bar[];
+  equityRisk?: EquityRiskContext | null;
 }): TradeRecommendation {
   const {
     cfg,
@@ -49,6 +51,7 @@ export function buildTradeRecommendation(args: {
     openJournalRow,
     m30,
     m15,
+    equityRisk,
   } = args;
 
   const pineMode = cfg.usePineV5 !== false;
@@ -64,6 +67,21 @@ export function buildTradeRecommendation(args: {
   if (risk.dxyBlocksBuy) blocks.push('DXY rising — buy blocked');
   if (risk.athZoneBlocked) blocks.push('ATH wick zone — buy blocked');
   if (risk.geoHigh) blocks.push('Geopolitical HIGH');
+
+  if (equityRisk && cfg.maxDailyLossPct > 0 && equityRisk.dayStartEquity > 0) {
+    const dayLossPct =
+      ((equityRisk.dayStartEquity - equityRisk.currentEquity) / equityRisk.dayStartEquity) * 100;
+    if (dayLossPct >= cfg.maxDailyLossPct) {
+      blocks.push(`Daily loss limit (${cfg.maxDailyLossPct}% from day start)`);
+    }
+  }
+  if (equityRisk && cfg.maxDrawdownPct > 0 && equityRisk.peakEquity > 0) {
+    const ddPct =
+      ((equityRisk.peakEquity - equityRisk.currentEquity) / equityRisk.peakEquity) * 100;
+    if (ddPct >= cfg.maxDrawdownPct) {
+      blocks.push(`Drawdown limit (${cfg.maxDrawdownPct}% from peak)`);
+    }
+  }
 
   const conf = computeConfidencePct({ session, gates, risk, cfg, bullClean, bearClean });
 
@@ -159,7 +177,11 @@ export function buildTradeRecommendation(args: {
     const upToCloseMs = m30[idx]!.t + M30_MS;
     const window = closedM15BarsInWindow(m15, afterMs, upToCloseMs);
     const last = window[window.length - 1];
-    if (last && isAdverseM15Close(row, last)) {
+    if (
+      last &&
+      isAdverseM15Close(row, last) &&
+      underwaterRiskFraction(row, last.c) >= cfg.m15MinRiskPctBeforeExit
+    ) {
       m15EarlyExit = {
         exitPrice: halfLossExitPrice(row),
         message: 'M15 closed against position — exit at half loss (SL under prior M30)',

@@ -23,6 +23,7 @@ import {
   mulberry32,
   sampleWithReplacement,
   shuffleInPlace,
+  type RealisticCosts,
 } from './lib/journalEquityPath';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -35,6 +36,12 @@ type JournalExportV1 = {
   simUsdPerEnginePip: number;
   cfgSnapshot: Partial<BilshenzEngineConfig>;
   trades: TradeJournalRow[];
+  realisticMode?: boolean;
+  realisticCosts?: {
+    spreadPips: number;
+    slippagePipsPerSide: number;
+    brokerSlCap?: number | null;
+  };
 };
 
 function readArgStr(name: string): string | null {
@@ -66,6 +73,23 @@ function stressFlipWins(rows: TradeJournalRow[], flipProb: number, rand: () => n
   });
 }
 
+function buildRealisticCosts(
+  raw: JournalExportV1,
+  cfg: BilshenzEngineConfig
+): RealisticCosts | null {
+  if (!raw.realisticMode || !raw.realisticCosts) return null;
+  const rc = raw.realisticCosts;
+  const cap = rc.brokerSlCap;
+  return {
+    spreadPips: rc.spreadPips,
+    slippagePipsPerSide: rc.slippagePipsPerSide,
+    lossSlPips: (structural, sizing) => {
+      if (cap != null && cap > 0) return Math.min(structural, cap);
+      return structural;
+    },
+  };
+}
+
 function runSuite(
   sims: number,
   baseTrades: TradeJournalRow[],
@@ -76,7 +100,8 @@ function runSuite(
   startEq: number,
   riskPct: number,
   mode: 'shuffle' | 'bootstrap' | 'winstress',
-  winFlipProb: number
+  winFlipProb: number,
+  realistic: RealisticCosts | null
 ): { ends: number[]; dds: number[] } {
   const ends: number[] = [];
   const dds: number[] = [];
@@ -93,7 +118,7 @@ function runSuite(
     if (mode === 'winstress') {
       work = stressFlipWins(work, winFlipProb, rand);
     }
-    const { endEquity, series } = equityAfterAutoTrades(work, pip, simPip, startEq, riskPct, cfg, null);
+    const { endEquity, series } = equityAfterAutoTrades(work, pip, simPip, startEq, riskPct, cfg, realistic);
     ends.push(endEquity);
     dds.push(maxDrawdownFromSeries(startEq, series));
   }
@@ -139,7 +164,8 @@ async function main() {
     console.warn(`Warning: only ${trades.length} closed trades — Monte Carlo will be noisy.`);
   }
 
-  const baseline = equityAfterAutoTrades(trades, pip, simPip, startEq, riskPct, cfg, null);
+  const realistic = buildRealisticCosts(raw, cfg);
+  const baseline = equityAfterAutoTrades(trades, pip, simPip, startEq, riskPct, cfg, realistic);
   const baseDd = maxDrawdownFromSeries(startEq, baseline.series);
   const baseRet = ((baseline.endEquity - startEq) / startEq) * 100;
 
@@ -170,7 +196,8 @@ async function main() {
       startEq,
       riskPct,
       s.mode,
-      s.mode === 'winstress' ? winFlipProb : 0
+      s.mode === 'winstress' ? winFlipProb : 0,
+      realistic
     );
     ends.sort((a, b) => a - b);
     dds.sort((a, b) => a - b);

@@ -85,6 +85,7 @@ export function useMt5LiveFeed({
   const symRef = useRef(symbol);
   const fullLoadDoneRef = useRef(false);
   const inflightRef = useRef(false);
+  const loadGenRef = useRef(0);
 
   const applyMacroLast = useCallback((dxyRes, uyRes) => {
     if (dxyRes?.bars?.length) {
@@ -138,13 +139,15 @@ export function useMt5LiveFeed({
   }, [baseUrl]);
 
   const loadHistory = useCallback(
-    async (barCount, opts = { macro: true }) => {
+    async (barCount, opts = { macro: true }, gen = loadGenRef.current) => {
       const b = baseUrl?.trim();
       if (!b || !connected || inflightRef.current) return false;
+      if (gen !== loadGenRef.current) return false;
       inflightRef.current = true;
       try {
         const sym = symRef.current;
         const gold = await fetchMt5BarsM30(b, sym, barCount);
+        if (gen !== loadGenRef.current) return false;
         if (!gold.length) {
           setFeedError('No M30 bars from MT5');
           return false;
@@ -158,12 +161,14 @@ export function useMt5LiveFeed({
             fetchBarsFirst(b, US10Y_CANDIDATES, macroN),
           ]);
         }
+        if (gen !== loadGenRef.current) return false;
         setMarketBundle(bundleFromGold(gold, dxyRes.bars, uyRes.bars));
         applyGoldLast(gold);
         applyMacroLast(dxyRes, uyRes);
         setFeedReady(true);
         setFeedError('');
         const st = await fetchStatusAccount(b);
+        if (gen !== loadGenRef.current) return false;
         if (st.account) setAccount(st.account);
         void writeCache(gold, st.account, dxyRes.bars, uyRes.bars, sym);
         return true;
@@ -206,7 +211,7 @@ export function useMt5LiveFeed({
 
       if (!fullLoadDoneRef.current) {
         fullLoadDoneRef.current = true;
-        void loadHistory(FULL_BARS, { macro: true });
+        void loadHistory(FULL_BARS, { macro: true }, loadGenRef.current);
       }
       return;
     }
@@ -252,7 +257,7 @@ export function useMt5LiveFeed({
 
     if (!fullLoadDoneRef.current) {
       fullLoadDoneRef.current = true;
-      void loadHistory(FULL_BARS, { macro: true });
+      void loadHistory(FULL_BARS, { macro: true }, loadGenRef.current);
     }
   }, [
     baseUrl,
@@ -267,6 +272,7 @@ export function useMt5LiveFeed({
 
   useEffect(() => {
     if (!enabled || !connected || !baseUrl?.trim()) {
+      loadGenRef.current += 1;
       setFeedReady(false);
       setMarketBundle(null);
       setPrice(null);
@@ -278,13 +284,14 @@ export function useMt5LiveFeed({
       return undefined;
     }
     fullLoadDoneRef.current = false;
+    const gen = ++loadGenRef.current;
     let cancelled = false;
     void (async () => {
       await bootstrap();
-      if (cancelled) return;
+      if (cancelled || gen !== loadGenRef.current) return;
     })();
     const barId = setInterval(() => {
-      void loadHistory(FULL_BARS, { macro: true });
+      void loadHistory(FULL_BARS, { macro: true }, loadGenRef.current);
     }, 90_000);
     const acctId = setInterval(async () => {
       const b = baseUrl.trim();

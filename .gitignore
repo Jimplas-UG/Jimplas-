@@ -22,6 +22,7 @@ expo-env.d.ts
 .metro-health-check*
 .metro-test-*/
 frontend/.metro-test-*/
+frontend/.audit-build/
 
 # debug
 npm-debug.*

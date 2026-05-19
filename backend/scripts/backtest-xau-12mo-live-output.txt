@@ -2,33 +2,35 @@ BILSHENZ — XAU backtest (M30 engine, journal + throttle) · LIVE profile (sess
 Data: MT5 live API http://127.0.0.1:8765 — XAUUSD M30 (13708 bars)
 Journal window: 12 month(s) · end
 Max daily trades (NY day cap): 3
+Risk halts: daily loss 3% · max DD 15% (skipped signals: 0)
 Window (journal entries): 2025-05-01 → 2026-05-01 exclusive end
-M30 bars loaded: 13708  |  Main loop: 48.74s
+M30 bars loaded: 13708  |  Main loop: 55.39s
 
 --- Realistic mode (closer to live MT5) ---
 MT5 server: MetaQuotes-Demo
 Account currency: USD
-Spread: 1.50 pips (broker) · Slippage: 0.40 p/side
-$/pip/lot: $12.50 (broker tick value)
+Spread: 2.10 pips (broker) · Slippage: 0.40 p/side
+$/pip/lot: $1.00 (broker tick value)
 Loss model: broker SL capped at 20p (live parity) · Lots sized on 20p risk · friction deducted
-Ideal model (no friction, -1R losses): $8720.44 (+772.0%) — for comparison
+Ideal model (no friction, -1R losses): $23008.10 (+2200.8%) — for comparison
 
 Starting equity: $1,000
-Ending equity (closed trades, compounding 1.00%): $5792.10
-Net PnL: $+4792.10 (+479.21%)
-Max drawdown (on equity curve): $228.51
+Ending equity (closed trades, compounding 1.00%): $12019.21
+Net PnL: $+11019.21 (+1101.92%)
+Max drawdown (on equity curve): $269.09
 
 Trades opened in window: 557  (OPEN at end: 0)
-Closed in window: 557  |  Wins: 333  |  Losses: 224 (incl. 0 half-loss M15 exits)
-Win rate (closed): 59.78%
-P1 / P2 / P3 WR: 0.0% / 59.8% / 0.0%
+Closed in window: 557  |  Wins: 308  |  Losses: 249 (incl. 201 half-loss M15 exits)
+Win rate (closed): 55.30%
+P1 / P2 / P3 WR: 0.0% / 55.3% / 0.0%
 
 --- Risk metrics (USD PnL per closed trade, compounding risk) ---
-Gross profit (wins): $9458.43
-Gross loss (losses): $4666.33
-Profit factor (gross profit / gross loss): 2.03
+Gross profit (wins): $16780.75
+Gross loss (losses): $5761.54
+Profit factor (gross profit / gross loss): 2.91
 
 --- Weaknesses / improvement hooks (heuristic) ---
 • Signals cluster in P2; P1/P3 rarely fire — review breakout / flip gates or P2 filters.
 • Max drawdown exceeds ~15% of starting equity in this sim — consider lower risk % or fewer daily trades.
+• 201 half-loss (M15) exits — compare vs holding full SL for your style.
 • Large gap vs frictionless “ideal” run — spreads/slippage/SL cap dominate; tune realistic execution.

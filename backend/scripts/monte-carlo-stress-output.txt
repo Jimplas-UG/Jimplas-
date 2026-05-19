@@ -1,23 +1,23 @@
 BILSHENZ — Monte Carlo equity stress (journal replay)
-Journal: C:\Users\Amoskole\bsv3\myapp\scripts\mc-stress-demo-seed.json
-Trades: 8  |  Start equity: $1,000  |  Risk/trade: 1.00%
-Sims per suite: 500  |  Seed: 7  |  Win→loss shock (winstress only): 5.0%
+Journal: C:\Users\Amoskole\bsv3\backend\scripts\ic-12mo-journal.json
+Trades: 557  |  Start equity: $1,000  |  Risk/trade: 1.00%
+Sims per suite: 2000  |  Seed: 42  |  Win→loss shock (winstress only): 5.0%
 
-Baseline (historical order): end $1399.99  (+40.00%)  max DD $12.30
+Baseline (historical order): end $5792.10  (+479.21%)  max DD $228.51
 
 --- ORDER SHUFFLE (path / compounding) ---
-End equity  p5/p25/p50/p75/p95: 1400 / 1400 / 1400 / 1400 / 1400
-Max DD $    p5/p25/p50/p75/p95: 11 / 14 / 17 / 21 / 31
+End equity  p5/p25/p50/p75/p95: 5792.10 / 5792.10 / 5792.10 / 5792.10 / 5792.10
+Max DD $    p5/p25/p50/p75/p95: 195 / 256 / 309 / 382 / 534
 Rough tail: fraction of paths ending below −8% vs start: 0.0%
 
 --- BOOTSTRAP WITH REPLACEMENT (sampling variation) ---
-End equity  p5/p25/p50/p75/p95: 1181 / 1295 / 1400 / 1520 / 1651
-Max DD $    p5/p25/p50/p75/p95: 6 / 12 / 16 / 25 / 39
+End equity  p5/p25/p50/p75/p95: 3823.19 / 4905.31 / 5844.30 / 6931.46 / 9022.42
+Max DD $    p5/p25/p50/p75/p95: 189 / 254 / 310 / 394 / 575
 Rough tail: fraction of paths ending below −8% vs start: 0.0%
 
 --- SHUFFLE + WIN STRESS (random adverse fills) ---
-End equity  p5/p25/p50/p75/p95: 1289 / 1400 / 1400 / 1400 / 1400
-Max DD $    p5/p25/p50/p75/p95: 12 / 14 / 19 / 24 / 33
+End equity  p5/p25/p50/p75/p95: 3313.94 / 3697.06 / 3946.39 / 4184.15 / 4557.55
+Max DD $    p5/p25/p50/p75/p95: 167 / 214 / 263 / 331 / 470
 Rough tail: fraction of paths ending below −8% vs start: 0.0%
 
 Interpretation: bootstrap/shuffle do not create new edges — they stress-test

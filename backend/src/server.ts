@@ -5,7 +5,7 @@
  */
 import http from 'node:http';
 import { computeBilshenzSnapshot, defaultBilshenzConfig } from '../engine';
-import type { BilshenzEngineConfig, MarketBundle } from '../engine/types';
+import type { BilshenzEngineConfig, EquityRiskContext, MarketBundle } from '../engine/types';
 import { canExecuteTrade } from '../broker/tradeExecutionGates';
 import { publicBlockReason } from '../security/publicLabels';
 
@@ -153,6 +153,7 @@ const server = http.createServer(async (req, res) => {
         journalRows?: unknown[];
         dailyTradeCount?: number;
         nowUtcMs?: number;
+        equityRisk?: EquityRiskContext;
       }>(req);
       const cfg = mergeCfg(body.prefs ?? {});
       const raw = computeBilshenzSnapshot({
@@ -161,6 +162,7 @@ const server = http.createServer(async (req, res) => {
         dailyTradeCount: body.dailyTradeCount ?? 0,
         journalRows: (body.journalRows as never[]) ?? [],
         nowUtcMs: body.nowUtcMs ?? Date.now(),
+        equityRisk: body.equityRisk ?? null,
       });
       const out = sanitizeForClient(raw, body.prefs?.geoRisk);
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -175,6 +177,7 @@ const server = http.createServer(async (req, res) => {
         journalRows?: unknown[];
         dailyTradeCount?: number;
         nowUtcMs?: number;
+        equityRisk?: EquityRiskContext;
       }>(req);
       const cfg = mergeCfg(body.prefs ?? {});
       const raw = computeBilshenzSnapshot({
@@ -183,6 +186,7 @@ const server = http.createServer(async (req, res) => {
         dailyTradeCount: body.dailyTradeCount ?? 0,
         journalRows: (body.journalRows as never[]) ?? [],
         nowUtcMs: body.nowUtcMs ?? Date.now(),
+        equityRisk: body.equityRisk ?? null,
       });
       const gate = canExecuteTrade(raw, raw.trade);
       res.writeHead(200, { 'Content-Type': 'application/json' });

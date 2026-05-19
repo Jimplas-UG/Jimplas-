@@ -257,7 +257,13 @@ function engineReducer(state, action) {
           (tr?.side === 'SELL' && snapshot.signals?.anySell);
         if (tr?.allowed && sideMatch) {
           const timeStr = new Date(now.getTime()).toISOString().slice(11, 16) + ' UTC';
-          const row = buildManualJournalEntry({ trade: tr, barIndex: idx, timeStr });
+          const row = buildManualJournalEntry({
+            trade: tr,
+            barIndex: idx,
+            timeStr,
+            m30: bundle.m30,
+            cfg: action.cfg ?? defaultBilshenzConfig,
+          });
           if (row) {
             nextRows = [row, ...resolved].slice(0, 20);
             nextCount = Math.min(maxDailyTrades, state.tradeCount + 1);
@@ -270,7 +276,13 @@ function engineReducer(state, action) {
           (tr?.side === 'SELL' && snapshot.signals?.anySell);
         if (tr?.allowed && sideMatch) {
           const timeStr = new Date(now.getTime()).toISOString().slice(11, 16) + ' UTC';
-          const row = buildManualJournalEntry({ trade: tr, barIndex: idx, timeStr });
+          const row = buildManualJournalEntry({
+            trade: tr,
+            barIndex: idx,
+            timeStr,
+            m30: bundle.m30,
+            cfg: action.cfg ?? defaultBilshenzConfig,
+          });
           if (row) {
             nextRows = [row, ...resolved].slice(0, 20);
           }
@@ -604,8 +616,8 @@ export function useBilshenzMarketEngine({
     snapshot.trade?.allowed,
     snapshot.trade?.side,
     snapshot.trade?.rr,
-    snapshot.winRate.totalWins,
-    snapshot.winRate.totalLosses,
+    snapshot.winRate?.totalWins,
+    snapshot.winRate?.totalLosses,
     snapshot.slBuffer,
     snapshot.sr?.nearestRes,
     snapshot.sr?.nearestSup,
@@ -632,6 +644,35 @@ export function useBilshenzMarketEngine({
     dispatch({ type: 'AUTO_TRADE_COUNT', maxDailyTrades: cfg.maxDailyTrades });
   }, [cfg.maxDailyTrades]);
 
+  const getDeskExecuteGateBody = useCallback(() => {
+    if (!bundle) return null;
+    return {
+      bundle,
+      prefs: buildDeskPrefs({
+        spread,
+        geoRisk,
+        newsActive,
+        nfpBlackout,
+        maxDailyTrades,
+        simUsdPerEnginePip,
+      }),
+      journalRows: state.journalRows,
+      dailyTradeCount: state.tradeCount,
+      nowUtcMs,
+    };
+  }, [
+    bundle,
+    spread,
+    geoRisk,
+    newsActive,
+    nfpBlackout,
+    maxDailyTrades,
+    simUsdPerEnginePip,
+    state.journalRows,
+    state.tradeCount,
+    nowUtcMs,
+  ]);
+
   if (ENABLE_DESK_DIAGNOSTICS && remoteError) {
     console.warn('[desk-remote]', remoteError);
   }
@@ -653,5 +694,6 @@ export function useBilshenzMarketEngine({
     backtestWarmupMin: Math.min(80, Math.max(0, baseM30Len - 1)),
     deskRemote: USE_REMOTE_DESK,
     deskRemoteError: remoteError,
+    getDeskExecuteGateBody,
   };
 }

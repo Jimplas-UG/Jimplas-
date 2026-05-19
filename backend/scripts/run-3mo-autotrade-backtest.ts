@@ -99,10 +99,11 @@ function pnlUsdForClosed(
   riskUsd: number
 ): number {
   const slPips = Math.abs(row.entry - row.sl) / pipSize;
-  if (slPips <= 0 || !Number.isFinite(row.tp1)) return 0;
+  const tp1 = row.tp1;
+  if (slPips <= 0 || tp1 == null || !Number.isFinite(tp1)) return 0;
   const lots = riskUsd / (slPips * simUsdPerEnginePip);
   if (outcome === 'LOSS') return -riskUsd;
-  const tpPips = Math.abs(row.tp1 - row.entry) / pipSize;
+  const tpPips = Math.abs(tp1 - row.entry) / pipSize;
   return tpPips * simUsdPerEnginePip * lots;
 }
 

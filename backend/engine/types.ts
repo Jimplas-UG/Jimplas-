@@ -160,6 +160,12 @@ export type BilshenzEngineConfig = {
   minConfidencePctToTrade: number;
   /** Minimum reward:risk (after TP clamp) for any setup. */
   minRewardRiskToTrade: number;
+  /** Halt new entries when NY-day loss from day-start equity reaches this % (0 = off). */
+  maxDailyLossPct: number;
+  /** Halt new entries when drawdown from peak equity reaches this % (0 = off). */
+  maxDrawdownPct: number;
+  /** Live: evaluate signals on last closed M30 bar (n-2), not the forming bar. */
+  signalOnClosedBarOnly: boolean;
   /** Stricter minimum R:R for P3 (retest); must stay compatible with {@link tp1MaxRewardPips} / {@link journalSlPips}. */
   p3MinRewardRisk: number;
   /**
@@ -247,8 +253,8 @@ export const defaultBilshenzConfig: BilshenzEngineConfig = {
   p1WickRatioMin: 0.6,
   p2BodyRatioMin: 0.4,
   e2NearImmZonePips: 0,
-  tp1MinRewardPips: 10,
-  tp1MaxRewardPips: 28,
+  tp1MinRewardPips: 14,
+  tp1MaxRewardPips: 32,
   p1MinRewardRisk: 1.2,
   p2MinRewardRisk: 1,
   p1MaxTpPips: 45,
@@ -256,7 +262,7 @@ export const defaultBilshenzConfig: BilshenzEngineConfig = {
   p1MaxSlPips: 35,
   p2MaxSlPips: 16,
   p3SlBufferPips: 0,
-  enableM15AdverseExit: false,
+  enableM15AdverseExit: true,
   useLegacyTpClampOnly: true,
   minConfidencePctToTrade: 66,
   minRewardRiskToTrade: 0.52,
@@ -264,6 +270,16 @@ export const defaultBilshenzConfig: BilshenzEngineConfig = {
   p3MinRewardRisk: 0.62,
   beOffset: 1.2,
   simUsdPerEnginePip: 12.5,
+  maxDailyLossPct: 3,
+  maxDrawdownPct: 15,
+  signalOnClosedBarOnly: true,
+};
+
+/** Optional equity context for daily-loss / max-drawdown circuit breakers. */
+export type EquityRiskContext = {
+  currentEquity: number;
+  peakEquity: number;
+  dayStartEquity: number;
 };
 
 export type SessionName = 'PRE_LONDON' | 'LONDON' | 'NEW_YORK' | 'DEAD';

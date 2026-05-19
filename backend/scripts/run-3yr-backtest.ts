@@ -95,10 +95,11 @@ function pnlUsdForClosed(
   riskUsd: number
 ): number {
   const slPips = Math.abs(row.entry - row.sl) / pipSize;
-  if (slPips <= 0 || !Number.isFinite(row.tp1)) return 0;
+  const tp1 = row.tp1;
+  if (slPips <= 0 || tp1 == null || !Number.isFinite(tp1)) return 0;
   const lots = riskUsd / (slPips * simUsdPerEnginePip);
   if (outcome === 'LOSS') return -riskUsd;
-  const tpPips = Math.abs(row.tp1 - row.entry) / pipSize;
+  const tpPips = Math.abs(tp1 - row.entry) / pipSize;
   return tpPips * simUsdPerEnginePip * lots;
 }
 
@@ -268,7 +269,9 @@ function main() {
   lines.push(`Modeled net P&L (closed only, fixed $ risk/trade): $${netPnl.toFixed(2)}`);
   lines.push('');
   lines.push('--- Last 50 closed trades (newest first in journal) ---');
-  const closedRows = resolved.filter((r) => r.out === 'WIN' || r.out === 'LOSS');
+  const closedRows = resolved.filter(
+    (r): r is TradeJournalRow & { out: 'WIN' | 'LOSS' } => r.out === 'WIN' || r.out === 'LOSS'
+  );
   for (const r of closedRows.slice(0, 50)) {
     const pnl = pnlUsdForClosed(r, r.out, pip, simPip, riskUsd);
     lines.push(

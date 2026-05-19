@@ -2,6 +2,7 @@ import type {
   Bar,
   BilshenzEngineConfig,
   BilshenzSnapshot,
+  EquityRiskContext,
   MarketBundle,
   TradeJournalRow,
   TradeRecommendation,
@@ -266,10 +267,11 @@ export type ComputeArgs = {
   dailyTradeCount: number;
   journalRows: TradeJournalRow[];
   nowUtcMs: number;
+  equityRisk?: EquityRiskContext | null;
 };
 
 export function computeBilshenzSnapshot(args: ComputeArgs): BilshenzSnapshot {
-  const { bundle, cfg, dailyTradeCount, journalRows, nowUtcMs } = args;
+  const { bundle, cfg, dailyTradeCount, journalRows, nowUtcMs, equityRisk } = args;
   const m30 = bundle.m30;
   const h4 = bundle.h4;
   const d1 = bundle.d1;
@@ -277,9 +279,14 @@ export function computeBilshenzSnapshot(args: ComputeArgs): BilshenzSnapshot {
   const mn1 = bundle.mn1;
   const n = m30.length;
   const idx = n - 1;
-  const close = m30[idx].c;
+  const signalIdx =
+    cfg.signalOnClosedBarOnly !== false && n >= 2 ? n - 2 : idx;
+  const signalBar = m30[signalIdx]!;
+  const close = signalBar.c;
+  const tUtc =
+    nowUtcMs != null && Number.isFinite(nowUtcMs) ? nowUtcMs : (m30[idx]?.t ?? Date.now());
 
-  const session = sessionFromUtcEpochMs(nowUtcMs);
+  const session = sessionFromUtcEpochMs(tUtc);
   const atrArr = atr(m30, cfg.atrLen);
   const atrVal = lastFinite(atrArr);
   const labelGap = atrVal != null ? atrVal * 0.3 : 0;
@@ -301,7 +308,7 @@ export function computeBilshenzSnapshot(args: ComputeArgs): BilshenzSnapshot {
         close,
         pip: cfg.pipSize,
         m30,
-        idx,
+        idx: signalIdx,
         minPips: cfg.minRangePips,
       })
     : leftSideScan({
@@ -310,7 +317,7 @@ export function computeBilshenzSnapshot(args: ComputeArgs): BilshenzSnapshot {
         close,
         pip: cfg.pipSize,
         m30,
-        idx,
+        idx: signalIdx,
         minPips: cfg.minRangePips,
         lsBars: cfg.leftScanBars,
         lsChopMax: cfg.leftScanMaxChop,
@@ -324,7 +331,7 @@ export function computeBilshenzSnapshot(args: ComputeArgs): BilshenzSnapshot {
 
   const risk = computeRisk(m30, h4, cfg, atrVal, dxyClose, dxyClose3, us10yClose, close);
 
-  const wick = wickMetricsAt(m30, idx);
+  const wick = wickMetricsAt(m30, signalIdx);
 
   const m15 = m30ToM15Bars(m30);
   const resolvedJournal = resolveJournalOnBar(journalRows, m30[idx], idx, {
@@ -348,7 +355,7 @@ export function computeBilshenzSnapshot(args: ComputeArgs): BilshenzSnapshot {
         sr,
         m30,
         h4,
-        idx,
+        idx: signalIdx,
         atrVal,
       })
     : null;
@@ -367,7 +374,7 @@ export function computeBilshenzSnapshot(args: ComputeArgs): BilshenzSnapshot {
         range,
         wick,
         m30,
-        idx,
+        idx: signalIdx,
       });
 
   const sessionOk = session.inSession || cfg.showHistory;
@@ -376,7 +383,7 @@ export function computeBilshenzSnapshot(args: ComputeArgs): BilshenzSnapshot {
     : applyJournalSignalThrottle({
         cfg,
         m30,
-        idx,
+        idx: signalIdx,
         signals: rawSignals,
         journalRows: resolvedJournal,
         aggregateDeps: {
@@ -407,12 +414,13 @@ export function computeBilshenzSnapshot(args: ComputeArgs): BilshenzSnapshot {
     slBuffer,
     bullClean: range.bullClean,
     bearClean: range.bearClean,
-    barLow: m30[idx].l,
-    barHigh: m30[idx].h,
+    barLow: signalBar.l,
+    barHigh: signalBar.h,
     setupLevels: jimplasResult?.levels ?? null,
     openJournalRow: openRow,
     m30,
     m15,
+    equityRisk: equityRisk ?? null,
   });
 
   const levels = { ...pdhPdl(d1), ...weeklyPrevHl(w1), ...monthlyPrevHl(mn1) };

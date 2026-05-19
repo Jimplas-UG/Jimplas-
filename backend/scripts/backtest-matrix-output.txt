@@ -1,0 +1,23 @@
+BILSHENZ — 12mo config matrix (MT5 M30, realistic, live profile)
+Data: 13708 M30 bars · server: MetaQuotes-Demo
+Start $1000 · risk 1.00%/trade · target $7000
+DD filter: max DD ≤ $320 (~32% of start)
+
+id                  | end$    | gap$7k | maxDD$ | DD%  | trds | WR%   | PF   | halfL | flags
+--------------------|---------|--------|--------|------|------|-------|------|-------|------------------
+m15+tp14_32         |   10757 | -3757 |    248 | 24.8 |  557 |  55.3 | 2.77 |   201 | m15 tp14/32 ✓≥7k
+m15_exit            |    7008 |    -8 |    165 | 16.5 |  557 |  56.2 | 2.42 |   197 | m15 tp10/28 ✓≥7k
+tp_14_32            |    6832 | +  168 |    285 | 28.5 |  557 |  58.9 | 2.10 |     0 | tp14/32 
+baseline            |    4388 | + 2612 |    220 | 22.0 |  557 |  59.8 | 1.81 |     0 | tp10/28 
+strict+tp14_32      |    1198 | + 5802 |     40 |  4.0 |   36 |  69.4 | 2.39 |     0 | strict tp14/32 
+full_combo          |    1188 | + 5812 |     38 |  3.8 |   36 |  61.1 | 2.75 |    13 | strict m15 tp14/32 
+full+chop_block     |    1188 | + 5812 |     38 |  3.8 |   36 |  61.1 | 2.75 |    13 | strict m15 tp14/32 chop 
+full+cooldown6      |    1171 | + 5829 |     37 |  3.7 |   35 |  60.0 | 2.60 |    13 | strict m15 tp14/32 cd6 
+full+all_guards     |    1171 | + 5829 |     37 |  3.7 |   35 |  60.0 | 2.60 |    13 | strict m15 tp14/32 cd6 chop 
+strict_p2           |    1157 | + 5843 |     39 |  3.9 |   36 |  69.4 | 2.12 |     0 | strict tp10/28 
+strict+m15          |    1151 | + 5849 |     37 |  3.7 |   36 |  61.1 | 2.43 |    13 | strict m15 tp10/28 
+
+Closest to $7k (DD ok): **m15_exit** → $7008.36 (gap $-8, max DD $165)
+Hit $7k+ with acceptable DD: m15_exit=$7008, m15+tp14_32=$10757
+
+Baseline reference: end $4387.61

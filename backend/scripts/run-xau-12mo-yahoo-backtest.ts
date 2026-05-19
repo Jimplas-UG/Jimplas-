@@ -166,6 +166,23 @@ function readRiskPctFromArgs(): number {
   return RISK_PCT;
 }
 
+function readArgN(name: string, def: number): number {
+  const argv = process.argv.slice(2);
+  const p = `--${name}=`;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a.startsWith(p)) {
+      const v = parseFloat(a.slice(p.length));
+      return Number.isFinite(v) ? v : def;
+    }
+    if (a === `--${name}` && argv[i + 1]) {
+      const v = parseFloat(argv[i + 1]!);
+      return Number.isFinite(v) ? v : def;
+    }
+  }
+  return def;
+}
+
 type Mt5BrokerContext = {
   equity: number | null;
   balance: number | null;
@@ -535,14 +552,14 @@ async function main() {
     showHistoryMode: false,
     useLegacyTpClampOnly: true,
     p2UseStrictFilters: false,
-    enableM15AdverseExit: false,
     tpClampMinRiskReward: 1,
     tpClampSlFraction: 0,
     maxSlPipsForEntry: 0,
-    tp1MinRewardPips: 10,
-    tp1MaxRewardPips: 28,
     journalSizingSlPips: 20,
     riskScaleWideStops: false,
+    maxDailyLossPct: readArgN('max-daily-loss-pct', defaultBilshenzConfig.maxDailyLossPct),
+    maxDrawdownPct: readArgN('max-drawdown-pct', defaultBilshenzConfig.maxDrawdownPct),
+    signalOnClosedBarOnly: true,
   };
 
   const tSr = Date.now();
@@ -553,6 +570,11 @@ async function main() {
   let tradeCount = 0;
   let lastBarSig: number | null = null;
   let nyDay: string | null = null;
+  let runningEquity = STARTING_EQUITY_USD;
+  let peakEquityTrack = STARTING_EQUITY_USD;
+  let dayStartEquityTrack = STARTING_EQUITY_USD;
+  let lastClosedN = 0;
+  let skippedRiskHalt = 0;
 
   const m30 = base.m30;
   const m15 = m30ToM15Bars(m30);
@@ -569,6 +591,25 @@ async function main() {
     if (nyDay !== ymd) {
       nyDay = ymd;
       tradeCount = 0;
+      dayStartEquityTrack = runningEquity;
+    }
+
+    const closedSoFar = journalRows.filter(
+      (r) => r.out === 'WIN' || r.out === 'LOSS' || r.out === 'HALF_LOSS'
+    );
+    if (closedSoFar.length !== lastClosedN) {
+      lastClosedN = closedSoFar.length;
+      const { endEquity } = equityAfterAutoTrades(
+        closedSoFar,
+        cfg.pipSize,
+        cfg.simUsdPerEnginePip,
+        STARTING_EQUITY_USD,
+        RISK_PCT,
+        cfg,
+        null
+      );
+      runningEquity = endEquity;
+      peakEquityTrack = Math.max(peakEquityTrack, runningEquity);
     }
 
     const sr = srSeries[idx]!;
@@ -608,6 +649,21 @@ async function main() {
 
     const sig = signals.anyBuy || signals.anySell;
     if (sig && lastBarSig !== bar.t && tradeCount < cfg.maxDailyTrades) {
+      let riskHalted = false;
+      if (cfg.maxDailyLossPct > 0 && dayStartEquityTrack > 0) {
+        const dayLossPct =
+          ((dayStartEquityTrack - runningEquity) / dayStartEquityTrack) * 100;
+        if (dayLossPct >= cfg.maxDailyLossPct) riskHalted = true;
+      }
+      if (!riskHalted && cfg.maxDrawdownPct > 0 && peakEquityTrack > 0) {
+        const ddPct = ((peakEquityTrack - runningEquity) / peakEquityTrack) * 100;
+        if (ddPct >= cfg.maxDrawdownPct) riskHalted = true;
+      }
+      if (riskHalted) {
+        skippedRiskHalt += 1;
+        lastBarSig = bar.t;
+        continue;
+      }
       const slBuffer = cfg.journalSlPips * cfg.pipSize;
       const prev = { rows: journalRows, count: journalRows.length };
       const next = pushJournalRow(
@@ -681,6 +737,13 @@ async function main() {
       pipSize: pip,
       simUsdPerEnginePip: simPip,
       realisticMode,
+      realisticCosts: realisticCosts
+        ? {
+            spreadPips: realisticCosts.spreadPips,
+            slippagePipsPerSide: realisticCosts.slippagePipsPerSide,
+            brokerSlCap: brokerSlCap ?? null,
+          }
+        : null,
       dataNote,
       rangeStart: RANGE_START_MS,
       rangeEnd: RANGE_END_MS,
@@ -717,7 +780,7 @@ async function main() {
       ? equityAfterAutoTrades(
           closedChrono,
           pip,
-          cfg.simUsdPerEnginePip,
+          simPip,
           STARTING_EQUITY_USD,
           RISK_PCT,
           cfg,
@@ -746,6 +809,9 @@ async function main() {
   lines.push(`Data: ${dataNote}`);
   lines.push(`Journal window: ${rangeLabel}`);
   lines.push(`Max daily trades (NY day cap): ${maxDailyTrades}`);
+  lines.push(
+    `Risk halts: daily loss ${cfg.maxDailyLossPct}% · max DD ${cfg.maxDrawdownPct}% (skipped signals: ${skippedRiskHalt})`
+  );
   lines.push(
     `Window (journal entries): ${new Date(RANGE_START_MS).toISOString().slice(0, 10)} → ${new Date(RANGE_END_MS).toISOString().slice(0, 10)} exclusive end`
   );

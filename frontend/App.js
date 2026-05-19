@@ -37,7 +37,8 @@ import { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';
 import { mapJournalToHistRows, mapSessionBitsFromEngine, mapSrFromEngine } from './hooks/deskComputeLocal';
 import { useBilshenzMarketEngine } from './hooks/useBilshenzMarketEngine';
 import { useMt5LiveFeed } from './hooks/useMt5LiveFeed';
-import { SHOW_STRATEGY_INTEL, ENABLE_DESK_DIAGNOSTICS } from './security/deskMode';
+import { SHOW_STRATEGY_INTEL, ENABLE_DESK_DIAGNOSTICS, USE_REMOTE_DESK } from './security/deskMode';
+import { fetchExecuteGate } from './client/deskRemote';
 import { SIM_DESK_EQUITY, DISPLAY_PIP_SIZE } from './security/deskConstants';
 import { sanitizeSrView } from './security/sanitizeDesk';
 import {
@@ -2740,6 +2741,23 @@ function AppContent({ onEngineReady }) {
     [telegramNotifyEnabled, telegramRelayUrl, telegramRelaySecret]
   );
 
+  const resolveExecuteGate = useCallback(async (snap, trade) => {
+    if (!USE_REMOTE_DESK || runModeRef.current === 'backtest') {
+      return canExecuteTrade(snap, trade);
+    }
+    const body = engineRef.current?.getDeskExecuteGateBody?.();
+    if (!body) return canExecuteTrade(snap, trade);
+    try {
+      const remote = await fetchExecuteGate(body);
+      if (!remote.ok) {
+        return { ok: false, reason: remote.reason || 'BLOCKED' };
+      }
+      return { ok: true };
+    } catch {
+      return canExecuteTrade(snap, trade);
+    }
+  }, []);
+
   useEffect(() => {
     if (!autoExecuteSignals || !engineHydrated) return;
     if (runMode !== 'live') return;
@@ -2760,27 +2778,27 @@ function AppContent({ onEngineReady }) {
       return;
     }
     const trade = bzSnapshot.trade;
-    const gate = canExecuteTrade(bzSnapshot, trade);
-    if (!gate.ok) {
-      setLastBrokerMsg(`Auto: skipped (${gate.reason})`);
-      autoHookDoneBarRef.current = bar.t;
-      return;
-    }
-
-    const intent = buildBrokerOrderIntent(trade, {
-      barTimeMs: bar.t,
-      runMode: 'live',
-      trigger: 'auto',
-      symbol: mt5Live.resolvedSymbol || 'XAUUSD',
-    });
-    if (!intent) {
-      autoHookDoneBarRef.current = bar.t;
-      return;
-    }
-
     autoHookInFlight.current = true;
     void (async () => {
       try {
+        const gate = await resolveExecuteGate(bzSnapshot, trade);
+        if (!gate.ok) {
+          setLastBrokerMsg(`Auto: skipped (${gate.reason})`);
+          autoHookDoneBarRef.current = bar.t;
+          return;
+        }
+
+        const intent = buildBrokerOrderIntent(trade, {
+          barTimeMs: bar.t,
+          runMode: 'live',
+          trigger: 'auto',
+          symbol: mt5Live.resolvedSymbol || 'XAUUSD',
+        });
+        if (!intent) {
+          autoHookDoneBarRef.current = bar.t;
+          return;
+        }
+
         const lots = execLotsForTrade(bzSnapshot.trade);
         await sendTelegramEligibleIfNeeded(intent, lots, bar.t);
         const r = await executeBrokerRoutes({
@@ -2806,6 +2824,7 @@ function AppContent({ onEngineReady }) {
     })();
   }, [
     autoExecuteSignals,
+    resolveExecuteGate,
     engineHydrated,
     runMode,
     brokerWebhookUrl,
@@ -3051,7 +3070,7 @@ function AppContent({ onEngineReady }) {
       const tradeSnap = snap.trade;
       const en = engineRef.current;
       const barT = en.bundle?.m30?.length ? en.bundle.m30[en.bundle.m30.length - 1].t : null;
-      const gate = canExecuteTrade(snap, tradeSnap);
+      const gate = await resolveExecuteGate(snap, tradeSnap);
       if (!gate.ok) {
         setLastBrokerMsg(`Blocked: ${publicExecuteMessage(gate)}`);
         if (ENABLE_DESK_DIAGNOSTICS) console.warn('[execute-gate]', gate.reason);
@@ -3106,6 +3125,7 @@ function AppContent({ onEngineReady }) {
     mt5Live.resolvedSymbol,
     execLotsForTrade,
     sendTelegramEligibleIfNeeded,
+    resolveExecuteGate,
   ]);
 
   const onSkip = () => {

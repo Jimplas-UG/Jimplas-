@@ -1,0 +1,35 @@
+BILSHENZ — XAU backtest (M30 engine, journal + throttle) · LIVE profile (session-only)
+Data: MT5 live API http://127.0.0.1:8765 — XAUUSD M30 (6249 bars)
+Journal window: 2026-01-01 → 2026-05-20
+Max daily trades (NY day cap): 3
+Risk halts: daily loss 3% · max DD 15% (skipped signals: 0)
+Window (journal entries): 2026-01-01 → 2026-05-20 exclusive end
+M30 bars loaded: 6249  |  Main loop: 9.11s
+
+--- Realistic mode (closer to live MT5) ---
+MT5 server: MetaQuotes-Demo
+Account currency: USD
+Spread: 2.10 pips (broker) · Slippage: 0.40 p/side
+$/pip/lot: $1.00 (broker tick value)
+Loss model: broker SL capped at 20p (live parity) · Lots sized on 20p risk · friction deducted
+Ideal model (no friction, -1R losses): $5297.75 (+429.8%) — for comparison
+
+Starting equity: $1,000
+Ending equity (closed trades, compounding 1.00%): $4045.37
+Net PnL: $+3045.37 (+304.54%)
+Max drawdown (on equity curve): $54.18
+
+Trades opened in window: 210  (OPEN at end: 0)
+Closed in window: 210  |  Wins: 136  |  Losses: 74 (incl. 56 half-loss M15 exits)
+Win rate (closed): 64.76%
+P1 / P2 / P3 WR: 0.0% / 64.8% / 0.0%
+
+--- Risk metrics (USD PnL per closed trade, compounding risk) ---
+Gross profit (wins): $4129.45
+Gross loss (losses): $1084.08
+Profit factor (gross profit / gross loss): 3.81
+
+--- Weaknesses / improvement hooks (heuristic) ---
+• Signals cluster in P2; P1/P3 rarely fire — review breakout / flip gates or P2 filters.
+• 56 half-loss (M15) exits — compare vs holding full SL for your style.
+• Large gap vs frictionless “ideal” run — spreads/slippage/SL cap dominate; tune realistic execution.

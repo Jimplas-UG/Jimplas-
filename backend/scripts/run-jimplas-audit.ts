@@ -29,9 +29,10 @@ function main() {
   check('cfg.p2Loose', cfg.p2UseStrictFilters === false, 'P2 loose (volume mode)');
   check(
     'cfg.tpClamp',
-    cfg.useLegacyTpClampOnly && cfg.tp1MinRewardPips === 10 && cfg.tp1MaxRewardPips === 28,
-    'TP clamp 10–28 pips'
+    cfg.useLegacyTpClampOnly && cfg.tp1MinRewardPips === 14 && cfg.tp1MaxRewardPips === 32,
+    'TP clamp 14–32 pips (m15+tp14/32 live profile)'
   );
+  check('cfg.m15Exit', cfg.enableM15AdverseExit === true, 'M15 adverse half-loss exit enabled');
   check('cfg.journalSizing', cfg.journalSizingSlPips === 20, 'journalSizingSlPips=20');
   check(
     'pine.reference',
@@ -40,7 +41,7 @@ function main() {
   );
   check(
     'riskSizing.util',
-    fs.existsSync(path.join(__dirname, '../utils/riskSizing.js')),
+    fs.existsSync(path.join(__dirname, '../../frontend/utils/riskSizing.js')),
     'live lot sizing helper present'
   );
 

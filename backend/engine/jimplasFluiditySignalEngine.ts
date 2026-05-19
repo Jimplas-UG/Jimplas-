@@ -17,10 +17,10 @@ export type SetupTradeLevels = {
 };
 
 function isHighVolume(b: Bar, atrVal: number | null, mult: number): boolean {
-  if (atrVal == null || atrVal <= 0) return b.h - b.l > 0;
-  const v = b.v ?? 0;
-  if (v > 0) return v > 0; // caller compares to avg if needed
-  return b.h - b.l >= atrVal * mult;
+  const range = b.h - b.l;
+  if (atrVal == null || atrVal <= 0) return range > 0;
+  // Use range vs ATR when tick volume is absent or not normalized to an average.
+  return range >= atrVal * mult;
 }
 
 /** Minimal historical chop between entry and target (clean traffic). */

@@ -30,7 +30,7 @@ const EMPTY_TRADE_SANITIZE = {
  */
 export function sanitizeSnapshot(raw, opts = {}) {
   if (!raw) return null;
-  const trade = raw.trade ?? EMPTY_TRADE;
+  const trade = raw.trade ?? EMPTY_TRADE_SANITIZE;
   const side = publicSignalSide(trade);
   const status = publicTradeStatus(trade);
   const conf =

@@ -22,14 +22,27 @@ export function Mt5BridgeProvider({ children }) {
     let cancelled = false;
     (async () => {
       try {
-        const [[, url], [, conn]] = await AsyncStorage.multiGet([STORAGE_MT5_BASE, STORAGE_MT5_CONNECTED]);
+        const [[, storedUrl], [, conn]] = await AsyncStorage.multiGet([
+          STORAGE_MT5_BASE,
+          STORAGE_MT5_CONNECTED,
+        ]);
         if (cancelled) return;
-        if (url) setBaseUrlState(url);
-        else if (metroLan) {
+        let resolvedUrl = storedUrl || null;
+        if (resolvedUrl) {
+          setBaseUrlState(resolvedUrl);
+        } else if (metroLan) {
           const d = getDefaultMt5ApiUrl();
-          if (isLocalhostApiUrl(d)) setBaseUrlState(`http://${metroLan}:8765`);
+          if (isLocalhostApiUrl(d)) {
+            resolvedUrl = `http://${metroLan}:8765`;
+            setBaseUrlState(resolvedUrl);
+          }
         }
-        setConnected(conn === '1');
+        if (conn !== '1' || !resolvedUrl) {
+          setConnected(false);
+        } else {
+          const ok = await fetchMt5Connected(resolvedUrl.replace(/\/$/, ''));
+          if (!cancelled) setConnected(!!ok);
+        }
       } catch {
         /* ignore */
       } finally {

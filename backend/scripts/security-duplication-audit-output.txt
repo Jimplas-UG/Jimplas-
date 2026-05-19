@@ -1,5 +1,5 @@
 BILSHENZ DUPLICATION-RISK AUDIT
-Generated: 2026-05-17T22:58:26.749Z
+Generated: 2026-05-18T20:22:43.303Z
 
 === CLIENT BUNDLE (Metro ships when EXPO_PUBLIC_DESK_REMOTE is not 1) ===
 engine/*.ts — FULL strategy (critical) unless remote mode + metro stub
@@ -9,19 +9,11 @@ App.js — INTEL panels gated by SHOW_STRATEGY_INTEL (__DEV__ only by default)
 === MITIGATIONS IN PLACE ===
 - security/sanitizeDesk.js strips snapshot for production UI
 - security/publicLabels.js — BUY/SELL/WAIT, opaque block codes
-- strategy-api/server.ts — optional server-side compute (npm run desk-api)
-- metro.config.js — blocks engine when EXPO_PUBLIC_DESK_REMOTE=1
-- client/engineStub.js — replaces engine in remote bundle
+- src/server.ts — desk API (npm run desk-api)
+- ../frontend/metro.config.js — blocks backend engine when EXPO_PUBLIC_DESK_REMOTE=1
+- ../frontend/client/engineStub.js — replaces engine in remote bundle
 
 === FILES MATCHING SENSITIVE PATTERNS ===
-App.js
-  /jimplas/i, /riskPctAtr/, /athZoneLow/, /hard_block/i
-AUDIT_REPORT.txt
-  /pineV5/i, /leftSideScan/i
-client/engineStub.js
-  /defaultBilshenzConfig/, /riskPctAtr/, /athZoneLow/, /computeBilshenzSnapshot/
-components/BilshenzHeader.js
-  /jimplas/i
 engine/bilshenzEngine.ts
   /jimplas/i, /pineV5/i, /leftSideScan/i, /leftScanBars/, /computeBilshenzSnapshot/, /signalEngine/
 engine/index.ts
@@ -48,12 +40,6 @@ engine/types.ts
   /jimplas/i, /pineV5/i, /defaultBilshenzConfig/, /riskPctAtr/, /p1VolumeAtrMult/, /wickRatioMin/, /athZoneLow/, /yieldHighThreshold/, /leftScanBars/
 engine/wickEngine.ts
   /jimplas/i
-hooks/deskComputeLocal.js
-  /defaultBilshenzConfig/, /computeBilshenzSnapshot/
-hooks/useBilshenzMarketEngine.js
-  /jimplas/i, /defaultBilshenzConfig/, /computeBilshenzSnapshot/
-hooks/useMt5LiveFeed.js
-  /defaultBilshenzConfig/
 scripts/audit-jimplas-output.txt
   /jimplas/i, /pineV5/i
 scripts/audit-pine-parity-output.txt
@@ -91,4 +77,4 @@ security/sanitizeDesk.js
 5. Webhook/Telegram payloads may include entry/SL/TP — server should sign orders
 6. Hermes bundle is decompilable — remote API is the real protection
 
-Total flagged paths: 34
+Total flagged paths: 27
