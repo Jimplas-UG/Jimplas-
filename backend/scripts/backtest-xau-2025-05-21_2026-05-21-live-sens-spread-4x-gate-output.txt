@@ -1,0 +1,33 @@
+BILSHENZ — XAU backtest (M30 engine, journal + throttle) · LIVE profile (session-only)
+Data: Exness/broker MT5 terminal · server Exness-MT5Trial9 — XAUUSD M30 (13751 bars)
+Journal window: 2025-05-21 → 2026-05-21
+Max daily trades (NY day cap): 3
+Risk halts: daily loss 3% · max DD 15% (skipped signals: 0)
+Window (journal entries): 2025-05-21 → 2026-05-21 exclusive end
+M30 bars loaded: 13751  |  Main loop: 44.23s
+
+--- Realistic mode (closer to live MT5) ---
+MT5 server: Exness-MT5Trial9
+Account currency: USD
+Spread: 12.32 pips (stress override) · Slippage: 0.40 p/side
+$/pip/lot: $10.00 (broker tick value)
+Loss model: broker SL capped at 20p (live parity) · Lots sized on 20p risk · friction deducted
+Ideal model (no friction, -1R losses): $50000.00 (+0.0%) — for comparison
+
+Starting equity: $50,000
+Ending equity (closed trades, compounding 1.00%): $50000.00
+Net PnL: $+0.00 (+0.00%)
+Max drawdown (on equity curve): $0.00
+
+Trades opened in window: 0  (OPEN at end: 0)
+Closed in window: 0  |  Wins: 0  |  Losses: 0 (incl. 0 half-loss M15 exits)
+Win rate (closed): 0.00%
+P1 / P2 / P3 WR: 0.0% / 0.0% / 0.0%
+
+--- Risk metrics (USD PnL per closed trade, compounding risk) ---
+Gross profit (wins): $0.00
+Gross loss (losses): $0.00
+Profit factor (gross profit / gross loss): 0.00
+
+--- Weaknesses / improvement hooks (heuristic) ---
+• Win rate under 50% — expectancy depends on R-multiple; check average win vs loss in journal.

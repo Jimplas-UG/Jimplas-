@@ -1,3 +1,4 @@
+import { adaptiveSpreadBlocked, classifyMarketRegime, spreadProxyPips } from './executionHardening';
 import { highs, lows, pivotHighConfirmAt, pivotLowConfirmAt } from './indicators';
 import type { Bar, BilshenzEngineConfig, RiskSnapshot } from './types';
 
@@ -9,7 +10,8 @@ export function computeRisk(
   dxyClose: number | null,
   dxyClose3BarsAgo: number | null,
   us10yClose: number | null,
-  chartClose: number
+  chartClose: number,
+  opts?: { inSession?: boolean; bullClean?: boolean; bearClean?: boolean }
 ): RiskSnapshot {
   const pip = cfg.pipSize;
   const atrPips = atrVal != null ? atrVal / pip : null;
@@ -57,8 +59,37 @@ export function computeRisk(
   const lastM30 = m30n > 0 ? m30[m30n - 1] : null;
   const barRangePips = lastM30 != null ? (lastM30.h - lastM30.l) / pip : 0;
   const barRangeBlocked = barRangePips > cfg.maxSpreadPips * 10;
-  const brokerSpreadBlocked = cfg.currentSpreadPips > cfg.maxSpreadPips;
-  /** Pine: spread_blocked = current_spread > 3.5 only (no bar-range gate). */
+  let brokerSpreadBlocked = cfg.currentSpreadPips > cfg.maxSpreadPips;
+  let spreadPx = cfg.currentSpreadPips;
+  let hostileExecution = false;
+  let executionRegime = 'NORMAL';
+  let adaptiveSpreadLimitPips = cfg.maxSpreadPips;
+  let tradeQualityMin = cfg.minTradeQualityP1P3;
+
+  if (cfg.enableExecutionHardening) {
+    spreadPx = spreadProxyPips(cfg);
+    const baseline =
+      cfg.spreadBaselinePips > 0 ? cfg.spreadBaselinePips : cfg.currentSpreadPips;
+    adaptiveSpreadLimitPips = Math.min(
+      cfg.maxSpreadPips,
+      Math.max(baseline * cfg.spreadAdaptiveMaxMult, cfg.maxSpreadPips * 0.85)
+    );
+    brokerSpreadBlocked = adaptiveSpreadBlocked(cfg, spreadPx, adaptiveSpreadLimitPips);
+    executionRegime = classifyMarketRegime({
+      atrPips,
+      inSession: opts?.inSession ?? true,
+      chopZone,
+      bullClean: opts?.bullClean ?? false,
+      bearClean: opts?.bearClean ?? false,
+      cfg,
+    });
+    hostileExecution = spreadPx > baseline * cfg.hostileSpreadMult;
+    tradeQualityMin = cfg.minTradeQualityP1P3;
+    if (hostileExecution) tradeQualityMin += 12;
+    else if (executionRegime === 'HIGH_VOL') tradeQualityMin += 6;
+    else if (executionRegime === 'CHOP') tradeQualityMin += 4;
+  }
+
   const spreadBlocked = brokerSpreadBlocked;
   const dxyRising = !!(dxyClose != null && dxyClose3BarsAgo != null && dxyClose > dxyClose3BarsAgo);
   const dxyBlocksBuy = cfg.useDxyFilter && dxyRising;
@@ -81,6 +112,11 @@ export function computeRisk(
     athZoneBlocked,
     geoMedium,
     geoHigh,
+    executionRegime,
+    hostileExecution,
+    spreadProxyPips: spreadPx,
+    adaptiveSpreadLimitPips,
+    tradeQualityMin,
     h4SwingHigh1: h4sh1,
     h4SwingHigh2: h4sh2,
     h4SwingLow1: h4sl1,

@@ -2165,7 +2165,7 @@ function ProfileTab({
                 ? 'ON — auto-sends allowed signals to MT5 when connected.'
                 : mt5Connected
                   ? 'OFF — manual EXEC only. Turn on to resume auto orders.'
-                  : 'Turns ON automatically when you connect MT5.'}
+                  : 'Default ON when MT5 connects (LIVE SIM).'}
               {!mt5Connected && !brokerWebhookUrl.trim() ? ' Connect MT5 in Profile first.' : ''}
             </Text>
           </View>
@@ -2535,7 +2535,6 @@ function AppContent({ onEngineReady }) {
   const [lastBrokerMsg, setLastBrokerMsg] = useState('');
   const [autoExecuteSignals, setAutoExecuteSignals] = useState(false);
   const [paperBtAutoExec, setPaperBtAutoExec] = useState(true);
-  const prevMt5ConnectedRef = useRef(false);
   const userDisabledAutoExecRef = useRef(false);
 
   const onAutoExecuteSignalsChange = useCallback((enabled) => {
@@ -2586,13 +2585,14 @@ function AppContent({ onEngineReady }) {
         if (m[STORAGE_TELEGRAM_RELAY_URL]) setTelegramRelayUrl(m[STORAGE_TELEGRAM_RELAY_URL] ?? '');
         if (m[STORAGE_TELEGRAM_RELAY_SECRET]) setTelegramRelaySecret(m[STORAGE_TELEGRAM_RELAY_SECRET] ?? '');
         if (m[STORAGE_TELEGRAM_NOTIFY] === '1') setTelegramNotifyEnabled(true);
-        if (m[STORAGE_AUTO_EXEC] === '1') {
-          userDisabledAutoExecRef.current = false;
-          setAutoExecuteSignals(true);
-        } else if (m[STORAGE_AUTO_EXEC] === '0') {
+        if (m[STORAGE_AUTO_EXEC] === '0') {
           userDisabledAutoExecRef.current = true;
           setAutoExecuteSignals(false);
+        } else if (m[STORAGE_AUTO_EXEC] === '1') {
+          userDisabledAutoExecRef.current = false;
+          setAutoExecuteSignals(true);
         }
+        /* unset storage → default ON when MT5 connects (see effect below) */
         if (m[STORAGE_PAPER_BT_AUTO] === '0') setPaperBtAutoExec(false);
         else if (m[STORAGE_PAPER_BT_AUTO] === '1') setPaperBtAutoExec(true);
       } catch {
@@ -2604,14 +2604,12 @@ function AppContent({ onEngineReady }) {
     };
   }, []);
 
-  /** Turn auto-execute ON when MT5 connects unless the user turned it off (stored or in-session). */
+  /** Default ON in LIVE SIM while MT5 is connected unless user turned it off (stored or this session). */
   useEffect(() => {
     if (runMode !== 'live') return;
-    const wasConnected = prevMt5ConnectedRef.current;
-    if (mt5Connected && !wasConnected && !userDisabledAutoExecRef.current) {
+    if (mt5Connected && !userDisabledAutoExecRef.current) {
       setAutoExecuteSignals(true);
     }
-    prevMt5ConnectedRef.current = mt5Connected;
   }, [mt5Connected, runMode]);
 
   useEffect(() => {
@@ -2784,6 +2782,8 @@ function AppContent({ onEngineReady }) {
         const gate = await resolveExecuteGate(bzSnapshot, trade);
         if (!gate.ok) {
           setLastBrokerMsg(`Auto: skipped (${gate.reason})`);
+          const { logForwardMissed } = await import('./utils/forwardDemoLog');
+          void logForwardMissed({ reason: gate.reason, barTimeMs: bar.t });
           autoHookDoneBarRef.current = bar.t;
           return;
         }
@@ -2798,6 +2798,16 @@ function AppContent({ onEngineReady }) {
           autoHookDoneBarRef.current = bar.t;
           return;
         }
+
+        const { logForwardSignal } = await import('./utils/forwardDemoLog');
+        void logForwardSignal({
+          side: intent.side,
+          entry: intent.entry,
+          sl: intent.sl,
+          tp: intent.tp1,
+          setup: intent.setup,
+          barTimeMs: bar.t,
+        });
 
         const lots = execLotsForTrade(bzSnapshot.trade);
         await sendTelegramEligibleIfNeeded(intent, lots, bar.t);

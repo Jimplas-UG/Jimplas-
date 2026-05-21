@@ -8,6 +8,12 @@ import { computeBilshenzSnapshot, defaultBilshenzConfig } from '../engine';
 import type { BilshenzEngineConfig, EquityRiskContext, MarketBundle } from '../engine/types';
 import { canExecuteTrade } from '../broker/tradeExecutionGates';
 import { publicBlockReason } from '../security/publicLabels';
+import { handleValidationRoute } from './validationRoutes';
+import { isStrategyFreezeEnforced, mergeFrozenDeskCfg, verifyFrozenStrategy } from '../strategy/frozenProduction';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const BACKEND_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const PORT = Number(process.env.DESK_API_PORT) || 8791;
 const API_KEY = process.env.DESK_API_KEY?.trim() || '';
@@ -22,6 +28,20 @@ type DeskPrefs = {
 };
 
 function mergeCfg(prefs: DeskPrefs): BilshenzEngineConfig {
+  if (isStrategyFreezeEnforced()) {
+    const frozen = mergeFrozenDeskCfg(prefs.spread);
+    const check = verifyFrozenStrategy(BACKEND_ROOT, frozen);
+    if (!check.ok) {
+      throw new Error(`Strategy freeze: ${check.errors.join('; ')}`);
+    }
+    return {
+      ...frozen,
+      simUsdPerEnginePip:
+        prefs.simUsdPerEnginePip != null && prefs.simUsdPerEnginePip > 0
+          ? prefs.simUsdPerEnginePip
+          : frozen.simUsdPerEnginePip,
+    };
+  }
   const cap = Number.isFinite(prefs.maxDailyTrades)
     ? Math.max(1, Math.min(10, Math.floor(prefs.maxDailyTrades!)))
     : defaultBilshenzConfig.maxDailyTrades;
@@ -146,6 +166,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
+    if (handleValidationRoute(req, res, url)) return;
+
     if (req.url === '/v1/desk/compute' && req.method === 'POST') {
       const body = await readJson<{
         bundle: MarketBundle;
@@ -211,5 +234,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[desk-api] listening on http://127.0.0.1:${PORT}`);
   console.log(`[desk-api] POST /v1/desk/compute · POST /v1/desk/execute-gate`);
+  console.log(`[desk-api] POST /v1/validation/event · GET /v1/validation/events · GET /v1/validation/freeze-status`);
+  if (isStrategyFreezeEnforced()) console.log('[desk-api] STRATEGY_FREEZE=1 — locked production config');
   if (!API_KEY) console.warn('[desk-api] WARNING: DESK_API_KEY not set — open to LAN');
 });

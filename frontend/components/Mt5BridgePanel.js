@@ -3,6 +3,11 @@ import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useMt5Bridge } from '../contexts/Mt5BridgeContext';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
+import {
+  postMt5Attach,
+  postMt5Login,
+  tryExistingMt5Session,
+} from '../broker/mt5PythonApi';
 import { formatMt5NetworkError, getMetroLanHost, isLocalhostApiUrl } from '../utils/mt5ApiUrl';
 
 const STORAGE_MT5_SERVER = '@bilshenz_v1/mt5Server';
@@ -114,6 +119,7 @@ function Mt5BridgePanel() {
   const [rememberCreds, setRememberCreds] = useState(true);
   const [credsHydrated, setCredsHydrated] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [busyHint, setBusyHint] = useState('');
   const [err, setErr] = useState('');
   const [account, setAccount] = useState(null);
   const [positions, setPositions] = useState([]);
@@ -128,25 +134,44 @@ function Mt5BridgePanel() {
     }
   };
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (opts = {}) => {
     const b = baseUrl.trim();
     if (!b) return;
+    const light = !!opts.light;
     try {
-      const [st, pos, tk] = await Promise.all([
-        fetch(`${b}/api/status`).then((r) => r.json()),
+      const st = await fetch(`${b}/api/status`).then((r) => r.json());
+      setConnected(!!st.connected);
+      setAccount(st.account || null);
+      setErr('');
+      if (!st.connected) {
+        setPositions([]);
+        setTick(null);
+        return;
+      }
+      if (light) return;
+      const [pos, tk] = await Promise.all([
         fetch(`${b}/api/positions`).then((r) => r.json()),
         fetch(`${b}/api/tick/XAUUSD`).then((r) => (r.ok ? r.json() : null)),
       ]);
-      setConnected(!!st.connected);
-      setAccount(st.account || null);
       setPositions(Array.isArray(pos.positions) ? pos.positions : []);
       setTick(tk);
-      setErr('');
     } catch (e) {
       const raw = e instanceof Error ? e.message : String(e);
       setErr(formatMt5NetworkError(raw, b));
     }
   }, [baseUrl]);
+
+  const finishConnected = useCallback(
+    async (account) => {
+      setConnected(true);
+      setAccount(account || null);
+      stopPoll();
+      pollRef.current = setInterval(() => refresh({ light: false }), 5000);
+      await refresh({ light: true });
+      void refresh({ light: false });
+    },
+    [refresh],
+  );
 
   useEffect(() => () => stopPoll(), []);
 
@@ -223,38 +248,86 @@ function Mt5BridgePanel() {
 
   const onConnect = async () => {
     setBusy(true);
+    setBusyHint('');
     setErr('');
     const b = baseUrl.trim();
+    const serverTrim = server.trim();
+    const loginTrim = login.trim();
+    const loginNum = parseInt(loginTrim, 10);
     if (!b) {
       setErr('Set API BASE URL first (e.g. http://127.0.0.1:8765 on this PC, or http://PC_IP:8765 from phone).');
       setBusy(false);
       return;
     }
+    if (!serverTrim) {
+      setErr('Enter your broker server name exactly as shown in MT5 (any broker).');
+      setBusy(false);
+      return;
+    }
+    if (!Number.isFinite(loginNum) || loginNum <= 0) {
+      setErr('Enter a valid numeric login (account number).');
+      setBusy(false);
+      return;
+    }
+    if (!password) {
+      setErr('Enter your MT5 trading password.');
+      setBusy(false);
+      return;
+    }
     try {
       await ensureApiReachable(b);
-      const res = await fetch(`${b}/api/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          login: parseInt(login, 10),
-          password,
-          server: server.trim(),
-        }),
+      setBusyHint('Checking existing MT5 session…');
+      const existing = await tryExistingMt5Session(b, loginNum, serverTrim);
+      if (existing.ok) {
+        await persistCredentials(serverTrim, loginTrim, password, rememberCreds);
+        await finishConnected(existing.account);
+        return;
+      }
+      setBusyHint('Logging in to broker (may take up to 45s)…');
+      const result = await postMt5Login(b, {
+        login: loginNum,
+        password,
+        server: serverTrim,
       });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j.detail || JSON.stringify(j));
-      setConnected(true);
-      setAccount(j.account || null);
-      await persistCredentials(server.trim(), login.trim(), password, rememberCreds);
-      stopPoll();
-      pollRef.current = setInterval(refresh, 3000);
-      await refresh();
+      if (!result.ok) throw new Error(result.detail || 'Login failed');
+      await persistCredentials(serverTrim, loginTrim, password, rememberCreds);
+      await finishConnected(result.account);
     } catch (e) {
       const raw = e instanceof Error ? e.message : String(e);
       setErr(formatMt5NetworkError(raw, b));
       setConnected(false);
     } finally {
       setBusy(false);
+      setBusyHint('');
+    }
+  };
+
+  const onAttachTerminal = async () => {
+    setBusy(true);
+    setBusyHint('');
+    setErr('');
+    const b = baseUrl.trim();
+    if (!b) {
+      setErr('Set API BASE URL first.');
+      setBusy(false);
+      return;
+    }
+    try {
+      await ensureApiReachable(b);
+      setBusyHint('Using MT5 terminal session…');
+      const result = await postMt5Attach(b);
+      if (!result.ok) throw new Error(result.detail || 'No MT5 session');
+      const acc = result.account;
+      if (acc?.server) setServer(String(acc.server));
+      if (acc?.login) setLogin(String(acc.login));
+      await finishConnected(acc);
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e);
+      setErr(formatMt5NetworkError(raw, b));
+      setConnected(false);
+    } finally {
+      setBusy(false);
+      setBusyHint('');
     }
   };
 
@@ -262,7 +335,8 @@ function Mt5BridgePanel() {
     if (!credsHydrated || connected || busy || autoConnectTried.current) return;
     if (!server.trim() || !login.trim() || !password) return;
     autoConnectTried.current = true;
-    void onConnect();
+    const t = setTimeout(() => void onConnect(), 400);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot auto login on launch
   }, [credsHydrated, connected, busy, server, login, password]);
 
@@ -353,7 +427,7 @@ function Mt5BridgePanel() {
           value={server}
           onChangeText={setServer}
           autoCapitalize="none"
-          placeholder="Exness-MT5Trial"
+          placeholder="Broker server from MT5 (any broker)"
           placeholderTextColor="#666"
         />
         <Text style={styles.rowLab}>LOGIN</Text>
@@ -403,15 +477,24 @@ function Mt5BridgePanel() {
           <Text style={styles.testBtnTxt}>TEST API (must pass before CONNECT)</Text>
         </Pressable>
 
+        <Pressable style={[styles.lanBtn, { marginTop: 10 }]} onPress={onAttachTerminal} disabled={busy}>
+          <Text style={styles.lanBtnTxt}>USE MT5 TERMINAL SESSION (fastest)</Text>
+        </Pressable>
+        <Text style={[styles.hint, { marginTop: 4 }]}>
+          Log in inside MT5 first (Exness, IC, FXCM, etc.), then tap above — no slow IPC login.
+        </Text>
+
         {!connected ? (
           <Pressable style={styles.btn} onPress={onConnect} disabled={busy}>
-            {busy ? <ActivityIndicator color="#f2e6c5" /> : <Text style={styles.btnTxt}>CONNECT MT5</Text>}
+            {busy ? <ActivityIndicator color="#f2e6c5" /> : <Text style={styles.btnTxt}>CONNECT MT5 (login + password)</Text>}
           </Pressable>
         ) : (
           <Pressable style={[styles.btn, { backgroundColor: 'rgba(180,60,60,0.4)' }]} onPress={onDisconnect} disabled={busy}>
             <Text style={styles.btnTxt}>DISCONNECT</Text>
           </Pressable>
         )}
+
+        {busy && busyHint ? <Text style={[styles.hint, { color: '#e8d4a0', marginTop: 8 }]}>{busyHint}</Text> : null}
 
         <Text style={[styles.status, { color: connected ? '#6dffb0' : '#ff8b7a' }]}>
           {connected ? '● CONNECTED' : '○ DISCONNECTED'}
@@ -457,8 +540,8 @@ function Mt5BridgePanel() {
 
         {err ? <Text style={[styles.hint, { color: '#ff7a8a', marginTop: 8 }]}>{err}</Text> : null}
         <Text style={[styles.hint, { marginTop: 10 }]}>
-          On PC: run npm run mt5-api (or start-api.ps1) with MT5 open and logged in. Phone API URL = PC LAN IP:8765
-          (not 127.0.0.1). Profile → AUTO-EXECUTE sends real orders when CONNECTED (demo first).
+          On PC: cd mt5_trading_system\python → .\start-api.ps1 (MT5 open + logged in). Phone URL =
+          http://PC_LAN_IP:8765 — tap USE PC IP FROM EXPO. Not 127.0.0.1. Demo first for AUTO-EXECUTE.
         </Text>
       </View>
     </View>

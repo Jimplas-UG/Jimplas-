@@ -1,5 +1,6 @@
 import { fetchMt5Connected, postMt5OrderFromIntent } from './mt5PythonApi';
 import { postBrokerOrderWebhook } from './webhookBroker';
+import { logForwardDemoEvent } from '../utils/forwardDemoLog';
 
 export async function executeBrokerRoutes(opts) {
   const parts = [];
@@ -27,11 +28,47 @@ export async function executeBrokerRoutes(opts) {
       mt5 = { ok: false, status: 0, bodySnippet: 'MT5 not connected', connected: false };
       parts.push('MT5 skipped (not connected)');
     } else {
+      const side = opts.intent.side;
+      const intended = opts.intent.entry ?? 0;
+      if (side === 'BUY' || side === 'SELL') {
+        await logForwardDemoEvent({
+          type: 'ORDER_INTENT',
+          side,
+          intendedEntry: intended,
+          symbol: opts.symbol || opts.intent.symbol,
+        });
+      }
+      const t0 = Date.now();
       mt5 = await postMt5OrderFromIntent(opts.intent, {
         baseUrl: base,
         volume: opts.mt5Volume,
         symbol: opts.symbol,
       });
+      const latencyMs = mt5.latencyMs ?? Date.now() - t0;
+      if (side === 'BUY' || side === 'SELL') {
+        if (mt5.ok && mt5.fillPrice != null) {
+          await logForwardDemoEvent({
+            type: 'ORDER_FILL',
+            side,
+            intendedEntry: mt5.intendedPrice ?? intended,
+            actualFill: mt5.fillPrice,
+            slippagePips: mt5.slippagePips,
+            spreadAtExecutionPips: mt5.spreadPips,
+            latencyMs,
+            ticket: mt5.orderId,
+            retcode: mt5.retcode,
+            broker: 'mt5',
+          });
+        } else {
+          await logForwardDemoEvent({
+            type: 'ORDER_REJECTED',
+            side,
+            rejected: true,
+            rejectReason: mt5.bodySnippet,
+            latencyMs,
+          });
+        }
+      }
       if (mt5.ok) {
         anyOk = true;
         parts.push(`MT5 OK ${mt5.status}`);

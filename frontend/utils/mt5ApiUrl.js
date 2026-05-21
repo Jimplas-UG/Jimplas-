@@ -47,11 +47,14 @@ export function getDefaultMt5ApiUrl(port = 8765) {
 
 export function formatMt5NetworkError(message, baseUrl) {
   const msg = message ? String(message) : 'Network request failed';
+  const lan = getMetroLanHost();
+  const suggest = lan ? `http://${lan}:8765` : 'http://YOUR_PC_IP:8765';
   const apiHint =
-    'Start the bridge on your PC (keep terminal open):\n' +
-    '  cd myapp\n' +
-    '  npm run mt5-api\n' +
-    'MT5 terminal must also be open and logged in.';
+    'On your PC (keep window open):\n' +
+    '  cd mt5_trading_system\\python\n' +
+    '  .\\start-api.ps1\n' +
+    'MT5 terminal must be open and logged in.\n' +
+    `Phone API URL: ${suggest} (not 127.0.0.1). Same Wi‑Fi.`;
   if (/fetch|network|failed|ECONNREFUSED|Unable to connect/i.test(msg)) {
     return `${msg}\n\n${apiHint}`;
   }

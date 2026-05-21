@@ -1,0 +1,55 @@
+BILSHENZ — INSTITUTIONAL EXECUTION AUDIT (FORWARD DEMO)
+Generated: 2026-05-21T01:35:02.225Z
+Window: 30 days · Events logged: 0
+Log: C:\Users\Amoskole\bsv3\backend\validation\data\forward-demo-log.jsonl
+
+═══════════════════════════════════════════════════════════
+0. STRATEGY FREEZE
+═══════════════════════════════════════════════════════════
+  Status: PASS — signal sources + config match frozen manifest
+
+═══════════════════════════════════════════════════════════
+1. SIMULATED BASELINE (frozen config, MT5 feed)
+═══════════════════════════════════════════════════════════
+  Return: +7535.2% · Trades: 53
+  WR: 71.7% · PF: 4.83 · Max DD: $1820
+  Friction: 3.08p spread · 0.40p slip/side
+
+═══════════════════════════════════════════════════════════
+2. LIVE FORWARD DEMO LOG
+═══════════════════════════════════════════════════════════
+  Fills: 0 · WR: 0.0% · PF: 0.00
+  Net PnL: $0.00 · Equity: $1000 → $1000
+  Max DD: $0
+  Avg slippage: 0.00p · Avg spread: 0.00p · Avg latency: 0ms
+  Rejected: 0 · Missed: 0 · Mismatches: 0
+
+═══════════════════════════════════════════════════════════
+3. DRIFT vs SIMULATION
+═══════════════════════════════════════════════════════════
+  Win-rate drift: -71.7%
+  PF drift: -100.0%
+  Slippage vs sim assumption: -0.80p
+
+═══════════════════════════════════════════════════════════
+4. ALERTS
+═══════════════════════════════════════════════════════════
+  [CRITICAL] WIN_RATE_DRIFT: Win rate deviates -71.7% from sim (limit ±10%)
+  [WARN] LOW_SAMPLE: Only 0 live fills vs ~53 sim trades — extend forward demo
+
+═══════════════════════════════════════════════════════════
+A. SIMULATION vs LIVE VARIANCE %
+═══════════════════════════════════════════════════════════
+  100.0% (lower = better alignment)
+
+B. BROKER EXECUTION QUALITY SCORE
+═══════════════════════════════════════════════════════════
+  100/100
+
+C. REAL-MONEY READINESS SCORE
+═══════════════════════════════════════════════════════════
+  58/100
+
+D. RECOMMENDED ACCOUNT SIZE
+═══════════════════════════════════════════════════════════
+  micro: Micro — $200–500, 0.25–0.5% risk, 30+ more demo days

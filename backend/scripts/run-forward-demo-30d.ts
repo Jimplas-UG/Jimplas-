@@ -1,0 +1,358 @@
+/**
+ * Headless 30-day Exness demo forward test — frozen config, live MT5 feed, real demo orders.
+ *
+ * Prerequisites: Exness MT5 logged in + npm run mt5-api (8765)
+ *
+ * Usage:
+ *   npm run forward-demo:30d
+ *   npm run forward-demo:30d -- --dry-run          # signals only, no orders
+ *   npm run forward-demo:30d -- --poll-sec=45
+ *
+ * Stop: Ctrl+C (session state saved; resume with same command)
+ */
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { buildBrokerOrderIntent } from '../broker/webhookBroker';
+import { executeBrokerRoutes } from '../broker/executeBrokerRoutes';
+import { canExecuteTrade } from '../broker/tradeExecutionGates';
+import {
+  buildBundleFromM30Bars,
+  computeBilshenzSnapshot,
+  pushJournalRow,
+  resolveJournalOnBar,
+} from '../engine';
+import { m30ToM15Bars } from '../engine/m15Bars';
+import type { Bar, TradeJournalRow } from '../engine/types';
+import { mergeFrozenDeskCfg, productionFrozenConfig, verifyFrozenStrategy } from '../strategy/frozenProduction';
+import { logEquitySnapshot, logForwardMissed, logForwardSignal } from '../validation/logForwardEvent';
+import { forwardDemoLogPath } from '../validation/forwardDemoStore';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const BACKEND_ROOT = path.join(__dirname, '..');
+const DATA_DIR = path.join(BACKEND_ROOT, 'validation', 'data');
+const SESSION_FILE = path.join(DATA_DIR, 'forward-demo-session.json');
+const JOURNAL_FILE = path.join(DATA_DIR, 'forward-demo-journal.json');
+
+const MT5_API = (process.env.MT5_API_URL ?? 'http://127.0.0.1:8765').replace(/\/$/, '');
+const SYMBOL = process.env.MT5_SYMBOL?.trim() || 'XAUUSD';
+const M30_MS = 30 * 60 * 1000;
+const WARMUP_BARS = 200;
+const RISK_PCT = 0.01;
+const DAYS = 30;
+
+type SessionState = {
+  startedAt: string;
+  endsAt: string;
+  startMs: number;
+  endMs: number;
+  lastClosedBarT: number | null;
+  lastEquitySnapMs: number;
+  tradeCountToday: number;
+  nyDay: string | null;
+  server: string | null;
+  dryRun: boolean;
+};
+
+function readArg(name: string, def: string): string {
+  const a = process.argv.find((x) => x.startsWith(`--${name}=`));
+  return a ? a.slice(name.length + 3) : def;
+}
+
+function dryRun(): boolean {
+  return process.argv.includes('--dry-run');
+}
+
+async function mt5Status(): Promise<{
+  connected: boolean;
+  equity: number;
+  server: string | null;
+  spreadPips: number;
+  usdPerPip: number;
+}> {
+  const st = await fetch(`${MT5_API}/api/status`);
+  if (!st.ok) throw new Error(`MT5 status HTTP ${st.status}`);
+  const j = (await st.json()) as {
+    connected?: boolean;
+    account?: { equity?: number; server?: string };
+  };
+  let spreadPips = 3.08;
+  let usdPerPip = 10;
+  try {
+    const specRes = await fetch(`${MT5_API}/api/symbol/${encodeURIComponent(SYMBOL)}?pip_size=0.1`);
+    if (specRes.ok) {
+      const spec = (await specRes.json()) as { spread_pips?: number; usd_per_pip_per_lot?: number };
+      if (spec.spread_pips) spreadPips = spec.spread_pips;
+      if (spec.usd_per_pip_per_lot) usdPerPip = spec.usd_per_pip_per_lot;
+    }
+  } catch {
+    /* optional */
+  }
+  return {
+    connected: !!j.connected,
+    equity: j.account?.equity ?? 1000,
+    server: j.account?.server ?? null,
+    spreadPips,
+    usdPerPip,
+  };
+}
+
+async function fetchM30Bars(fromMs: number, toMs: number): Promise<Bar[]> {
+  const url = `${MT5_API}/api/bars/${encodeURIComponent(SYMBOL)}?from_ms=${fromMs}&to_ms=${toMs}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`MT5 bars ${res.status}`);
+  const j = (await res.json()) as { bars?: Bar[] };
+  return (j.bars ?? []).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t);
+}
+
+function nyYmdKey(ms: number): string {
+  const d = new Date(ms);
+  const ny = new Date(d.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  return `${ny.getFullYear()}-${String(ny.getMonth() + 1).padStart(2, '0')}-${String(ny.getDate()).padStart(2, '0')}`;
+}
+
+function loadSession(): SessionState | null {
+  if (!fs.existsSync(SESSION_FILE)) return null;
+  return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')) as SessionState;
+}
+
+function saveSession(s: SessionState): void {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(SESSION_FILE, JSON.stringify(s, null, 2), 'utf8');
+}
+
+function loadJournal(): TradeJournalRow[] {
+  if (!fs.existsSync(JOURNAL_FILE)) return [];
+  const j = JSON.parse(fs.readFileSync(JOURNAL_FILE, 'utf8')) as { rows?: TradeJournalRow[] };
+  return j.rows ?? [];
+}
+
+function saveJournal(rows: TradeJournalRow[]): void {
+  fs.writeFileSync(JOURNAL_FILE, JSON.stringify({ version: 1, rows }, null, 2), 'utf8');
+}
+
+function lotsForRisk(equity: number, slPips: number, usdPerPip: number): number {
+  const riskUsd = equity * RISK_PCT;
+  const denom = Math.max(slPips, 20) * usdPerPip;
+  const lots = riskUsd / denom;
+  return Math.max(0.01, Math.min(1, Math.round(lots * 100) / 100));
+}
+
+async function tickOnce(session: SessionState): Promise<void> {
+  const now = Date.now();
+  if (now >= session.endMs) {
+    console.error('[forward-demo] 30-day window complete');
+    process.exit(0);
+  }
+
+  const status = await mt5Status();
+  if (!status.connected) {
+    console.error('[forward-demo] MT5 not connected — open Exness terminal and log in');
+    return;
+  }
+
+  const cfg = mergeFrozenDeskCfg(status.spreadPips);
+
+  if (now - session.lastEquitySnapMs >= 3600_000) {
+    logEquitySnapshot(status.equity, { server: status.server ?? undefined });
+    session.lastEquitySnapMs = now;
+    saveSession(session);
+  }
+
+  const fetchFrom = now - 90 * 86400000;
+  const m30All = await fetchM30Bars(fetchFrom, now + M30_MS);
+  if (m30All.length < WARMUP_BARS + 5) {
+    console.error(`[forward-demo] Too few bars (${m30All.length})`);
+    return;
+  }
+
+  const bundle = buildBundleFromM30Bars(m30All);
+  const n = bundle.m30.length;
+  const signalIdx = cfg.signalOnClosedBarOnly !== false && n >= 2 ? n - 2 : n - 1;
+  const bar = bundle.m30[signalIdx]!;
+
+  if (session.lastClosedBarT === bar.t) return;
+
+  const ymd = nyYmdKey(bar.t);
+  if (session.nyDay !== ymd) {
+    session.nyDay = ymd;
+    session.tradeCountToday = 0;
+  }
+
+  let journalRows = loadJournal();
+  const m15 = m30ToM15Bars(bundle.m30);
+  journalRows = resolveJournalOnBar(journalRows, bar, signalIdx, {
+    m30: bundle.m30,
+    m15,
+    cfg,
+  });
+
+  const snap = computeBilshenzSnapshot({
+    bundle,
+    cfg,
+    dailyTradeCount: session.tradeCountToday,
+    journalRows,
+    nowUtcMs: bar.t,
+    equityRisk: {
+      currentEquity: status.equity,
+      peakEquity: status.equity,
+      dayStartEquity: status.equity,
+    },
+  });
+
+  const trade = snap.trade;
+  const gate = canExecuteTrade(snap, trade);
+
+  session.lastClosedBarT = bar.t;
+  saveJournal(journalRows);
+  saveSession(session);
+
+  if (!gate.ok) {
+    if (snap.signals?.anyBuy || snap.signals?.anySell) {
+      logForwardMissed({ reason: gate.reason, barTimeMs: bar.t });
+    }
+    console.error(`[forward-demo] ${new Date(bar.t).toISOString()} blocked: ${gate.reason}`);
+    return;
+  }
+
+  const intent = buildBrokerOrderIntent(trade!, {
+    barTimeMs: bar.t,
+    runMode: 'live',
+    trigger: 'auto',
+    symbol: SYMBOL,
+  });
+  if (!intent) return;
+
+  logForwardSignal({
+    side: intent.side,
+    entry: intent.entry ?? bar.c,
+    sl: intent.sl ?? undefined,
+    tp: intent.tp1 ?? undefined,
+    setup: intent.setup !== 'NONE' ? intent.setup : null,
+    barTimeMs: bar.t,
+  });
+
+  if (session.tradeCountToday >= cfg.maxDailyTrades) {
+    logForwardMissed({ reason: 'max daily trades', barTimeMs: bar.t });
+    return;
+  }
+
+  const slPips =
+    intent.entry != null && intent.sl != null
+      ? Math.abs(intent.entry - intent.sl) / cfg.pipSize
+      : 20;
+  const volume = lotsForRisk(status.equity, slPips, status.usdPerPip);
+
+  if (session.dryRun) {
+    console.error(
+      `[forward-demo] DRY ${intent.side} ${intent.setup} @ ${intent.entry?.toFixed(2)} vol=${volume} bar=${new Date(bar.t).toISOString()}`
+    );
+    session.tradeCountToday += 1;
+    saveSession(session);
+    return;
+  }
+
+  const r = await executeBrokerRoutes({
+    intent,
+    useMt5: true,
+    mt5BaseUrl: MT5_API,
+    mt5Volume: volume,
+    symbol: SYMBOL,
+  });
+
+  if (r.anyOk) {
+    session.tradeCountToday += 1;
+    const prev = { rows: journalRows, count: journalRows.length };
+    const next = pushJournalRow(
+      prev,
+      {
+        anyBuy: intent.side === 'BUY',
+        anySell: intent.side === 'SELL',
+        barIndex: signalIdx,
+        timeStr: new Date(bar.t).toISOString(),
+        close: bar.c,
+        nearestRes: snap.sr?.nearestRes ?? null,
+        nearestSup: snap.sr?.nearestSup ?? null,
+        slBuffer: cfg.journalSlPips * cfg.pipSize,
+        barLow: bar.l,
+        barHigh: bar.h,
+        signals: snap.signals,
+        cfg,
+        setupLevels: snap.tradeLevels,
+        m30: bundle.m30,
+      },
+      { maxJournalRows: 5000 }
+    );
+    saveJournal(next.rows);
+    console.error(`[forward-demo] EXEC ${intent.side} ${intent.setup} vol=${volume} · ${r.summary}`);
+  } else {
+    console.error(`[forward-demo] FAIL ${r.summary}`);
+  }
+  saveSession(session);
+}
+
+async function main() {
+  process.env.STRATEGY_FREEZE = '1';
+  const check = verifyFrozenStrategy(BACKEND_ROOT, productionFrozenConfig());
+  if (!check.ok) {
+    console.error('Strategy freeze FAILED — run npm run strategy:freeze');
+    check.errors.forEach((e) => console.error(`  ${e}`));
+    process.exit(2);
+  }
+
+  const pollSec = Math.max(15, parseInt(readArg('poll-sec', '45'), 10) || 45);
+  const isDry = dryRun();
+
+  let session = loadSession();
+  const now = Date.now();
+  if (!session || now >= session.endMs) {
+    const startMs = now;
+    const endMs = startMs + DAYS * 86400000;
+    const st = await mt5Status();
+    if (!st.connected) {
+      console.error('Start Exness MT5 + login, then: npm run mt5-api');
+      process.exit(1);
+    }
+    session = {
+      startedAt: new Date(startMs).toISOString(),
+      endsAt: new Date(endMs).toISOString(),
+      startMs,
+      endMs,
+      lastClosedBarT: null,
+      lastEquitySnapMs: 0,
+      tradeCountToday: 0,
+      nyDay: null,
+      server: st.server,
+      dryRun: isDry,
+    };
+    saveSession(session);
+    logEquitySnapshot(st.equity, { event: 'SESSION_START', server: st.server, endsAt: session.endsAt });
+    console.error(`[forward-demo] Session started → ${session.endsAt}`);
+    console.error(`[forward-demo] Server: ${st.server} · equity $${st.equity.toFixed(2)}`);
+    console.error(`[forward-demo] Log: ${forwardDemoLogPath()}`);
+    if (isDry) console.error('[forward-demo] DRY-RUN — no MT5 orders');
+  } else {
+    console.error(`[forward-demo] Resuming session → ${session.endsAt}`);
+  }
+
+  console.error(`[forward-demo] Poll every ${pollSec}s · frozen strategy · zero param changes`);
+
+  const runTick = async () => {
+    const s = loadSession();
+    if (!s) return;
+    await tickOnce(s);
+  };
+
+  await runTick();
+  setInterval(() => {
+    void runTick().catch((e) => {
+      console.error('[forward-demo] tick error:', e instanceof Error ? e.message : e);
+    });
+  }, pollSec * 1000);
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

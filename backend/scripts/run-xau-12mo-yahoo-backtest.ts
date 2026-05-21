@@ -30,6 +30,7 @@ import { fileURLToPath } from 'url';
 import type { Bar, BiasSnapshot, RiskSnapshot, TradeJournalRow } from '../engine/types';
 import {
   buildBundleFromM30Bars,
+  buildTradeRecommendation,
   computeBias,
   computeRisk,
   defaultBilshenzConfig,
@@ -43,6 +44,7 @@ import { atr, lastFinite } from '../engine/indicators';
 import { nyYmdKey, sessionFromUtcEpochMs } from '../engine/sessionEngine';
 import { replaySrBarByBar } from '../engine/srEngine';
 import { computeGatesAndSignalsJimplasFluidity } from '../engine/jimplasFluiditySignalEngine';
+import { applyJournalSignalThrottle } from '../engine/signalThrottle';
 import { m30ToM15Bars } from '../engine/m15Bars';
 import type { BilshenzEngineConfig } from '../engine/types';
 import { leftSideScanPineV5 } from '../engine/pineV5SignalEngine';
@@ -285,6 +287,33 @@ function readSlippagePipsFromArgs(): number {
   return 0.4;
 }
 
+/** Override broker spread in realistic mode (stress tests). */
+function readSpreadPipsOverrideFromArgs(): number | null {
+  const argv = process.argv.slice(2);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a.startsWith('--spread-pips=')) {
+      const v = parseFloat(a.slice('--spread-pips='.length));
+      if (Number.isFinite(v) && v > 0) return v;
+    } else if (a === '--spread-pips' && argv[i + 1]) {
+      const v = parseFloat(argv[i + 1]!);
+      if (Number.isFinite(v) && v > 0) return v;
+    }
+  }
+  return null;
+}
+
+/** Appended to output filename, e.g. `--out-suffix=stress` → `backtest-xau-12mo-live-stress-output.txt`. */
+function readOutSuffixFromArgs(): string {
+  const argv = process.argv.slice(2);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a.startsWith('--out-suffix=')) return a.slice('--out-suffix='.length).trim();
+    if (a === '--out-suffix' && argv[i + 1]) return argv[i + 1]!.trim();
+  }
+  return '';
+}
+
 /** Overrides {@link defaultBilshenzConfig.maxDailyTrades} (clamped 1–25). */
 function readMaxDailyTradesFromArgs(): number {
   const argv = process.argv.slice(2);
@@ -314,7 +343,8 @@ function readExportClosedTradesPath(): string | null {
 
 function riskForBarSlice(
   sub: ReturnType<typeof sliceMarketBundleToM30End>,
-  cfg: typeof defaultBilshenzConfig
+  cfg: typeof defaultBilshenzConfig,
+  opts?: { inSession?: boolean; bullClean?: boolean; bearClean?: boolean }
 ): RiskSnapshot {
   const m30 = sub.m30;
   const close = m30[m30.length - 1]!.c;
@@ -325,7 +355,7 @@ function riskForBarSlice(
   const dxyClose3 = dxy.length > 3 ? dxy[dxy.length - 4]! : dxyClose;
   const uy = sub.us10yCloseSeries;
   const us10yClose = uy.length ? uy[uy.length - 1]! : null;
-  return computeRisk(m30, sub.h4, cfg, atrVal, dxyClose ?? null, dxyClose3 ?? null, us10yClose ?? null, close);
+  return computeRisk(m30, sub.h4, cfg, atrVal, dxyClose ?? null, dxyClose3 ?? null, us10yClose ?? null, close, opts);
 }
 
 function biasForBarSlice(sub: ReturnType<typeof sliceMarketBundleToM30End>): BiasSnapshot {
@@ -358,8 +388,17 @@ function readMt5ApiUrlFromArgs(): string | null {
     const a = argv[i]!;
     if (a.startsWith('--mt5-api=')) return a.slice('--mt5-api='.length).replace(/\/$/, '');
     if (a === '--mt5-api' && argv[i + 1]) return argv[i + 1]!.replace(/\/$/, '');
+    if (a === '--exness' || a === '--use-mt5') return 'http://127.0.0.1:8765';
+  }
+  /** Default: connected Exness/broker terminal via local Python API (not Yahoo). */
+  if (!readMt5CsvPathFromArgs() && !readTradingViewCsvPathFromArgs()) {
+    return 'http://127.0.0.1:8765';
   }
   return null;
+}
+
+function allowYahooFallbackFromArgs(): boolean {
+  return process.argv.slice(2).some((a) => a === '--yahoo-fallback' || a === '--yahoo');
 }
 
 async function fetchMt5ApiM30Bars(
@@ -440,6 +479,8 @@ async function main() {
   const useMt5Equity = process.argv.includes('--equity-from-mt5');
   const realisticMode = readRealisticFromArgs();
   const slippagePips = readSlippagePipsFromArgs();
+  const spreadPipsOverride = readSpreadPipsOverrideFromArgs();
+  const outSuffix = readOutSuffixFromArgs();
   const brokerSlCap = readBrokerSlPipsFromArgs();
   let mt5Broker: Mt5BrokerContext | null = null;
   const symbol = process.env.MT5_SYMBOL?.trim() || 'XAUUSD';
@@ -499,7 +540,7 @@ async function main() {
     dataNote = `TradingView chart export: ${path.basename(tvCsv)} (${raw.length} rows → ${m30All.length} M30 bars)`;
   } else if (mt5Api) {
     const fetchEndMs = RANGE_END_MS + 24 * 3600 * 1000;
-    if (realisticMode && !mt5Broker) {
+    if (!mt5Broker) {
       mt5Broker = await fetchMt5BrokerContext(
         mt5Api,
         symbol,
@@ -507,8 +548,13 @@ async function main() {
         defaultBilshenzConfig.simUsdPerEnginePip
       );
     }
+    if (!mt5Broker?.server) {
+      throw new Error(
+        'MT5 API not connected — open Exness MT5, log in to demo/live, run mt5_trading_system/python/start-api.ps1'
+      );
+    }
     console.error(
-      `Fetching ${symbol} M30 from MT5 API ${mt5Api} (${new Date(FETCH_START_MS).toISOString()} → ${new Date(fetchEndMs).toISOString()}) ...`
+      `Fetching ${symbol} M30 from MT5 (${mt5Broker.server}) via ${mt5Api} (${new Date(FETCH_START_MS).toISOString()} → ${new Date(fetchEndMs).toISOString()}) ...`
     );
     m30All = await fetchMt5ApiM30Bars(mt5Api, symbol, FETCH_START_MS, fetchEndMs);
     if (m30All.length < WARMUP + 100) {
@@ -516,13 +562,19 @@ async function main() {
         `Too few M30 bars from MT5 API (${m30All.length}). Open XAUUSD chart in MT5 and scroll/load more history.`
       );
     }
-    dataNote = `MT5 live API ${mt5Api} — ${symbol} M30 (${m30All.length} bars)`;
+    const resolved = mt5Broker.server ? ` · server ${mt5Broker.server}` : '';
+    dataNote = `Exness/broker MT5 terminal${resolved} — ${symbol} M30 (${m30All.length} bars)`;
   } else {
     const fetchEndMs = RANGE_END_MS + 24 * 3600 * 1000;
     const p1 = Math.floor(FETCH_START_MS / 1000);
     const p2 = Math.floor(fetchEndMs / 1000);
+    if (!allowYahooFallbackFromArgs()) {
+      throw new Error(
+        'No MT5 data source. Start Exness MT5 + start-api.ps1 (port 8765), or pass --mt5-api=… / --mt5-csv=…. Yahoo only with --yahoo-fallback.'
+      );
+    }
     console.error(
-      'No MT5/IC CSV (--mt5-csv / MT5_CSV / IC_MARKETS_CSV) or TradingView CSV; using Yahoo GC=F 1h.'
+      'No MT5/IC CSV or MT5 API; using Yahoo GC=F 1h (--yahoo-fallback).'
     );
     console.error(
       `Fetching ${YAHOO_GOLD} 1h from ${new Date(FETCH_START_MS).toISOString()} to ${new Date(fetchEndMs).toISOString()} (upsampling to M30) ...`
@@ -536,6 +588,8 @@ async function main() {
   }
 
   const base = buildBundleFromM30Bars(m30All);
+  const engineSpreadPips =
+    spreadPipsOverride ?? mt5Broker?.spreadPips ?? defaultBilshenzConfig.currentSpreadPips;
   const cfg = {
     ...defaultBilshenzConfig,
     maxDailyTrades,
@@ -544,7 +598,10 @@ async function main() {
     enableP2: true,
     enableP3: true,
     journalSlPips: 2,
-    currentSpreadPips: 1.5,
+    currentSpreadPips: engineSpreadPips,
+    spreadBaselinePips: mt5Broker?.spreadPips ?? defaultBilshenzConfig.spreadBaselinePips,
+    enableExecutionHardening:
+      process.argv.includes('--no-hardening') ? false : defaultBilshenzConfig.enableExecutionHardening,
     newsActive: false,
     nfpBlackout: false,
     geoRisk: 'LOW' as const,
@@ -614,8 +671,6 @@ async function main() {
 
     const sr = srSeries[idx]!;
     const sub = sliceMarketBundleToM30End(fullBundle, idx);
-    const bias = biasForBarSlice(sub);
-    const risk = riskForBarSlice(sub, cfg);
     const hasStructure = !(sr.r1 == null && sr.r2 == null && sr.r3 == null && sr.s1 == null && sr.s2 == null && sr.s3 == null);
     const range = leftSideScanPineV5({
       nearestRes: sr.nearestRes,
@@ -630,7 +685,13 @@ async function main() {
     const prevSession = idx >= 1 ? sessionFromUtcEpochMs(m30[idx - 1]!.t) : session;
     const atrArr = atr(m30, cfg.atrLen);
     const atrVal = lastFinite(atrArr);
-    const { signals, levels } = computeGatesAndSignalsJimplasFluidity({
+    const risk = riskForBarSlice(sub, cfg, {
+      inSession: session.inSession,
+      bullClean: range.bullClean,
+      bearClean: range.bearClean,
+    });
+    const bias = biasForBarSlice(sub);
+    const { signals: rawSignals, levels, gates } = computeGatesAndSignalsJimplasFluidity({
       cfg,
       inSession: session.inSession,
       session,
@@ -646,8 +707,42 @@ async function main() {
       idx,
       atrVal,
     });
+    const signals = applyJournalSignalThrottle({
+      cfg,
+      m30,
+      idx,
+      signals: rawSignals,
+      journalRows,
+      aggregateDeps: {
+        sessionOk: session.inSession,
+        maxTradesReached: gates.maxTradesReached,
+        newsActive: cfg.newsActive,
+        nfpBlackout: cfg.nfpBlackout,
+        spreadBlocked: risk.spreadBlocked,
+        dxyBlocksBuy: risk.dxyBlocksBuy,
+        athZoneBlocked: risk.athZoneBlocked,
+        geoHigh: risk.geoHigh,
+      },
+    });
 
-    const sig = signals.anyBuy || signals.anySell;
+    const slBuffer = cfg.journalSlPips * cfg.pipSize;
+    const trade = buildTradeRecommendation({
+      cfg,
+      session,
+      gates,
+      risk,
+      signals,
+      close: bar.c,
+      nearestRes: sr.nearestRes,
+      nearestSup: sr.nearestSup,
+      slBuffer,
+      bullClean: range.bullClean,
+      bearClean: range.bearClean,
+      barLow: bar.l,
+      barHigh: bar.h,
+      setupLevels: levels,
+    });
+    const sig = trade.allowed && trade.side != null;
     if (sig && lastBarSig !== bar.t && tradeCount < cfg.maxDailyTrades) {
       let riskHalted = false;
       if (cfg.maxDailyLossPct > 0 && dayStartEquityTrack > 0) {
@@ -664,13 +759,12 @@ async function main() {
         lastBarSig = bar.t;
         continue;
       }
-      const slBuffer = cfg.journalSlPips * cfg.pipSize;
       const prev = { rows: journalRows, count: journalRows.length };
       const next = pushJournalRow(
         prev,
         {
-          anyBuy: signals.anyBuy,
-          anySell: signals.anySell,
+          anyBuy: trade.side === 'BUY',
+          anySell: trade.side === 'SELL',
           barIndex: idx,
           timeStr: new Date(bar.t).toISOString(),
           close: bar.c,
@@ -713,9 +807,11 @@ async function main() {
   if (realisticMode && mt5Broker?.usdPerPipPerLot) {
     simPip = mt5Broker.usdPerPipPerLot;
   }
+  const realisticSpreadPips =
+    spreadPipsOverride ?? mt5Broker?.spreadPips ?? cfg.currentSpreadPips;
   const realisticCosts: RealisticCosts | null = realisticMode
     ? {
-        spreadPips: mt5Broker?.spreadPips ?? cfg.currentSpreadPips,
+        spreadPips: realisticSpreadPips,
         slippagePipsPerSide: slippagePips,
         lossSlPips: (structural, sizing) => {
           if (brokerSlCap != null) return Math.min(structural, brokerSlCap);
@@ -822,8 +918,9 @@ async function main() {
     if (mt5Broker?.server) lines.push(`MT5 server: ${mt5Broker.server}`);
     if (mt5Broker?.currency) lines.push(`Account currency: ${mt5Broker.currency}`);
     if (realisticCosts) {
+      const spreadLabel = spreadPipsOverride != null ? 'stress override' : 'broker';
       lines.push(
-        `Spread: ${realisticCosts.spreadPips.toFixed(2)} pips (broker) · Slippage: ${realisticCosts.slippagePipsPerSide.toFixed(2)} p/side`
+        `Spread: ${realisticCosts.spreadPips.toFixed(2)} pips (${spreadLabel}) · Slippage: ${realisticCosts.slippagePipsPerSide.toFixed(2)} p/side`
       );
       lines.push(`$/pip/lot: $${simPip.toFixed(2)} (broker tick value)`);
       const lossLbl =
@@ -901,7 +998,8 @@ async function main() {
   const outSlug = customRange
     ? `${new Date(RANGE_START_MS).toISOString().slice(0, 10)}_${new Date(RANGE_END_MS).toISOString().slice(0, 10)}${liveProfile ? '-live' : ''}`
     : `${journalMonths}mo${liveProfile ? '-live' : ''}`;
-  const outPath = path.join(__dirname, `backtest-xau-${outSlug}-output.txt`);
+  const suffixPart = outSuffix ? `-${outSuffix.replace(/^-/, '')}` : '';
+  const outPath = path.join(__dirname, `backtest-xau-${outSlug}${suffixPart}-output.txt`);
   fs.writeFileSync(outPath, lines.join('\n'), 'utf8');
   console.log(lines.join('\n'));
   console.log('');

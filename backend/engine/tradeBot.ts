@@ -8,6 +8,11 @@ import type {
   TradeRecommendation,
 } from './types';
 import { computeConfidencePct } from './confidenceEngine';
+import {
+  evaluateExecutionHardening,
+  tradeQualityScore,
+  volatilityScaledMaxSlPips,
+} from './executionHardening';
 import { applyBalancedClampGeometry, clampTp1ForJournal, rewardRiskRatio } from './tradeGeometry';
 import { closedM15BarsInWindow, M30_MS } from './m15Bars';
 import { halfLossExitPrice, isAdverseM15Close, underwaterRiskFraction } from './m15AdverseExit';
@@ -61,6 +66,7 @@ export function buildTradeRecommendation(args: {
   if (cfg.newsActive) blocks.push('News filter active');
   if (cfg.nfpBlackout) blocks.push('NFP/CPI blackout');
   if (risk.brokerSpreadBlocked) blocks.push('Broker spread guard');
+  if (risk.hostileExecution) blocks.push('Hostile execution environment');
   if (!pineMode && risk.barRangeBlocked) blocks.push('M30 bar range guard');
   if (!gates.structureOk) blocks.push('No M30 structure (R/S)');
   if (gates.maxTradesReached) blocks.push(`Max daily trades (${cfg.maxDailyTrades})`);
@@ -133,6 +139,53 @@ export function buildTradeRecommendation(args: {
   let rr: number | null = null;
   if (entry != null && sl != null && tp1 != null && side) {
     rr = rewardRiskRatio(entry, sl, tp1, side);
+  }
+
+  if (cfg.enableExecutionHardening && side) {
+    const hard = evaluateExecutionHardening({
+      cfg,
+      risk,
+      session,
+      barRangePips: barHigh != null && barLow != null ? (barHigh - barLow) / cfg.pipSize : 0,
+      bullClean,
+      bearClean,
+    });
+    const q = tradeQualityScore({
+      setup,
+      rr,
+      confidencePct: conf,
+      spreadProxy: hard.spreadProxyPips,
+      adaptiveLimit: hard.adaptiveSpreadLimitPips,
+      regime: hard.regime,
+      bullClean,
+      bearClean,
+    });
+    const minQ = setup === 'P2' ? cfg.minTradeQualityP2 : hard.tradeQualityMin;
+    if (allowed && minQ > 0 && q < minQ) {
+      allowed = false;
+      blocks.push(`Trade quality ${q.toFixed(0)} < ${minQ} (${hard.regime})`);
+    }
+    if (allowed && setup === 'P2' && cfg.p2BlockInChopRegime && hard.regime === 'CHOP') {
+      allowed = false;
+      blocks.push('P2 blocked in chop regime');
+    }
+    if (allowed && setup === 'P2' && cfg.p2BlockInHighVol && hard.regime === 'HIGH_VOL') {
+      allowed = false;
+      blocks.push('P2 blocked in high-vol regime');
+    }
+    if (side && entry != null && sl != null && setup !== 'P2') {
+      const slPips = Math.abs(entry - sl) / cfg.pipSize;
+      const setupCap =
+        setup === 'P1' && cfg.p1MaxSlPips > 0
+          ? cfg.p1MaxSlPips
+          : setup === 'P3' && cfg.maxSlPipsForEntry > 0
+            ? cfg.maxSlPipsForEntry
+            : volatilityScaledMaxSlPips(cfg, risk.atrPips);
+      if (slPips > setupCap * 1.35) {
+        allowed = false;
+        blocks.push(`SL ${slPips.toFixed(0)}p > vol-scaled max ${setupCap.toFixed(0)}p`);
+      }
+    }
   }
 
   if (cfg.usePineV5 === false) {

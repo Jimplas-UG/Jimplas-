@@ -6,6 +6,7 @@ Requires MetaTrader 5 terminal installed and logged in on Windows.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -19,9 +20,25 @@ except ImportError:
 log = logging.getLogger("mt5_connector")
 
 
+def resolve_terminal_path(path: str | None) -> str | None:
+    """MetaTrader5.initialize expects terminal64.exe, not the install folder."""
+    if not path:
+        return None
+    p = path.strip().strip('"')
+    if os.path.isdir(p):
+        exe = os.path.join(p, "terminal64.exe")
+        if os.path.isfile(exe):
+            return exe
+    return p
+
+
 @dataclass
 class MT5Config:
-    path: str | None = None  # terminal64.exe folder; None = default
+    path: str | None = None  # folder or path to terminal64.exe; None = default
+
+
+def _norm_server(name: str) -> str:
+    return (name or "").strip().casefold()
 
 
 class MT5Connector:
@@ -33,48 +50,97 @@ class MT5Connector:
         self._login = 0
         self._password = ""
         self._server = ""
+        self._init_ok = False
+        self._symbol_cache: dict[str, str] = {}
 
     def ensure_init(self) -> bool:
         if mt5 is None:
             log.error("MetaTrader5 package not installed")
             return False
+        if self._init_ok:
+            return True
         kwargs: dict[str, Any] = {}
-        if self.cfg.path:
-            kwargs["path"] = self.cfg.path
+        term = resolve_terminal_path(self.cfg.path)
+        if term:
+            kwargs["path"] = term
         if not mt5.initialize(**kwargs):
             log.error("initialize() failed: %s", mt5.last_error())
+            self._init_ok = False
             return False
+        self._init_ok = True
         return True
+
+    def _session_matches(self, login: int, server: str) -> bool:
+        if mt5 is None or not self.ensure_init():
+            return False
+        a = mt5.account_info()
+        if a is None:
+            return False
+        return int(a.login) == int(login) and _norm_server(str(a.server)) == _norm_server(server)
 
     def login(self, login: int, password: str, server: str, path: str | None = None) -> bool:
         if mt5 is None:
             return False
         if path:
-            self.cfg.path = path
+            self.cfg.path = resolve_terminal_path(path)
+            self._init_ok = False
+        server_clean = (server or "").strip()
+        if not server_clean:
+            log.error("login failed: empty server name")
+            return False
+        login_i = int(login)
         if not self.ensure_init():
             return False
-        ok = mt5.login(int(login), password=password, server=server)
+
+        # Fast path: MT5 terminal already logged in to this broker account (any broker).
+        if self._session_matches(login_i, server_clean):
+            self._logged_in = True
+            self._login = login_i
+            self._password = password
+            self._server = server_clean
+            log.info("login: reusing active MT5 terminal session %s@%s", login_i, server_clean)
+            return True
+
+        # Switching account — only then call IPC login (can take 10–30s on some brokers).
+        if self._logged_in and (self._login != login_i or _norm_server(self._server) != _norm_server(server_clean)):
+            if mt5:
+                mt5.shutdown()
+            self._init_ok = False
+            self._logged_in = False
+            if not self.ensure_init():
+                return False
+
+        ok = mt5.login(login_i, password=password, server=server_clean)
         if not ok:
             log.error("login failed: %s", mt5.last_error())
             self._logged_in = False
             return False
         self._logged_in = True
-        self._login = int(login)
+        self._login = login_i
         self._password = password
-        self._server = server
+        self._server = server_clean
+        self._symbol_cache.clear()
         return True
 
     def reconnect(self) -> bool:
-        if not self._logged_in:
+        if not self._logged_in or not self._password:
+            return self.try_attach_existing()
+        if self._session_matches(self._login, self._server):
+            return True
+        if not self.ensure_init():
             return False
-        mt5.shutdown()
-        time.sleep(0.5)
-        return self.login(self._login, self._password, self._server)
+        ok = mt5.login(self._login, password=self._password, server=self._server)
+        if ok:
+            return True
+        log.warning("reconnect login failed: %s", mt5.last_error())
+        return False
 
     def shutdown(self) -> None:
         if mt5:
             mt5.shutdown()
         self._logged_in = False
+        self._init_ok = False
+        self._symbol_cache.clear()
 
     def resolve_symbol(self, symbol: str) -> str | None:
         """Pick first broker symbol that exists (XAUUSD vs XAUUSDm, etc.)."""
@@ -82,8 +148,10 @@ class MT5Connector:
             return None
         import os
 
-        env_sym = (os.environ.get("MT5_SYMBOL") or "").strip()
         base = (symbol or "XAUUSD").strip()
+        if base in self._symbol_cache:
+            return self._symbol_cache[base]
+        env_sym = (os.environ.get("MT5_SYMBOL") or "").strip()
         candidates: list[str] = []
         for s in (env_sym, base, f"{base}m", f"{base}.m", f"{base}_m", "GOLD", "XAUUSDm", "XAUUSD"):
             s = s.strip()
@@ -94,6 +162,7 @@ class MT5Connector:
             if info is not None:
                 if not info.visible:
                     mt5.symbol_select(s, True)
+                self._symbol_cache[base] = s
                 return s
         return None
 
@@ -262,6 +331,8 @@ class MT5Connector:
         magic: int = 77002002,
         comment: str = "python_bridge",
     ) -> dict[str, Any]:
+        import time as _time
+
         if not self._alive():
             return {"ok": False, "error": "not_connected"}
         side_u = side.upper()
@@ -272,13 +343,19 @@ class MT5Connector:
         tick = mt5.symbol_info_tick(sym)
         if tick is None:
             return {"ok": False, "error": f"no tick for {sym}"}
-        price = tick.ask if side_u == "BUY" else tick.bid
+        intended_price = tick.ask if side_u == "BUY" else tick.bid
+        spread_price = float(tick.ask) - float(tick.bid)
+        pip = 0.1
+        info = mt5.symbol_info(sym)
+        if info is not None and info.point > 0:
+            pip = float(info.point) * 10.0
+        spread_pips = spread_price / pip if pip > 0 else 0.0
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": sym,
             "volume": float(volume),
             "type": order_type,
-            "price": price,
+            "price": intended_price,
             "magic": int(magic),
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
@@ -288,15 +365,28 @@ class MT5Connector:
             request["sl"] = float(sl)
         if tp is not None:
             request["tp"] = float(tp)
+        t0 = _time.perf_counter()
         r = mt5.order_send(request)
+        latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         if r is None:
-            return {"ok": False, "error": str(mt5.last_error())}
+            return {"ok": False, "error": str(mt5.last_error()), "latency_ms": latency_ms}
+        fill_price = float(getattr(r, "price", intended_price) or intended_price)
+        slip_pips = (
+            (fill_price - intended_price) / pip
+            if side_u == "BUY"
+            else (intended_price - fill_price) / pip
+        )
         return {
             "ok": r.retcode == mt5.TRADE_RETCODE_DONE,
             "retcode": r.retcode,
             "comment": r.comment,
             "order": r.order,
             "deal": r.deal,
+            "intended_price": intended_price,
+            "fill_price": fill_price,
+            "spread_pips": round(spread_pips, 2),
+            "slippage_pips": round(slip_pips, 2),
+            "latency_ms": latency_ms,
         }
 
     def trade_logs(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -342,11 +432,9 @@ class MT5Connector:
     def _alive(self) -> bool:
         if mt5 is None:
             return False
+        if not self.ensure_init():
+            return False
         if not self._logged_in and not self.try_attach_existing():
             return False
         t = mt5.terminal_info()
-        if t is None or not t.connected:
-            self.reconnect()
-            t2 = mt5.terminal_info()
-            return t2 is not None and t2.connected
-        return True
+        return t is not None and bool(t.connected)

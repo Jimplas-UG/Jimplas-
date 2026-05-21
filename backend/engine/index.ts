@@ -7,6 +7,7 @@ export * from './blackoutEngine';
 export * from './spreadEngine';
 export * from './wickEngine';
 export * from './riskEngine';
+export * from './executionHardening';
 export * from './srEngine';
 export * from './signalEngine';
 export * from './pineV5SignalEngine';

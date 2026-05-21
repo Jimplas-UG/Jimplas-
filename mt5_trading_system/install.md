@@ -17,9 +17,33 @@ This pack adds **native MQL5** (indicator + EA), a **Python MetaTrader5 REST bri
 
 ---
 
-## 2. MetaTrader 5 — copy includes & compile
+## 2. MetaTrader 5 — broker terminal (required)
 
-1. Install **MetaTrader 5** from your broker (e.g. Exness) and log in (**demo** first).
+**Do not use** the generic MetaQuotes `mt5setup.exe` alone — Python often gets `IPC timeout` and **0 symbols** until you use a **broker-branded** terminal.
+
+From repo root (PowerShell **as Administrator**):
+
+```powershell
+cd mt5_trading_system
+.\install-mt5-broker.ps1 -Broker Exness    # or IC, or Both (two separate folders)
+```
+
+Then set the path to the folder that contains `terminal64.exe` (examples):
+
+| Broker | Typical path |
+|--------|----------------|
+| Exness | `C:\Program Files\MetaTrader 5 Exness` |
+| IC Markets (SC) | `C:\Program Files\MetaTrader 5 IC Markets (SC)` |
+
+```powershell
+$env:MT5_TERMINAL_PATH="C:\Program Files\MetaTrader 5 Exness"
+```
+
+Log in inside MT5: **File → Login to trade account** (demo first). Add **XAUUSD** / **XAUUSDm** to Market Watch.
+
+## 2b. Copy includes & compile
+
+1. With MT5 open and connected to your broker:
 2. Open **data folder**: MT5 → **File → Open Data Folder**.
 3. Copy **`Bilshenz`** folder from repo:
    - From: `mt5_trading_system/mql5/Include/Bilshenz/`
@@ -62,7 +86,7 @@ python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 # Optional: path to terminal if non-standard
-# $env:MT5_TERMINAL_PATH="C:\Program Files\MetaTrader 5"
+# $env:MT5_TERMINAL_PATH="C:\Program Files\MetaTrader 5 Exness"
 $env:PORT=8765
 python main.py
 ```
@@ -86,8 +110,10 @@ Health check: `http://127.0.0.1:8765/health`
 ## 5. Expo app UI
 
 1. Set at build/dev time: **`EXPO_PUBLIC_MT5_API_URL=http://YOUR_PC_IP:8765`**
-2. Open app → **Profile** → **MT5 PYTHON API** section: base URL, server, login, password → **CONNECT MT5**.
-3. Manual **BUY/SELL** sends **0.01** lot via API (demo only recommended).
+2. Open app → **Profile** → **MT5 PYTHON API**: base URL + broker server/login/password (any MT5 broker).
+3. **Fast connect:** log in inside MT5 first, then tap **USE MT5 TERMINAL SESSION** (skips slow IPC login).
+4. Or **CONNECT MT5** — reuses an active terminal session when login/server match; otherwise calls broker login (up to ~45s).
+5. Manual **BUY/SELL** sends **0.01** lot via API (demo only recommended).
 
 ---
 

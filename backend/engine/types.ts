@@ -166,6 +166,26 @@ export type BilshenzEngineConfig = {
   maxDrawdownPct: number;
   /** Live: evaluate signals on last closed M30 bar (n-2), not the forming bar. */
   signalOnClosedBarOnly: boolean;
+  /** Adaptive spread / regime / quality gates (live + realistic backtest). */
+  enableExecutionHardening: boolean;
+  /** Reference spread for adaptive filter (e.g. Exness median). */
+  spreadBaselinePips: number;
+  /** Block when spread proxy exceeds baseline × this (default 2). */
+  spreadAdaptiveMaxMult: number;
+  /** Hostile execution kill-switch spread multiplier vs baseline. */
+  hostileSpreadMult: number;
+  /** ATR pips above which environment is hostile. */
+  hostileAtrPips: number;
+  /** CHOP regime when ATR below this and H4 chop zone. */
+  volChopMaxAtrPips: number;
+  /** TREND-friendly ATR floor. */
+  volTrendMinAtrPips: number;
+  /** Scale journal SL cap in high vol. */
+  volSlScaleHigh: number;
+  minTradeQualityP1P3: number;
+  minTradeQualityP2: number;
+  p2BlockInChopRegime: boolean;
+  p2BlockInHighVol: boolean;
   /** Stricter minimum R:R for P3 (retest); must stay compatible with {@link tp1MaxRewardPips} / {@link journalSlPips}. */
   p3MinRewardRisk: number;
   /**
@@ -243,7 +263,7 @@ export const defaultBilshenzConfig: BilshenzEngineConfig = {
   riskPctAtrCrisis: 0.5,
   riskPctGeoHighCap: 0.5,
   journalSlPips: 2,
-  lossCooldownBars: 0,
+  lossCooldownBars: 3,
   p3SameSideBarsAfterP3Loss: 0,
   p3MaxSameSideInLookback: 0,
   p3LookbackBars: 96,
@@ -273,6 +293,19 @@ export const defaultBilshenzConfig: BilshenzEngineConfig = {
   maxDailyLossPct: 3,
   maxDrawdownPct: 15,
   signalOnClosedBarOnly: true,
+  enableExecutionHardening: true,
+  spreadBaselinePips: 3.08,
+  spreadAdaptiveMaxMult: 1.65,
+  hostileSpreadMult: 2.35,
+  /** XAU M30 ATR crisis tier (align with riskPctAtrCrisis band ≥100p). */
+  hostileAtrPips: 100,
+  volChopMaxAtrPips: 48,
+  volTrendMinAtrPips: 45,
+  volSlScaleHigh: 1.12,
+  minTradeQualityP1P3: 34,
+  minTradeQualityP2: 36,
+  p2BlockInChopRegime: false,
+  p2BlockInHighVol: false,
 };
 
 /** Optional equity context for daily-loss / max-drawdown circuit breakers. */
@@ -373,6 +406,11 @@ export type RiskSnapshot = {
   athZoneBlocked: boolean;
   geoMedium: boolean;
   geoHigh: boolean;
+  executionRegime?: string;
+  hostileExecution?: boolean;
+  spreadProxyPips?: number;
+  adaptiveSpreadLimitPips?: number;
+  tradeQualityMin?: number;
   h4SwingHigh1: number | null;
   h4SwingHigh2: number | null;
   h4SwingLow1: number | null;

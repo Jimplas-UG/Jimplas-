@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,12 +28,14 @@ app.add_middleware(
 )
 
 connector = MT5Connector(MT5Config(path=os.environ.get("MT5_TERMINAL_PATH") or None))
+_login_pool = ThreadPoolExecutor(max_workers=2)
+LOGIN_TIMEOUT_SEC = float(os.environ.get("MT5_LOGIN_TIMEOUT_SEC", "45"))
 
 
 class LoginBody(BaseModel):
     login: int = Field(..., description="MT5 account number")
     password: str
-    server: str = Field(..., description="Broker server name")
+    server: str = Field(..., description="Broker server name (any MT5 broker)")
     path: str | None = Field(None, description="Optional path to terminal64.exe folder")
 
 
@@ -50,11 +53,53 @@ def health():
     return {"ok": True, "service": "bilshenz-mt5-bridge"}
 
 
+def _login_detail() -> str:
+    try:
+        import MetaTrader5 as mt5
+
+        err = mt5.last_error()
+        if err:
+            return f"MT5 login failed ({err}) — open your broker terminal, check login/server/password"
+    except Exception:
+        pass
+    return "MT5 login failed — open MT5, log in manually, or use USE TERMINAL SESSION"
+
+
+@app.post("/api/attach")
+def api_attach():
+    """Fast connect when MT5 is already logged in (any broker). No password IPC call."""
+    ok = connector.try_attach_existing()
+    if not ok:
+        raise HTTPException(
+            status_code=401,
+            detail="No active MT5 session — open your broker terminal and log in, then try again",
+        )
+    return {"ok": True, "account": connector.account_info(), "mode": "terminal_session"}
+
+
 @app.post("/api/login")
 def api_login(body: LoginBody):
-    ok = connector.login(body.login, body.password, body.server, body.path)
+    server = (body.server or "").strip()
+    if not server:
+        raise HTTPException(status_code=400, detail="Broker server name is required")
+    if body.login <= 0:
+        raise HTTPException(status_code=400, detail="Invalid login number")
+
+    def _do_login() -> bool:
+        return connector.login(body.login, body.password, server, body.path)
+
+    try:
+        ok = _login_pool.submit(_do_login).result(timeout=LOGIN_TIMEOUT_SEC)
+    except FuturesTimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "MT5 login timed out — open MT5, log in to your broker manually, "
+                "then tap USE TERMINAL SESSION or CONNECT again"
+            ),
+        )
     if not ok:
-        raise HTTPException(status_code=401, detail="MT5 login failed — check terminal is running and credentials")
+        raise HTTPException(status_code=401, detail=_login_detail())
     return {"ok": True, "account": connector.account_info()}
 
 

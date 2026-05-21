@@ -329,7 +329,11 @@ export function computeBilshenzSnapshot(args: ComputeArgs): BilshenzSnapshot {
   const us10ySeries = bundle.us10yCloseSeries;
   const us10yClose = us10ySeries.length ? us10ySeries[us10ySeries.length - 1] : null;
 
-  const risk = computeRisk(m30, h4, cfg, atrVal, dxyClose, dxyClose3, us10yClose, close);
+  const risk = computeRisk(m30, h4, cfg, atrVal, dxyClose, dxyClose3, us10yClose, close, {
+    inSession: session.inSession,
+    bullClean: range.bullClean,
+    bearClean: range.bearClean,
+  });
 
   const wick = wickMetricsAt(m30, signalIdx);
 
