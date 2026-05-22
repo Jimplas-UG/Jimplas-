@@ -11,8 +11,12 @@ New-Item -ItemType Directory -Force -Path C:\opt, C:\logs\tradingbot, 'C:\Progra
 if (-not (Get-Command git -EA SilentlyContinue)) {
   winget install Git.Git -e --accept-package-agreements --accept-source-agreements
 }
-if (-not (Test-Path "$App\.git")) { git clone $Repo $App }
+if (-not (Test-Path "$App\.git")) { git clone --depth 1 --branch main $Repo $App 2>>$Log }
 Set-Location $App; git pull 2>>$Log
+if (-not (Test-Path "$App\deploy\windows\production-setup.ps1")) {
+  L 'ERROR: deploy/windows missing on GitHub — run: git push origin main from dev PC'
+  throw 'Clone incomplete: deploy/windows not in repo'
+}
 
 # Node + Python
 winget install OpenJS.NodeJS.LTS Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements 2>>$Log
