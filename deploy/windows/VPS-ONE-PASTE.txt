@@ -1,0 +1,20 @@
+DELETE the broken file first on VPS:
+  Remove-Item C:\opt\vps-clone-install.ps1 -Force
+
+BEST - no script download (git only). Paste in Administrator PowerShell:
+
+powershell -NoExit -ExecutionPolicy Bypass
+
+Then paste this block:
+
+Set-ExecutionPolicy Bypass -Scope Process -Force
+$App = 'C:\opt\bilshenz'
+if (Test-Path $App) { Remove-Item $App -Recurse -Force }
+if (-not (Get-Command git -EA SilentlyContinue)) { winget install Git.Git -e --accept-package-agreements --accept-source-agreements }
+$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+git clone --depth 1 --branch main https://github.com/Jimplas-UG/Jimplas-.git $App
+if (-not (Test-Path "$App\deploy\windows\production-setup.ps1")) { Write-Host CLONE_BAD; pause; exit }
+powershell -ExecutionPolicy Bypass -File "$App\deploy\windows\production-setup.ps1" -AppDir $App
+Write-Host DONE; pause
+
+This runs production-setup.ps1 FROM THE CLONE (correct encoding).
