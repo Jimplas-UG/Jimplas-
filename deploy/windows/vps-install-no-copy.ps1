@@ -1,4 +1,4 @@
-# Paste ALL of this in VPS Administrator PowerShell — NO \\tsclient\ needed
+# Paste ALL of this in VPS Administrator PowerShell - NO \\tsclient\ needed
 Set-ExecutionPolicy Bypass -Scope Process -Force
 $App = 'C:\opt\bilshenz'
 $Repo = 'https://github.com/Jimplas-UG/Jimplas-.git'
@@ -14,7 +14,7 @@ if (-not (Get-Command git -EA SilentlyContinue)) {
 if (-not (Test-Path "$App\.git")) { git clone --depth 1 --branch main $Repo $App 2>>$Log }
 Set-Location $App; git pull 2>>$Log
 if (-not (Test-Path "$App\deploy\windows\production-setup.ps1")) {
-  L 'ERROR: deploy/windows missing on GitHub — run: git push origin main from dev PC'
+  L 'ERROR: deploy/windows missing on GitHub - run: git push origin main from dev PC'
   throw 'Clone incomplete: deploy/windows not in repo'
 }
 
@@ -43,7 +43,7 @@ $ef = 'C:\ProgramData\Bilshenz\tradingbot.env'
   'TRADINGBOT_LOG_DIR=C:\logs\tradingbot','SAFETY_STATE_PATH=C:\logs\tradingbot\safety-state.json'
 ) | Set-Content $ef
 
-# Scheduled tasks (24/7) — only if deploy\windows exists from git
+# Scheduled tasks (24/7) - only if deploy\windows exists from git
 $Win = "$App\deploy\windows"
 if (Test-Path "$Win\install-scheduled-tasks.ps1") {
   & "$Win\install-scheduled-tasks.ps1" -AppDir $App
@@ -51,7 +51,7 @@ if (Test-Path "$Win\install-scheduled-tasks.ps1") {
   & "$Win\start-bot.ps1"
   L 'scheduled tasks OK'
 } else {
-  L 'deploy/windows missing from git — run vps-repair-and-start.ps1 or manual start below'
+  L 'deploy/windows missing from git - run vps-repair-and-start.ps1 or manual start below'
   Start-Process powershell -WindowStyle Minimized -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
     "Set-Location '$Py'; `$env:MT5_TERMINAL_PATH='C:\Program Files\MetaTrader 5 Exness'; `$env:PORT='8765'; & '$Py\.venv\Scripts\python.exe' main.py"
@@ -63,7 +63,7 @@ if (Test-Path "$Win\install-scheduled-tasks.ps1") {
   )
 }
 
-L 'done — open MT5 Exness on THIS VPS, login, XAUUSD, then:'
+L 'done - open MT5 Exness on THIS VPS, login, XAUUSD, then:'
 Write-Host '1) Install Exness MT5 on VPS if not installed' -ForegroundColor Yellow
 Write-Host '2) Login to Exness in MT5 on VPS' -ForegroundColor Yellow
 Write-Host '3) curl http://127.0.0.1:8765/api/status  (connected should be true)' -ForegroundColor Yellow

@@ -1,4 +1,4 @@
-# Phase 5 — MT5 terminal: auto-start at logon + restart if crashed.
+# Phase 5 - MT5 terminal: auto-start at logon + restart if crashed.
 #Requires -RunAsAdministrator
 param(
   [string]$TerminalPath = 'C:\Program Files\MetaTrader 5 Exness\terminal64.exe',

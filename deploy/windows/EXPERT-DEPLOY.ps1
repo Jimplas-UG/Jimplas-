@@ -1,4 +1,4 @@
-# Expert deploy from YOUR PC — one RDP session, no Cursor mstsc, no SSH required.
+# Expert deploy from YOUR PC - one RDP session, no Cursor mstsc, no SSH required.
 # Usage: powershell -ExecutionPolicy Bypass -File EXPERT-DEPLOY.ps1
 $ErrorActionPreference = 'Stop'
 $Vps = if ($env:VPS_HOST) { $env:VPS_HOST } else { '104.194.140.203' }

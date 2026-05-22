@@ -49,5 +49,5 @@ Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue |
   Select-Object LocalAddress, LocalPort, State
 
 Write-Host ''
-Write-Host 'FIX_SSH_OK — also open TCP 22 in your CLOUD provider firewall.' -ForegroundColor Green
+Write-Host 'FIX_SSH_OK - also open TCP 22 in your CLOUD provider firewall.' -ForegroundColor Green
 Write-Host 'From your PC test: ssh -v Administrator@YOUR_VPS_IP' -ForegroundColor Yellow

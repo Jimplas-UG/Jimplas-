@@ -1,4 +1,4 @@
-# Daily log rotation — keeps 14 days of archives.
+# Daily log rotation - keeps 14 days of archives.
 $script = @'
 $LogDir = 'C:\logs\tradingbot'
 $Archive = Join-Path $LogDir 'archive'

@@ -33,7 +33,7 @@ if (-not (Test-Path $App)) {
 }
 
 if (-not (Test-Path "$App\backend\package.json")) {
-  L 'FATAL: backend missing after clone — check internet and repo URL'
+  L 'FATAL: backend missing after clone - check internet and repo URL'
   exit 1
 }
 
@@ -87,10 +87,10 @@ if (Test-Path "$mt5Path\terminal64.exe") {
     Start-Sleep -Seconds 15
   }
 } else {
-  L 'WARN: MT5 not installed — install Exness MT5, login, XAUUSD, then re-run this script'
+  L 'WARN: MT5 not installed - install Exness MT5, login, XAUUSD, then re-run this script'
 }
 
-# Start MT5 API (always — does not need deploy\windows)
+# Start MT5 API (always - does not need deploy\windows)
 L 'Starting MT5 API on :8765...'
 Start-Process powershell -WindowStyle Minimized -ArgumentList @(
   '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command',
@@ -112,7 +112,7 @@ $ready = $false
     break
   } catch {}
 }
-if (-not $ready) { L 'WARN: port 8765 not up yet — wait 30s and run: Invoke-RestMethod http://127.0.0.1:8765/api/status' }
+if (-not $ready) { L 'WARN: port 8765 not up yet - wait 30s and run: Invoke-RestMethod http://127.0.0.1:8765/api/status' }
 
 # Forward bot + desk (optional if deploy exists)
 $Win = "$App\deploy\windows"
@@ -121,7 +121,7 @@ if (Test-Path "$Win\install-scheduled-tasks.ps1") {
   & "$Win\install-scheduled-tasks.ps1" -AppDir $App
   & "$Win\start-bot.ps1"
 } else {
-  L 'deploy\windows not in repo — starting forward bot manually'
+  L 'deploy\windows not in repo - starting forward bot manually'
   Start-Process powershell -WindowStyle Minimized -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command',
     @"

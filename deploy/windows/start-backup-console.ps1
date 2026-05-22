@@ -1,4 +1,4 @@
-# Backup runtime — detached PowerShell windows if scheduled tasks fail.
+# Backup runtime - detached PowerShell windows if scheduled tasks fail.
 param([string]$AppDir = 'C:\opt\bilshenz')
 $WinDeploy = $PSScriptRoot
 $names = @{

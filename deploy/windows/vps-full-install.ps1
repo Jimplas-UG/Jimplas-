@@ -1,4 +1,4 @@
-# Full VPS install — run as Administrator inside RDP on 104.194.140.203
+# Full VPS install - run as Administrator inside RDP on 104.194.140.203
 #Usage: powershell -ExecutionPolicy Bypass -File C:\opt\vps-full-install.ps1
 $ErrorActionPreference = 'Stop'
 $App = 'C:\opt\bilshenz'
@@ -24,7 +24,7 @@ git pull 2>>$Log
 # If deploy/windows missing from git, fail with clear message
 if (-not (Test-Path "$App\deploy\windows\bootstrap-vps.ps1")) {
   L 'ERROR: deploy/windows not in repo. Upload deploy folder from dev machine to C:\opt\bilshenz\deploy\'
-  throw 'Missing deploy/windows — copy from dev PC via RDP drive or zip.'
+  throw 'Missing deploy/windows - copy from dev PC via RDP drive or zip.'
 }
 
 # OpenSSH for remote admin

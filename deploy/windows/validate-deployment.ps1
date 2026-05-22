@@ -48,7 +48,7 @@ Step 'Phase 3 MT5 (if terminal up)' {
   if ($proc) {
     & (Join-Path $PSScriptRoot 'validate-mt5.ps1') -AppDir $AppDir -WaitSec 20
   } else {
-    Write-Host '   SKIP — start MT5 and re-run validate-mt5.ps1' -ForegroundColor Yellow
+    Write-Host '   SKIP - start MT5 and re-run validate-mt5.ps1' -ForegroundColor Yellow
   }
 }
 
@@ -65,4 +65,4 @@ if ($fail -gt 0) {
   Write-Host "VALIDATION_FAILED ($fail step(s))" -ForegroundColor Red
   exit 1
 }
-Write-Host 'VALIDATION_OK — set FORWARD_DRY_RUN=0 only after demo checks pass' -ForegroundColor Green
+Write-Host 'VALIDATION_OK - set FORWARD_DRY_RUN=0 only after demo checks pass' -ForegroundColor Green

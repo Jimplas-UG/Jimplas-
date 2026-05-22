@@ -18,7 +18,7 @@ $RepoRoot = Split-Path (Split-Path $WinDeploy -Parent) -Parent
 Write-Host @'
 
 ╔══════════════════════════════════════════════════════════╗
-║  Bilshenz — Windows VPS production deploy (MT5 + bot)   ║
+║  Bilshenz - Windows VPS production deploy (MT5 + bot)   ║
 ╚══════════════════════════════════════════════════════════╝
 
 '@ -ForegroundColor Cyan

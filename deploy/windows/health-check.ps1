@@ -1,4 +1,4 @@
-# Safe health check — never prints secrets.
+# Safe health check - never prints secrets.
 . (Join-Path $PSScriptRoot 'Import-TradingBotEnv.ps1') -ErrorAction SilentlyContinue
 $LogDir = $env:TRADINGBOT_LOG_DIR
 if (-not $LogDir) { $LogDir = 'C:\logs\tradingbot' }

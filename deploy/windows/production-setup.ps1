@@ -1,4 +1,4 @@
-# Full Windows VPS production setup. Run as Administrator.
+# Full Windows VPS production setup. Run as Administrator. ASCII-only.
 #Requires -RunAsAdministrator
 param(
   [string]$AppDir = 'C:\opt\bilshenz',
@@ -18,7 +18,7 @@ $phase1 = Join-Path $PSScriptRoot 'phase1-system-prep.ps1'
 if (Test-Path $phase1) {
   & $phase1 -TimeZone $TimeZone
 } else {
-  Write-Host '==> Timezone (phase1 script missing — fallback)' -ForegroundColor Yellow
+  Write-Host '==> Timezone (phase1 missing - fallback)' -ForegroundColor Yellow
   try { Set-TimeZone -Id $TimeZone } catch { tzutil /s $TimeZone }
 }
 
@@ -30,20 +30,19 @@ $pkgs = @('Git.Git', 'Python.Python.3.12', 'OpenJS.NodeJS.LTS')
 foreach ($p in $pkgs) {
   winget install --id $p -e --accept-package-agreements --accept-source-agreements 2>$null
 }
-# Refresh PATH for current session
 $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
   [System.Environment]::GetEnvironmentVariable('Path', 'User')
 
 Write-Host '==> Clone or update repo' -ForegroundColor Cyan
 $appReady = Test-Path (Join-Path $AppDir 'backend\package.json')
 if ($appReady) {
-  Write-Host "  Code present at $AppDir" -ForegroundColor DarkGray
+  Write-Host ('  Code present at ' + $AppDir) -ForegroundColor DarkGray
 } elseif ((Resolve-Path $RepoRoot -EA SilentlyContinue).Path -ne (Resolve-Path $AppDir -EA SilentlyContinue).Path -and
   (Test-Path (Join-Path $RepoRoot 'backend\package.json'))) {
-  Write-Host "  Copying local repo from $RepoRoot -> $AppDir" -ForegroundColor DarkGray
+  Write-Host ('  Copying local repo from ' + $RepoRoot) -ForegroundColor DarkGray
   New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
   robocopy $RepoRoot $AppDir /E /XD node_modules .git .venv __pycache__ /NFL /NDL /NJH /NJS /nc /ns /np 2>&1 | Out-Null
-  if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
+  if ($LASTEXITCODE -ge 8) { throw ('robocopy failed ' + $LASTEXITCODE) }
 } elseif (-not (Test-Path (Join-Path $AppDir '.git'))) {
   git clone --depth 1 -b $Branch $Repo $AppDir
 } else {
@@ -73,10 +72,10 @@ $Req = Join-Path $PSScriptRoot 'requirements.txt'
 Write-Host '==> Env file' -ForegroundColor Cyan
 if (-not (Test-Path $EnvFile)) {
   Copy-Item (Join-Path $PSScriptRoot 'tradingbot.env.example') $EnvFile
-  Write-Host "Created $EnvFile — edit secrets before live trading." -ForegroundColor Yellow
+  Write-Host ('Created ' + $EnvFile + ' - edit secrets before live trading.') -ForegroundColor Yellow
 }
 
-Write-Host '==> Firewall (RDP + block bot ports from internet)' -ForegroundColor Cyan
+Write-Host '==> Firewall' -ForegroundColor Cyan
 if (-not (Get-NetFirewallRule -DisplayName 'Bilshenz-Block-8765-Public' -EA SilentlyContinue)) {
   New-NetFirewallRule -DisplayName 'Bilshenz-Block-8765-Public' -Direction Inbound -Action Block `
     -Protocol TCP -LocalPort 8765 -RemoteAddress Internet 2>$null
@@ -94,8 +93,8 @@ Write-Host '==> Log rotation task' -ForegroundColor Cyan
 
 Write-Host ''
 Write-Host 'SETUP_OK' -ForegroundColor Green
-Write-Host "1) Open MT5 Exness, log in, add XAUUSD"
-Write-Host "2) Edit: notepad $EnvFile"
-Write-Host "3) Start services: .\deploy\windows\start-bot.ps1"
-Write-Host "4) Health: .\deploy\windows\health-check.ps1"
-Write-Host 'Keep an RDP session logged in — MT5 IPC requires an interactive desktop.' -ForegroundColor Yellow
+Write-Host '1) Open MT5 Exness, log in, add XAUUSD'
+Write-Host ('2) Edit: notepad ' + $EnvFile)
+Write-Host '3) Start services: .\deploy\windows\start-bot.ps1'
+Write-Host '4) Health: .\deploy\windows\health-check.ps1'
+Write-Host 'Keep RDP session logged in - MT5 IPC needs interactive desktop.' -ForegroundColor Yellow

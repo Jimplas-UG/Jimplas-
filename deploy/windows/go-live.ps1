@@ -86,7 +86,7 @@ try {
     if ($ok) { return }
   }
   if (-not $ok) {
-    Write-Host 'MT5 API not connected yet — start Exness MT5, log in, then run: .\deploy\windows\start-trading-now.ps1' -ForegroundColor Yellow
+    Write-Host 'MT5 API not connected yet - start Exness MT5, log in, then run: .\deploy\windows\start-trading-now.ps1' -ForegroundColor Yellow
     return
   }
 }

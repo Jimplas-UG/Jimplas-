@@ -1,4 +1,4 @@
-# ONE command deploy — run on YOUR PC only. Does NOT open RDP (won't kick you off).
+# ONE command deploy - run on YOUR PC only. Does NOT open RDP (won't kick you off).
 #Usage:
 #  $env:VPS_PW = 'your-new-password-from-panel'
 #  .\GODMODE-SSH-DEPLOY.ps1

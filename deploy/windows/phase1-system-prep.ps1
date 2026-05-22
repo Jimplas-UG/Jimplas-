@@ -1,4 +1,4 @@
-# Phase 1 — Windows VPS system validation and 24/7 tuning.
+# Phase 1 - Windows VPS system validation and 24/7 tuning.
 # Run as Administrator on the VPS before any bot install.
 #Requires -RunAsAdministrator
 param(
@@ -69,7 +69,7 @@ if (-not $ValidateOnly) {
     powercfg -setactive $guid
   }
 
-  Write-Host '==> Windows Update — no forced reboot while logged on' -ForegroundColor Cyan
+  Write-Host '==> Windows Update - no forced reboot while logged on' -ForegroundColor Cyan
   $auPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
   New-Item -Path $auPath -Force | Out-Null
   Set-ItemProperty -Path $auPath -Name NoAutoRebootWithLoggedOnUsers -Value 1 -Type DWord -Force
@@ -85,7 +85,7 @@ if (-not $ValidateOnly) {
 # --- 4. Timezone set ---
 Test-PhaseItem 'TimezoneConfigured' {
   $tz = Get-TimeZone
-  Write-Host "  $($tz.Id) — local: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
+  Write-Host "  $($tz.Id) - local: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
   $true
 }
 
@@ -101,7 +101,7 @@ Test-PhaseItem 'PowerNoSleep' {
 Test-PhaseItem 'UpdateNoForceReboot' {
   $v = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -EA SilentlyContinue
   if ($v.NoAutoRebootWithLoggedOnUsers -eq 1) { return $true }
-  Write-Host '  (policy not set — run without -ValidateOnly)' -ForegroundColor Yellow
+  Write-Host '  (policy not set - run without -ValidateOnly)' -ForegroundColor Yellow
   -not $ValidateOnly
 }
 

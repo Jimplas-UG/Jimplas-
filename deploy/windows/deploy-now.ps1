@@ -10,7 +10,7 @@ $env:VPS_USER = if ($env:VPS_USER) { $env:VPS_USER } else { 'Administrator' }
 
 Write-Host "Testing SSH to $env:VPS_HOST ..."
 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 "$env:VPS_USER@$env:VPS_HOST" "hostname"
-if ($LASTEXITCODE -ne 0) { throw 'SSH failed from this PC — check cloud firewall allows YOUR IP on port 22' }
+if ($LASTEXITCODE -ne 0) { throw 'SSH failed from this PC - check cloud firewall allows YOUR IP on port 22' }
 
 $here = Split-Path $PSScriptRoot -Parent | Split-Path -Parent
 python (Join-Path $here 'deploy\windows\remote-vps-deploy.py')

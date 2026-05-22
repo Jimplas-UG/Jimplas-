@@ -29,5 +29,5 @@ $safety | ConvertTo-Json | Set-Content -Path $safetyPath -Encoding UTF8
 $row = @{ ts = (Get-Date -Format 'o'); event = 'safety'; message = 'emergency_halt' } | ConvertTo-Json -Compress
 Add-Content (Join-Path $logDir 'safety.jsonl') -Value $row
 
-Write-Host 'EMERGENCY_HALT_OK — bot stopped, FORWARD_DRY_RUN=1, failsafe on' -ForegroundColor Red
+Write-Host 'EMERGENCY_HALT_OK - bot stopped, FORWARD_DRY_RUN=1, failsafe on' -ForegroundColor Red
 Write-Host "Review: $safetyPath before clearing failsafe" -ForegroundColor Yellow

@@ -1,4 +1,4 @@
-# Run ONCE on VPS as Administrator (RDP) — opens SSH + WinRM for remote deploy
+# Run ONCE on VPS as Administrator (RDP) - opens SSH + WinRM for remote deploy
 Set-ExecutionPolicy Bypass -Scope Process -Force
 
 # OpenSSH Server

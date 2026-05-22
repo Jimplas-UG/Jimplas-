@@ -1,4 +1,4 @@
-# Run on YOUR PC (not VPS). Creates zip — no GitHub needed on VPS.
+# Run on YOUR PC (not VPS). Creates zip - no GitHub needed on VPS.
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $Desktop = [Environment]::GetFolderPath('Desktop')
@@ -20,7 +20,7 @@ Write-Host 'CREATED:' -ForegroundColor Green
 Write-Host "  $Zip  ($mb MB)"
 Write-Host "  $(Join-Path $Desktop 'VPS-INSTALL-FROM-ZIP.ps1')"
 Write-Host ''
-Write-Host 'NEXT — pick ONE way to get zip onto VPS:' -ForegroundColor Yellow
+Write-Host 'NEXT - pick ONE way to get zip onto VPS:' -ForegroundColor Yellow
 Write-Host '  A) RDP: enable drive sharing, connect, copy zip to C:\opt\Bilshenz-VPS.zip'
 Write-Host '  B) Provider panel: upload zip to VPS, move to C:\opt\Bilshenz-VPS.zip'
 Write-Host '  C) On VPS run VPS-INSTALL-FROM-ZIP.ps1 (from Desktop or C:\opt\)'

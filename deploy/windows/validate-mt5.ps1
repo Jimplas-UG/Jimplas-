@@ -1,4 +1,4 @@
-# Phase 3 — Validate MT5 terminal + Python bridge handshake (no secrets).
+# Phase 3 - Validate MT5 terminal + Python bridge handshake (no secrets).
 param(
   [string]$AppDir = 'C:\opt\bilshenz',
   [int]$WaitSec = 30
@@ -63,7 +63,7 @@ try {
   $sym = Invoke-RestMethod "$mt5Url/api/symbol/XAUUSD" -TimeoutSec 8 -ErrorAction Stop
   Write-Host "  XAUUSD: bid=$($sym.bid) ask=$($sym.ask)" -ForegroundColor Green
 } catch {
-  Write-Host 'WARN: XAUUSD symbol query failed — add symbol in Market Watch' -ForegroundColor Yellow
+  Write-Host 'WARN: XAUUSD symbol query failed - add symbol in Market Watch' -ForegroundColor Yellow
 }
 
 Write-Host 'PHASE3_OK' -ForegroundColor Green

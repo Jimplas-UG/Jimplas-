@@ -1,5 +1,5 @@
 # Run ONCE inside the Windows VPS (Administrator PowerShell after RDP).
-# Does not contain secrets — configure C:\ProgramData\Bilshenz\tradingbot.env after.
+# Does not contain secrets - configure C:\ProgramData\Bilshenz\tradingbot.env after.
 $ErrorActionPreference = 'Stop'
 $AppDir = 'C:\opt\bilshenz'
 $Repo = 'https://github.com/Jimplas-UG/Jimplas-.git'
@@ -26,14 +26,14 @@ git pull 2>$null
 
 $bootstrapDir = Join-Path $AppDir 'deploy\windows'
 if (-not (Test-Path (Join-Path $bootstrapDir 'production-setup.ps1'))) {
-  Write-Host 'deploy/windows missing from git — ensure repo includes deploy/windows or copy from dev machine.' -ForegroundColor Yellow
+  Write-Host 'deploy/windows missing from git - ensure repo includes deploy/windows or copy from dev machine.' -ForegroundColor Yellow
 }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if ($isAdmin) {
   & (Join-Path $AppDir 'deploy\windows\production-setup.ps1') -AppDir $AppDir
 } else {
-  Write-Host 'Not elevated — using bootstrap-lite (jobs instead of scheduled tasks).' -ForegroundColor Yellow
+  Write-Host 'Not elevated - using bootstrap-lite (jobs instead of scheduled tasks).' -ForegroundColor Yellow
   & (Join-Path $AppDir 'deploy\windows\bootstrap-lite.ps1') -AppDir $AppDir
 }
 

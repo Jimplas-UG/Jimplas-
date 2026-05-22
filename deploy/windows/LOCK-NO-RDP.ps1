@@ -1,4 +1,4 @@
-# Run on YOUR PC — blocks all Remote Desktop to VPS for 30 minutes while you use web console only.
+# Run on YOUR PC - blocks all Remote Desktop to VPS for 30 minutes while you use web console only.
 # Do NOT open mstsc yourself during this window.
 param([int]$Minutes = 30)
 $Vps = '104.194.140.203'
