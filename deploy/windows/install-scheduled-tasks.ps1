@@ -9,10 +9,8 @@ function Register-BilshenzTask {
     [int]$RestartMinutes = 1
   )
   $taskName = "Bilshenz-$Name"
-  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument @(
-    '-NoProfile', '-ExecutionPolicy', 'Bypass',
-    '-File', $Script, '-AppDir', $AppDir
-  )
+  $argLine = '-NoProfile -ExecutionPolicy Bypass -File "' + $Script + '" -AppDir "' + $AppDir + '"'
+  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argLine
   $trigger = New-ScheduledTaskTrigger -AtStartup
   $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -21,12 +19,11 @@ function Register-BilshenzTask {
     -RestartCount 999 `
     -RestartInterval (New-TimeSpan -Minutes $RestartMinutes) `
     -ExecutionTimeLimit (New-TimeSpan -Days 3650)
-  # MT5 Python IPC requires the same interactive session as the MT5 terminal (not SYSTEM).
   $user = "$env:USERDOMAIN\$env:USERNAME"
   $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
   Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
     -Settings $settings -Principal $principal -Force | Out-Null
-  Write-Host "Registered: $taskName"
+  Write-Host ('Registered: ' + $taskName)
 }
 
 $WinDeploy = $PSScriptRoot

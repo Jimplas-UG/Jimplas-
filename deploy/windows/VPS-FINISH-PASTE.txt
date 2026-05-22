@@ -1,0 +1,20 @@
+VPS has NO winget - use this paste block (Administrator PowerShell, -NoExit window first).
+
+=== STEP 0 ===
+powershell -NoExit -ExecutionPolicy Bypass
+
+=== STEP 1 - copy install-runtimes-no-winget.ps1 to VPS ===
+From PC, copy file to VPS:
+  c:\Users\Amoskole\bsv3\deploy\windows\install-runtimes-no-winget.ps1
+  -> C:\opt\install-runtimes-no-winget.ps1
+
+Or download on VPS:
+  Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/Jimplas-UG/Jimplas-/main/deploy/windows/install-runtimes-no-winget.ps1' -OutFile C:\opt\install-runtimes-no-winget.ps1 -UseBasicParsing
+
+=== STEP 2 - run runtimes then finish ===
+powershell -ExecutionPolicy Bypass -File C:\opt\install-runtimes-no-winget.ps1
+
+Then paste FINISH block from vps-finish-setup or run:
+powershell -ExecutionPolicy Bypass -File C:\opt\bilshenz\deploy\windows\vps-finish-setup.ps1
+
+(After copying updated vps-finish-setup.ps1 and install-scheduled-tasks.ps1 from GitHub zip)

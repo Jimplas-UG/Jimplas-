@@ -25,10 +25,16 @@ if (Test-Path $phase1) {
 Write-Host '==> Directories' -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $AppDir, $LogDir, $EnvDir | Out-Null
 
-Write-Host '==> Install tools (winget)' -ForegroundColor Cyan
-$pkgs = @('Git.Git', 'Python.Python.3.12', 'OpenJS.NodeJS.LTS')
-foreach ($p in $pkgs) {
-  winget install --id $p -e --accept-package-agreements --accept-source-agreements 2>$null
+Write-Host '==> Install tools' -ForegroundColor Cyan
+$runtimeInstaller = Join-Path $PSScriptRoot 'install-runtimes-no-winget.ps1'
+if (Get-Command winget -ErrorAction SilentlyContinue) {
+  foreach ($p in @('Git.Git', 'Python.Python.3.12', 'OpenJS.NodeJS.LTS')) {
+    winget install --id $p -e --accept-package-agreements --accept-source-agreements 2>$null
+  }
+} elseif (Test-Path $runtimeInstaller) {
+  & $runtimeInstaller
+} else {
+  throw 'No winget and no install-runtimes-no-winget.ps1 - copy deploy/windows from GitHub zip'
 }
 $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
   [System.Environment]::GetEnvironmentVariable('Path', 'User')
