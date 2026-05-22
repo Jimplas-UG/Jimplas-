@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "frozenAt": "2026-05-21T01:33:17.363Z",
+  "frozenAt": "2026-05-22T20:42:28.891Z",
   "strategyId": "bilshenz-xau-m30-v1",
   "gitNote": "Lock signal sources + productionFrozenConfig; zero tuning during forward demo",
   "config": {
@@ -132,20 +132,20 @@
     "leftScanMaxChop"
   ],
   "fileHashes": {
-    "engine/signalEngine.ts": "ad4e8ba0e476b108e20f86e9dcf8dbd58dd921e753ac7f956e9a85cff1c204eb",
+    "engine/signalEngine.ts": "ed767433365a9e05e36720ca61d771e6696d144bc65e6f0cc4b93c6192c78215",
     "engine/pineV5SignalEngine.ts": "ea73b4109fc80507b094bb3e20a1b69e8b32f5961114f297c2fad44c3936fc14",
     "engine/jimplasFluiditySignalEngine.ts": "32889850e53cdc98cc51c8be5c85bdd81e4b93ec9f20d5e4c74daed28c77bba2",
-    "engine/signalThrottle.ts": "a4de885a823782564ccc9f38f6a26ae8bf4ba691ef6bcf1ba62872b639ec6efa",
-    "engine/tradeBot.ts": "940784c0258c403af83e9bb6189aa4695dd1723bad3ec7bb75a446c662832b84",
-    "engine/bilshenzEngine.ts": "336c340f6960cc21ee7c8fa753b60dee6811d10df825f8a5bc09527a0f510747",
-    "engine/riskEngine.ts": "299ccb322635dc0fdbdec2dd626f340ad815878adefe6d9c7fb34ff58fbe92d1",
+    "engine/signalThrottle.ts": "dae1f9aaae3e96f4fc5ff4865ee35b0b511f857451c147928104c8831af1c220",
+    "engine/tradeBot.ts": "8fa42e2694a7bc33ac85dc65e4aa57dacad1c397f4b49d9be4f64f4f48b337d2",
+    "engine/bilshenzEngine.ts": "12efd2456f39b00ca6ad519c701d5bd0beb7721a8e923442f7cef9f064f9e377",
+    "engine/riskEngine.ts": "6d1c611cafdaa532d285376f43786b0a1533fd719d55c735b0d3ac4337a11439",
     "engine/executionHardening.ts": "4c4e4f62f4688254b4478c29a559b2f56352cf3a1238ba9c7c05816ec0d41db1",
-    "engine/srEngine.ts": "a16b62b064e4a5ec9950f1ff601f82a742eb8ef5bf379f2926b3634035b6da52",
-    "engine/biasEngine.ts": "a2dcb45bd279b14a61ac6271e6727665b619665eaf78d72141c5959242e779c2",
-    "engine/sessionEngine.ts": "5ca7170c1a3d2d977ced77c4d98ce69a10d54e00abc5b52f3dc7983be678a1dd",
-    "engine/confidenceEngine.ts": "963c6d921049e938267f386b3abf8bb1f2c516026cdbe6b7285bb1f108443001",
-    "engine/tradeGeometry.ts": "726bf554fdff90518e94e60f445b5624b0250ee9ce5edcfa6f4511ce66420ddf",
-    "engine/wickEngine.ts": "605c4a0e082124ab876544bf5bc953c254c4a927538df4839ddcd068522df7fd",
-    "engine/structureEngine.ts": "20172ec960d34367a4b07c37f9a5c7893af9c14e404938f13dee113016052238"
+    "engine/srEngine.ts": "6e6db669ede187db27744a2105e50581ec1bc6c8e2efc79c792848e996e376d0",
+    "engine/biasEngine.ts": "b8a2c1e97a53bd869e87f2d55f7c3e2275775575ef0b803399960ceefd0254c2",
+    "engine/sessionEngine.ts": "986ba90de348d0b5e4746f288a41b07bd09b3f30dd7d6a8cba22678ca6507611",
+    "engine/confidenceEngine.ts": "e0c8479c55453d71ded2a2ed1ca16a50a0d962616d2b100ba6ca476ea5bf58aa",
+    "engine/tradeGeometry.ts": "9e2c7aee30b6c7f0ce25aa2ce88588bb11c172342d90d5f443c793cca8563304",
+    "engine/wickEngine.ts": "42bb83e663af12e6955735f1c8b40b86bba102b32c6f1f498b12bbf9b6a8dc94",
+    "engine/structureEngine.ts": "9590a9f160de3957eed7ce614ef24d202713a195ebfd89924ee28c73aae51427"
   }
 }

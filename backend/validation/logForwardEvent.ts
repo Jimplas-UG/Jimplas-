@@ -115,3 +115,27 @@ export function logMissedTrade(args: { symbol?: string; missReason: string; sign
 export function logEquitySnapshot(equityUsd: number, meta?: Record<string, unknown>): ForwardDemoEvent {
   return logForwardEvent('EQUITY_SNAPSHOT', { equityUsd, meta });
 }
+
+/** Alias used by run-forward-demo-30d.ts */
+export function logForwardMissed(args: { reason: string; barTimeMs: number }): ForwardDemoEvent {
+  return logMissedTrade({ missReason: args.reason, signalTsMs: args.barTimeMs });
+}
+
+/** Alias used by run-forward-demo-30d.ts */
+export function logForwardSignal(args: {
+  side: 'BUY' | 'SELL';
+  entry?: number;
+  sl?: number;
+  tp?: number;
+  setup?: 'P1' | 'P2' | 'P3' | null;
+  barTimeMs: number;
+}): ForwardDemoEvent {
+  return logSignal({
+    side: args.side,
+    setup: args.setup,
+    signalTsMs: args.barTimeMs,
+    intendedEntry: args.entry ?? 0,
+    intendedSl: args.sl,
+    intendedTp: args.tp,
+  });
+}

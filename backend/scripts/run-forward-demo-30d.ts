@@ -25,6 +25,20 @@ import {
 } from '../engine';
 import { m30ToM15Bars } from '../engine/m15Bars';
 import type { Bar, TradeJournalRow } from '../engine/types';
+import {
+  appendSafetyLog,
+  dailyLossBreached,
+  envDryRunEnabled,
+  isDuplicateOrder,
+  loadSafetyState,
+  markOrderExecuted,
+  maxDailyTradesLimit,
+  recordApiFailure,
+  recordApiSuccess,
+  saveSafetyState,
+  updateEquityTracking,
+  type SafetyState,
+} from '../production/safetyControls';
 import { mergeFrozenDeskCfg, productionFrozenConfig, verifyFrozenStrategy } from '../strategy/frozenProduction';
 import { logEquitySnapshot, logForwardMissed, logForwardSignal } from '../validation/logForwardEvent';
 import { forwardDemoLogPath } from '../validation/forwardDemoStore';
@@ -39,8 +53,9 @@ const MT5_API = (process.env.MT5_API_URL ?? 'http://127.0.0.1:8765').replace(/\/
 const SYMBOL = process.env.MT5_SYMBOL?.trim() || 'XAUUSD';
 const M30_MS = 30 * 60 * 1000;
 const WARMUP_BARS = 200;
-const RISK_PCT = 0.01;
+const RISK_PCT = Math.max(0.0001, Math.min(0.05, Number(process.env.RISK_PCT ?? '0.005') || 0.005));
 const DAYS = 30;
+const POLL_SEC_DEFAULT = Math.max(15, parseInt(process.env.FORWARD_POLL_SEC ?? '45', 10) || 45);
 
 type SessionState = {
   startedAt: string;
@@ -60,8 +75,20 @@ function readArg(name: string, def: string): string {
   return a ? a.slice(name.length + 3) : def;
 }
 
-function dryRun(): boolean {
+function cliDryRun(): boolean {
   return process.argv.includes('--dry-run');
+}
+
+/** Orders blocked when env, CLI, or failsafe says so (session file cannot override env dry-run). */
+function effectiveDryRun(safety: SafetyState): boolean {
+  if (safety.failsafe) return true;
+  if (envDryRunEnabled()) return true;
+  if (cliDryRun()) return true;
+  return false;
+}
+
+function orderIdempotencyKey(barT: number, side: string, setup: string): string {
+  return `${barT}:${side}:${setup}`;
 }
 
 async function mt5Status(): Promise<{
@@ -114,7 +141,8 @@ function nyYmdKey(ms: number): string {
 
 function loadSession(): SessionState | null {
   if (!fs.existsSync(SESSION_FILE)) return null;
-  return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')) as SessionState;
+  const raw = fs.readFileSync(SESSION_FILE, 'utf8').replace(/^\uFEFF/, '');
+  return JSON.parse(raw) as SessionState;
 }
 
 function saveSession(s: SessionState): void {
@@ -146,13 +174,46 @@ async function tickOnce(session: SessionState): Promise<void> {
     process.exit(0);
   }
 
-  const status = await mt5Status();
-  if (!status.connected) {
-    console.error('[forward-demo] MT5 not connected — open Exness terminal and log in');
+  const safety = loadSafetyState();
+  session.dryRun = effectiveDryRun(safety);
+
+  if (safety.failsafe) {
+    console.error(`[forward-demo] FAILSAFE — no trading: ${safety.failsafeReason ?? 'halted'}`);
+    saveSession(session);
+    saveSafetyState(safety);
+    return;
+  }
+
+  let status: Awaited<ReturnType<typeof mt5Status>>;
+  try {
+    status = await mt5Status();
+    if (!status.connected) {
+      const reason = recordApiFailure(safety, 'MT5 not connected');
+      saveSafetyState(safety);
+      if (reason) {
+        appendSafetyLog(reason, { failsafe: true });
+        console.error(`[forward-demo] FAILSAFE: ${reason}`);
+      } else {
+        console.error('[forward-demo] MT5 not connected — open Exness terminal and log in');
+      }
+      return;
+    }
+    recordApiSuccess(safety);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const reason = recordApiFailure(safety, msg);
+    saveSafetyState(safety);
+    if (reason) {
+      appendSafetyLog(reason, { failsafe: true });
+      console.error(`[forward-demo] FAILSAFE: ${reason}`);
+    } else {
+      console.error(`[forward-demo] MT5 API error: ${msg}`);
+    }
     return;
   }
 
   const cfg = mergeFrozenDeskCfg(status.spreadPips);
+  cfg.maxDailyTrades = maxDailyTradesLimit(cfg.maxDailyTrades);
 
   if (now - session.lastEquitySnapMs >= 3600_000) {
     logEquitySnapshot(status.equity, { server: status.server ?? undefined });
@@ -161,9 +222,25 @@ async function tickOnce(session: SessionState): Promise<void> {
   }
 
   const fetchFrom = now - 90 * 86400000;
-  const m30All = await fetchM30Bars(fetchFrom, now + M30_MS);
+  let m30All: Bar[];
+  try {
+    m30All = await fetchM30Bars(fetchFrom, now + M30_MS);
+    recordApiSuccess(safety);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const reason = recordApiFailure(safety, `bars: ${msg}`);
+    saveSafetyState(safety);
+    if (reason) {
+      appendSafetyLog(reason, { failsafe: true });
+      console.error(`[forward-demo] FAILSAFE: ${reason}`);
+    } else {
+      console.error(`[forward-demo] bars fetch failed: ${msg}`);
+    }
+    return;
+  }
   if (m30All.length < WARMUP_BARS + 5) {
     console.error(`[forward-demo] Too few bars (${m30All.length})`);
+    saveSafetyState(safety);
     return;
   }
 
@@ -179,6 +256,7 @@ async function tickOnce(session: SessionState): Promise<void> {
     session.nyDay = ymd;
     session.tradeCountToday = 0;
   }
+  updateEquityTracking(safety, ymd, status.equity);
 
   let journalRows = loadJournal();
   const m15 = m30ToM15Bars(bundle.m30);
@@ -188,6 +266,16 @@ async function tickOnce(session: SessionState): Promise<void> {
     cfg,
   });
 
+  if (dailyLossBreached(safety, status.equity)) {
+    logForwardMissed({ reason: 'daily loss limit', barTimeMs: bar.t });
+    console.error(`[forward-demo] ${new Date(bar.t).toISOString()} blocked: daily loss limit`);
+    session.lastClosedBarT = bar.t;
+    saveJournal(journalRows);
+    saveSession(session);
+    saveSafetyState(safety);
+    return;
+  }
+
   const snap = computeBilshenzSnapshot({
     bundle,
     cfg,
@@ -196,8 +284,8 @@ async function tickOnce(session: SessionState): Promise<void> {
     nowUtcMs: bar.t,
     equityRisk: {
       currentEquity: status.equity,
-      peakEquity: status.equity,
-      dayStartEquity: status.equity,
+      peakEquity: safety.peakEquity > 0 ? safety.peakEquity : status.equity,
+      dayStartEquity: safety.dayStartEquity > 0 ? safety.dayStartEquity : status.equity,
     },
   });
 
@@ -207,6 +295,7 @@ async function tickOnce(session: SessionState): Promise<void> {
   session.lastClosedBarT = bar.t;
   saveJournal(journalRows);
   saveSession(session);
+  saveSafetyState(safety);
 
   if (!gate.ok) {
     if (snap.signals?.anyBuy || snap.signals?.anySell) {
@@ -243,13 +332,30 @@ async function tickOnce(session: SessionState): Promise<void> {
       ? Math.abs(intent.entry - intent.sl) / cfg.pipSize
       : 20;
   const volume = lotsForRisk(status.equity, slPips, status.usdPerPip);
+  const setup =
+    intent.setup === 'P1' || intent.setup === 'P2' || intent.setup === 'P3' ? intent.setup : 'NONE';
+  const idemKey = orderIdempotencyKey(bar.t, intent.side, setup);
 
-  if (session.dryRun) {
+  if (isDuplicateOrder(safety, bar.t, idemKey)) {
+    logForwardMissed({ reason: 'duplicate order guard', barTimeMs: bar.t });
+    console.error(`[forward-demo] ${new Date(bar.t).toISOString()} blocked: duplicate order guard`);
+    saveSafetyState(safety);
+    return;
+  }
+
+  if (effectiveDryRun(safety)) {
+    const why = safety.failsafe
+      ? 'failsafe'
+      : envDryRunEnabled()
+        ? 'FORWARD_DRY_RUN'
+        : 'dry-run';
     console.error(
-      `[forward-demo] DRY ${intent.side} ${intent.setup} @ ${intent.entry?.toFixed(2)} vol=${volume} bar=${new Date(bar.t).toISOString()}`
+      `[forward-demo] DRY (${why}) ${intent.side} ${intent.setup} @ ${intent.entry?.toFixed(2)} vol=${volume} bar=${new Date(bar.t).toISOString()}`
     );
     session.tradeCountToday += 1;
+    session.dryRun = true;
     saveSession(session);
+    saveSafetyState(safety);
     return;
   }
 
@@ -262,6 +368,7 @@ async function tickOnce(session: SessionState): Promise<void> {
   });
 
   if (r.anyOk) {
+    markOrderExecuted(safety, bar.t, idemKey);
     session.tradeCountToday += 1;
     const prev = { rows: journalRows, count: journalRows.length };
     const next = pushJournalRow(
@@ -287,9 +394,16 @@ async function tickOnce(session: SessionState): Promise<void> {
     saveJournal(next.rows);
     console.error(`[forward-demo] EXEC ${intent.side} ${intent.setup} vol=${volume} · ${r.summary}`);
   } else {
-    console.error(`[forward-demo] FAIL ${r.summary}`);
+    const reason = recordApiFailure(safety, `order: ${r.summary}`);
+    if (reason) {
+      appendSafetyLog(reason, { failsafe: true });
+      console.error(`[forward-demo] FAILSAFE: ${reason}`);
+    } else {
+      console.error(`[forward-demo] FAIL ${r.summary}`);
+    }
   }
   saveSession(session);
+  saveSafetyState(safety);
 }
 
 async function main() {
@@ -301,8 +415,9 @@ async function main() {
     process.exit(2);
   }
 
-  const pollSec = Math.max(15, parseInt(readArg('poll-sec', '45'), 10) || 45);
-  const isDry = dryRun();
+  const pollSec = Math.max(15, parseInt(readArg('poll-sec', String(POLL_SEC_DEFAULT)), 10) || POLL_SEC_DEFAULT);
+  const safetyBoot = loadSafetyState();
+  const isDry = effectiveDryRun(safetyBoot);
 
   let session = loadSession();
   const now = Date.now();
@@ -333,10 +448,19 @@ async function main() {
     console.error(`[forward-demo] Log: ${forwardDemoLogPath()}`);
     if (isDry) console.error('[forward-demo] DRY-RUN — no MT5 orders');
   } else {
+    session.dryRun = isDry;
+    saveSession(session);
     console.error(`[forward-demo] Resuming session → ${session.endsAt}`);
   }
 
-  console.error(`[forward-demo] Poll every ${pollSec}s · frozen strategy · zero param changes`);
+  const dryLabel = isDry
+    ? envDryRunEnabled()
+      ? 'FORWARD_DRY_RUN=1'
+      : safetyBoot.failsafe
+        ? 'failsafe'
+        : 'CLI --dry-run'
+    : 'LIVE ORDERS ENABLED';
+  console.error(`[forward-demo] Poll every ${pollSec}s · risk ${(RISK_PCT * 100).toFixed(2)}% · ${dryLabel}`);
 
   const runTick = async () => {
     const s = loadSession();

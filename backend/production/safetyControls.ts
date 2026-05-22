@@ -4,6 +4,7 @@ import * as path from 'node:path';
 export type SafetyState = {
   nyDay: string | null;
   dayStartEquity: number;
+  peakEquity: number;
   consecutiveApiFailures: number;
   failsafe: boolean;
   failsafeReason: string | null;
@@ -27,19 +28,39 @@ export function maxDailyTradesLimit(frozenDefault: number): number {
 export function loadSafetyState(): SafetyState {
   try {
     if (fs.existsSync(STATE_PATH)) {
-      return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')) as SafetyState;
+      return normalizeSafetyState(JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')) as Partial<SafetyState>);
     }
   } catch {
     /* fresh */
   }
+  return freshSafetyState();
+}
+
+function freshSafetyState(): SafetyState {
   return {
     nyDay: null,
     dayStartEquity: 0,
+    peakEquity: 0,
     consecutiveApiFailures: 0,
     failsafe: false,
     failsafeReason: null,
     lastExecutedBarT: null,
     lastOrderIdempotencyKey: null,
+  };
+}
+
+/** Normalize state loaded from disk (older files may omit peakEquity). */
+export function normalizeSafetyState(raw: Partial<SafetyState>): SafetyState {
+  const base = freshSafetyState();
+  return {
+    nyDay: raw.nyDay ?? base.nyDay,
+    dayStartEquity: Number(raw.dayStartEquity) || 0,
+    peakEquity: Number(raw.peakEquity) || 0,
+    consecutiveApiFailures: Number(raw.consecutiveApiFailures) || 0,
+    failsafe: Boolean(raw.failsafe),
+    failsafeReason: raw.failsafeReason ?? null,
+    lastExecutedBarT: raw.lastExecutedBarT ?? null,
+    lastOrderIdempotencyKey: raw.lastOrderIdempotencyKey ?? null,
   };
 }
 
@@ -53,8 +74,29 @@ export function rollDayIfNeeded(s: SafetyState, ymd: string, equity: number): vo
   if (s.nyDay !== ymd) {
     s.nyDay = ymd;
     s.dayStartEquity = equity;
+    s.peakEquity = equity;
   }
   if (s.dayStartEquity <= 0) s.dayStartEquity = equity;
+}
+
+/** NY-day roll + running peak for drawdown gates. */
+export function updateEquityTracking(s: SafetyState, ymd: string, equity: number): void {
+  rollDayIfNeeded(s, ymd, equity);
+  if (s.peakEquity <= 0 || equity > s.peakEquity) s.peakEquity = equity;
+}
+
+/** Env FORWARD_DRY_RUN=1 (default) blocks all live orders. */
+export function envDryRunEnabled(): boolean {
+  const v = (process.env.FORWARD_DRY_RUN ?? '1').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+export function appendSafetyLog(message: string, extra: Record<string, unknown> = {}): void {
+  const dir = path.dirname(STATE_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const line =
+    JSON.stringify({ ts: new Date().toISOString(), event: 'safety', message, ...extra }) + '\n';
+  fs.appendFileSync(path.join(dir, 'safety.jsonl'), line, 'utf8');
 }
 
 export function dailyLossBreached(s: SafetyState, equity: number): boolean {

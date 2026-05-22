@@ -18,6 +18,7 @@ $safetyPath = Join-Path $logDir 'safety-state.json'
 $safety = @{
   nyDay = $null
   dayStartEquity = 0
+  peakEquity = 0
   consecutiveApiFailures = 99
   failsafe = $true
   failsafeReason = 'emergency_halt.ps1'
