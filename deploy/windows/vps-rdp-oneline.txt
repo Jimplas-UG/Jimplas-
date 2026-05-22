@@ -1,0 +1,2 @@
+# Paste into PowerShell on Windows VPS 104.194.140.203 (Administrator):
+Set-ExecutionPolicy Bypass -Scope Process -Force; iwr -useb https://raw.githubusercontent.com/Jimplas-UG/Jimplas-/main/deploy/windows/bootstrap-vps.ps1 -OutFile $env:TEMP\bootstrap.ps1; & $env:TEMP\bootstrap.ps1

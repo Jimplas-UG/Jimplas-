@@ -1,0 +1,53 @@
+# Opens RDP to Windows VPS and runs remote bootstrap via UI automation.
+# Requires: desktop session, VPS_PW env set. Password never written to disk.
+param(
+  [string]$VpsHost = '104.194.140.203',
+  [string]$User = 'Administrator'
+)
+$ErrorActionPreference = 'Stop'
+if (-not $env:VPS_PW) { throw 'Set VPS_PW in this shell first (not saved to files)' }
+
+$bootstrap = @'
+Set-ExecutionPolicy Bypass -Scope Process -Force
+if (-not (Test-Path C:\opt\bilshenz\.git)) { git clone https://github.com/Jimplas-UG/Jimplas-.git C:\opt\bilshenz }
+cd C:\opt\bilshenz
+git pull 2>$null
+.\deploy\windows\bootstrap-vps.ps1
+'@
+
+# Store RDP password in credential manager (session only for TERMSRV)
+cmdkey /generic:"TERMSRV/$VpsHost" /user:$User /pass:$env:VPS_PW | Out-Null
+
+$rdp = "$env:TEMP\bilshenz-vps.rdp"
+@(
+  'screen mode id:i:2',
+  "full address:s:$VpsHost",
+  'username:s:' + $User,
+  'prompt for credentials:i:0',
+  'authentication level:i:0',
+  'enablecredsspsupport:i:1'
+) | Set-Content $rdp -Encoding ASCII
+
+Set-Clipboard -Value $bootstrap
+Write-Host "Opening RDP to $VpsHost ..." -ForegroundColor Cyan
+Write-Host 'Bootstrap command copied to clipboard.' -ForegroundColor Green
+Start-Process mstsc.exe -ArgumentList $rdp
+
+Start-Sleep -Seconds 28
+Write-Host 'Sending keystrokes to run bootstrap (Administrator PowerShell)...' -ForegroundColor Cyan
+
+$ws = New-Object -ComObject WScript.Shell
+Start-Sleep -Seconds 2
+$ws.SendKeys('^{ESC}')  # focus desktop
+Start-Sleep -Seconds 1
+$ws.SendKeys('#r')
+Start-Sleep -Seconds 1
+$ws.SendKeys('powershell{ENTER}')
+Start-Sleep -Seconds 5
+$ws.SendKeys('^v')
+Start-Sleep -Seconds 1
+$ws.SendKeys('{ENTER}')
+Write-Host 'Bootstrap keystrokes sent to active window (focus RDP if needed).'
+
+Write-Host 'Bootstrap should be running on VPS. Wait 5-10 min, then test SSH port 22.' -ForegroundColor Yellow
+Write-Host 'Check: Test-NetConnection 104.194.140.203 -Port 22'

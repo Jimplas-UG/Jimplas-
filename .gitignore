@@ -52,3 +52,7 @@ mt5_trading_system/python/.venv/
 # App dev artifacts
 myapp/.tmp-*/
 myapp/.expo-export-test/
+
+# Deploy bundles (build locally with BUILD-VPS-ZIP.ps1)
+deploy/windows/*.zip
+deploy/windows/Bilshenz-VPS.zip

@@ -1,0 +1,21 @@
+[Unit]
+Description=Bilshenz forward trading bot (Exness via remote MT5 API)
+After=network-online.target bilshenz-desk-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/bilshenz/backend
+EnvironmentFile=/etc/tradingbot.env
+Environment=STRATEGY_FREEZE=1
+Environment=PRODUCTION_MODE=1
+Environment=PRODUCTION_NO_EXPIRY=1
+ExecStart=/usr/bin/npx tsx scripts/run-forward-demo-30d.ts
+StandardOutput=append:/var/log/tradingbot/forward-bot.log
+StandardError=append:/var/log/tradingbot/forward-bot.log
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

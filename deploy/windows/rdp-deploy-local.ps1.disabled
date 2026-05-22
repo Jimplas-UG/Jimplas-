@@ -1,0 +1,77 @@
+# Local runner: connects via FreeRDP and executes remote bootstrap.
+param(
+  [string]$Host = '104.194.140.203',
+  [string]$User = 'Administrator',
+  [string]$Password = $env:VPS_PW
+)
+$ErrorActionPreference = 'Stop'
+if (-not $Password) { throw 'Set VPS_PW environment variable' }
+
+$RepoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$RemoteScript = Join-Path $PSScriptRoot 'rdp-remote-bootstrap.ps1'
+$RemoteDest = 'C:\opt\rdp-remote-bootstrap.ps1'
+
+# Locate wfreerdp
+$wfreerdp = @(
+  'C:\Program Files\FreeRDP\bin\wfreerdp.exe',
+  'C:\ProgramData\chocolatey\bin\wfreerdp.exe',
+  "$env:LOCALAPPDATA\FreeRDP\wfreerdp.exe"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+if (-not $wfreerdp) {
+  $zip = "$env:TEMP\freerdp-win.zip"
+  $dest = "$env:LOCALAPPDATA\FreeRDP"
+  Write-Host 'Downloading FreeRDP portable...'
+  New-Item -ItemType Directory -Force -Path $dest | Out-Null
+  # Nightly Windows build (fallback)
+  $url = 'https://github.com/FreeRDP/FreeRDP/releases/download/3.5.0/FreeRDP-3.5.0-win64.zip'
+  try {
+    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    Expand-Archive -Force $zip $dest
+    $wfreerdp = Get-ChildItem -Path $dest -Recurse -Filter 'wfreerdp.exe' | Select-Object -First 1 -ExpandProperty FullName
+  } catch {
+    throw "Install FreeRDP manually or: choco install freerdp -y`n$_"
+  }
+}
+
+Write-Host "Using $wfreerdp"
+
+# Copy bootstrap via RDP drive / drive redirection - use \\tsclient\ or temp share
+# Simpler: embed bootstrap as base64 in -app-cmd
+$b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($RemoteScript))
+$cmd = @"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "
+New-Item -ItemType Directory -Force -Path C:\opt | Out-Null;
+[IO.File]::WriteAllBytes('C:\opt\rdp-remote-bootstrap.ps1',[Convert]::FromBase64String('$b64'));
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\opt\rdp-remote-bootstrap.ps1;
+exit
+"
+"@
+
+$argList = @(
+  "/v:$Host",
+  "/u:$User",
+  "/p:$Password",
+  '/cert:ignore',
+  '/sec:nla',
+  '+auth-only',
+  '/timeout:120000'
+)
+Write-Host "Connecting RDP to $Host (auth test)..."
+& $wfreerdp @argList 2>&1
+if ($LASTEXITCODE -ne 0) {
+  Write-Host 'Auth-only failed, trying full session with /app...'
+  $argList = @(
+    "/v:$Host", "/u:$User", "/p:$Password", '/cert:ignore', '/sec:nla',
+    '/app:cmd.exe', "/app-cmd:/c $cmd"
+  )
+  & $wfreerdp @argList 2>&1
+}
+
+Write-Host 'Waiting 180s for remote bootstrap...'
+Start-Sleep -Seconds 180
+# Test SSH if bootstrap enabled it
+$sshTest = Test-NetConnection -ComputerName $Host -Port 22 -WarningAction SilentlyContinue
+if ($sshTest.TcpTestSucceeded) {
+  Write-Host 'SSH is open - future deploys can use ssh/scp' -ForegroundColor Green
+}

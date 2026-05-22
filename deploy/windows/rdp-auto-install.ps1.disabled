@@ -1,0 +1,38 @@
+# DEPRECATED — causes RDP disconnect loop. Use GODMODE-SSH-DEPLOY.ps1 instead.
+# Automated RDP install — runs from YOUR PC, executes on VPS via keystrokes
+param([string]$VpsHost = '104.194.140.203', [string]$User = 'Administrator')
+if (-not $env:VPS_PW) { throw 'Set VPS_PW' }
+
+$script = Get-Content (Join-Path $PSScriptRoot 'vps-install-no-copy.ps1') -Raw
+Set-Clipboard -Value $script
+
+cmdkey /generic:"TERMSRV/$VpsHost" /user:$User /pass:$env:VPS_PW 2>$null | Out-Null
+$rdp = "$env:TEMP\bilshenz-auto.rdp"
+@(
+  'screen mode id:i:2', "full address:s:$VpsHost", "username:s:$User",
+  'prompt for credentials:i:0', 'authentication level:i:0', 'redirectdrives:i:1'
+) | Set-Content $rdp -Encoding ASCII
+
+Write-Host 'Opening RDP — click inside VPS window when desktop appears!' -ForegroundColor Cyan
+Start-Process mstsc.exe -ArgumentList $rdp
+Write-Host 'Waiting 45s for login...'
+Start-Sleep -Seconds 45
+
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.SendKeys]::SendWait('^{ESC}')
+Start-Sleep -Seconds 1
+[System.Windows.Forms.SendKeys]::SendWait('#r')
+Start-Sleep -Seconds 1
+[System.Windows.Forms.SendKeys]::SendWait('powershell{ENTER}')
+Start-Sleep -Seconds 6
+# Run as Admin: Win+X then A sometimes works on Server
+[System.Windows.Forms.SendKeys]::SendWait('^{ESC}')
+Start-Sleep -Seconds 1
+[System.Windows.Forms.SendKeys]::SendWait('#r')
+Start-Sleep -Seconds 1
+[System.Windows.Forms.SendKeys]::SendWait('powershell{ENTER}')
+Start-Sleep -Seconds 5
+[System.Windows.Forms.SendKeys]::SendWait('^v')
+Start-Sleep -Seconds 1
+[System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+Write-Host 'Install script sent. Watch VPS PowerShell for progress (10-20 min).' -ForegroundColor Green

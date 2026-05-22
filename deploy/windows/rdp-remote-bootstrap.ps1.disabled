@@ -1,0 +1,31 @@
+# Runs ON the VPS via RDP alternate shell. Logs to C:\opt\bootstrap.log
+$log = 'C:\opt\bootstrap.log'
+function Log($m) { "$(Get-Date -Format o) $m" | Tee-Object -FilePath $log -Append }
+try {
+  Log 'bootstrap start'
+  $AppDir = 'C:\opt\bilshenz'
+  $Repo = 'https://github.com/Jimplas-UG/Jimplas-.git'
+  if (-not (Get-Command git -EA SilentlyContinue)) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $gitExe = "$env:TEMP\Git-installer.exe"
+    Invoke-WebRequest -Uri 'https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/Git-2.44.0-64-bit.exe' -OutFile $gitExe -UseBasicParsing
+    Start-Process $gitExe -ArgumentList '/VERYSILENT /NORESTART' -Wait
+    $env:Path += ';C:\Program Files\Git\cmd'
+  }
+  if (-not (Test-Path $AppDir)) { git clone --depth 1 $Repo $AppDir }
+  Set-Location $AppDir
+  git pull 2>> $log
+  & "$AppDir\deploy\windows\production-setup.ps1" -AppDir $AppDir 2>&1 | Tee-Object -FilePath $log -Append
+  $envDir = 'C:\ProgramData\Bilshenz'
+  if (-not (Test-Path "$envDir\tradingbot.env")) {
+    Copy-Item "$AppDir\deploy\windows\tradingbot.env.example" "$envDir\tradingbot.env"
+    $key = [guid]::NewGuid().ToString('N')
+    (Get-Content "$envDir\tradingbot.env") -replace 'change-me-long-random-secret', $key | Set-Content "$envDir\tradingbot.env"
+  }
+  & "$AppDir\deploy\windows\install-scheduled-tasks.ps1" -AppDir $AppDir 2>&1 | Tee-Object -FilePath $log -Append
+  & "$AppDir\deploy\windows\start-bot.ps1" 2>&1 | Tee-Object -FilePath $log -Append
+  Log 'bootstrap complete'
+} catch {
+  Log "bootstrap FAIL: $_"
+  exit 1
+}

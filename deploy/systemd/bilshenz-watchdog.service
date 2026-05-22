@@ -1,0 +1,17 @@
+[Unit]
+Description=Bilshenz health watchdog and MT5 reconnect alerts
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/bilshenz/backend
+EnvironmentFile=/etc/tradingbot.env
+StandardOutput=append:/var/log/tradingbot/watchdog.log
+StandardError=append:/var/log/tradingbot/watchdog.log
+ExecStart=/usr/bin/npx tsx ../deploy/watchdog.ts
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,40 @@
+# Stops local bot and opens RDP with your deploy folder shared into the VPS.
+param(
+  [string]$VpsHost = '104.194.140.203',
+  [string]$User = 'Administrator'
+)
+$ErrorActionPreference = 'Stop'
+if (-not $env:VPS_PW) { throw 'Set VPS_PW first (session only, not saved to disk)' }
+
+$ShareDir = 'c:\Users\Amoskole\bsv3\deploy\windows'
+$Zip = Join-Path $ShareDir 'bilshenz-vps-bundle.zip'
+if (-not (Test-Path $Zip)) {
+  Write-Host 'Run: python deploy\windows\remote-vps-deploy.py (creates zip) or rebuild zip first.'
+}
+
+& (Join-Path $ShareDir 'stop-local-bot.ps1')
+
+cmdkey /generic:"TERMSRV/$VpsHost" /user:$User /pass:$env:VPS_PW | Out-Null
+
+$ShareRoot = 'c:\Users\Amoskole\bsv3'
+$rdp = "$env:TEMP\bilshenz-vps.rdp"
+@(
+  'screen mode id:i:2',
+  "full address:s:$VpsHost",
+  "username:s:$User",
+  'prompt for credentials:i:0',
+  'authentication level:i:0',
+  'redirectdrives:i:1',
+  "drivestoredirect:s:$ShareRoot"
+) | Set-Content $rdp -Encoding ASCII
+
+# No \\tsclient\ — full install from GitHub only
+$noCopy = Join-Path $ShareDir 'vps-install-no-copy.ps1'
+Set-Clipboard -Value (Get-Content $noCopy -Raw)
+Write-Host ''
+Write-Host 'Local bot STOPPED.' -ForegroundColor Green
+Write-Host "RDP opening to $VpsHost with folder shared: $ShareDir" -ForegroundColor Cyan
+Write-Host 'On VPS: Administrator PowerShell, Ctrl+V (install script — NO tsclient folder).' -ForegroundColor Yellow
+Write-Host 'If tsclient needed: dir \\tsclient\ then \\tsclient\C\Users\Amoskole\bsv3\deploy\windows\' -ForegroundColor DarkGray
+Write-Host 'Then: MT5 Exness login on VPS, health-check.ps1, FORWARD_DRY_RUN=0 when ready.' -ForegroundColor Yellow
+Start-Process mstsc.exe -ArgumentList $rdp

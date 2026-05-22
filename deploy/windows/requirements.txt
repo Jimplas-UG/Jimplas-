@@ -1,0 +1,6 @@
+# MT5 Python bridge (Windows VPS)
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+MetaTrader5>=5.0.45
+pydantic>=2.0.0
+requests>=2.31.0
