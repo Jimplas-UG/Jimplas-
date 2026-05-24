@@ -29,15 +29,19 @@ function normServer(s) {
     .toLowerCase();
 }
 
-export async function fetchMt5Connected(apiBaseUrl) {
+export async function fetchMt5Connected(apiBaseUrl, timeoutMs = 5000) {
   const b = base(apiBaseUrl);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(`${b}/api/status`);
+    const res = await fetch(`${b}/api/status`, { signal: ctrl.signal });
     if (!res.ok) return false;
     const j = await res.json();
     return !!j.connected;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

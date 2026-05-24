@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+  <defs>
+    <linearGradient id="metalFill" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3A3020"/>
+      <stop offset="35%" stop-color="#1A160E"/>
+      <stop offset="70%" stop-color="#0A0806"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+    <linearGradient id="goldLine" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFF4D0"/>
+      <stop offset="45%" stop-color="#D4B45A"/>
+      <stop offset="100%" stop-color="#7A5C18"/>
+    </linearGradient>
+    <linearGradient id="gradB" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F2E2B0"/>
+      <stop offset="100%" stop-color="#C98A2E"/>
+    </linearGradient>
+    <linearGradient id="gradS" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#F2E2B0"/>
+      <stop offset="100%" stop-color="#7A5C18"/>
+    </linearGradient>
+    <radialGradient id="iconBg" cx="50%" cy="52%" r="58%">
+      <stop offset="0%" stop-color="#1a1510"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </radialGradient>
+  </defs>
+  <rect x="0" y="0" width="80" height="80" fill="url(#iconBg)"/>
+  <g transform="translate(40, 45.25) scale(0.54) translate(-40, -40)">
+    <circle cx="40" cy="40" r="35" fill="none" stroke="#D4B45A" stroke-width="0.4" stroke-opacity="0.55" stroke-dasharray="2,4"/>
+    <line x1="40" y1="5" x2="40" y2="9" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>
+    <line x1="40" y1="71" x2="40" y2="75" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>
+    <line x1="71" y1="40" x2="75" y2="40" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>
+    <line x1="5" y1="40" x2="9" y2="40" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>
+    <polygon points="40,10 64,23.5 64,56.5 40,70 16,56.5 16,23.5" fill="url(#metalFill)" stroke="url(#goldLine)" stroke-width="1.2"/>
+    <polygon points="40,18 58,28.5 58,51.5 40,62 22,51.5 22,28.5" fill="none" stroke="#D4B45A" stroke-width="0.58" stroke-opacity="0.72" stroke-dasharray="2,2"/>
+    <polygon points="40,12.5 41.2,13.7 40,14.9 38.8,13.7" fill="#F2E2B0" fill-opacity="0.92"/>
+    <polygon points="40,65.1 41.2,66.3 40,67.5 38.8,66.3" fill="#F2E2B0" fill-opacity="0.92"/>
+    <polygon points="12.5,40 13.7,41.2 14.9,40 13.7,38.8" fill="#F2E2B0" fill-opacity="0.92"/>
+    <polygon points="65.1,40 66.3,41.2 67.5,40 66.3,38.8" fill="#F2E2B0" fill-opacity="0.92"/>
+    <polygon points="20.5,20.5 21.7,21.7 20.5,22.9 19.3,21.7" fill="#D4B45A" fill-opacity="0.62"/>
+    <polygon points="59.5,59.5 60.7,60.7 59.5,61.9 58.3,60.7" fill="#D4B45A" fill-opacity="0.62"/>
+    <circle cx="40" cy="40" r="28" fill="none" stroke="#D4B45A" stroke-width="0.34" stroke-dasharray="1,5" stroke-opacity="0.48"/>
+    <line x1="40" y1="40" x2="40" y2="11" stroke="#F2E2B0" stroke-width="1" stroke-opacity="0.7" stroke-linecap="round"/>
+    <circle cx="40" cy="11" r="1.6" fill="#F2E2B0" fill-opacity="0.95"/>
+    <circle cx="40" cy="40" r="2.6" fill="#F2E2B0"/>
+    <text x="30.5" y="44.5" font-size="16" font-weight="700" font-family="Georgia, serif" fill="url(#gradB)" stroke="url(#goldLine)" stroke-width="0.32">B</text>
+    <text x="41.5" y="44.5" font-size="16" font-weight="700" font-family="Georgia, serif" fill="url(#gradS)" stroke="url(#goldLine)" stroke-width="0.32">S</text>
+  </g>
+</svg>

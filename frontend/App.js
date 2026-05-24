@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, createContext } from 'react';
-import * as SplashScreen from 'expo-splash-screen';
+import { hideBootSplash } from './lib/bootSplash';
 import CinematicSplash from './components/CinematicSplash';
 import {
   Alert,
@@ -36,9 +36,16 @@ import { Mt5BridgeProvider, useMt5Bridge } from './contexts/Mt5BridgeContext';
 import { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';
 import { mapJournalToHistRows, mapSessionBitsFromEngine, mapSrFromEngine } from './hooks/deskComputeLocal';
 import { useBilshenzMarketEngine } from './hooks/useBilshenzMarketEngine';
+import ProductionBootSplash from './components/ProductionBootSplash';
+import BootFallback from './components/BootFallback';
 import { useMt5LiveFeed } from './hooks/useMt5LiveFeed';
-import { SHOW_STRATEGY_INTEL, ENABLE_DESK_DIAGNOSTICS, USE_REMOTE_DESK } from './security/deskMode';
-import { fetchExecuteGate } from './client/deskRemote';
+import {
+  SHOW_STRATEGY_INTEL,
+  ENABLE_DESK_DIAGNOSTICS,
+  USE_REMOTE_DESK,
+  IS_PRODUCTION_DESK,
+} from './security/deskMode';
+import { validateExecutionGate } from './services/filteringGateway';
 import { SIM_DESK_EQUITY, DISPLAY_PIP_SIZE } from './security/deskConstants';
 import { sanitizeSrView } from './security/sanitizeDesk';
 import {
@@ -2740,20 +2747,14 @@ function AppContent({ onEngineReady }) {
   );
 
   const resolveExecuteGate = useCallback(async (snap, trade) => {
-    if (!USE_REMOTE_DESK || runModeRef.current === 'backtest') {
-      return canExecuteTrade(snap, trade);
-    }
     const body = engineRef.current?.getDeskExecuteGateBody?.();
-    if (!body) return canExecuteTrade(snap, trade);
-    try {
-      const remote = await fetchExecuteGate(body);
-      if (!remote.ok) {
-        return { ok: false, reason: remote.reason || 'BLOCKED' };
-      }
-      return { ok: true };
-    } catch {
-      return canExecuteTrade(snap, trade);
+    if (body) {
+      return validateExecutionGate(body, { runMode: runModeRef.current });
     }
+    if (IS_PRODUCTION_DESK || USE_REMOTE_DESK) {
+      return { ok: false, reason: 'SERVER_GATE' };
+    }
+    return canExecuteTrade(snap, trade);
   }, []);
 
   useEffect(() => {
@@ -3658,21 +3659,54 @@ function AppContent({ onEngineReady }) {
 }
 
 
-SplashScreen.preventAutoHideAsync().catch(() => {});
+class AppContentBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { err: null, key: 0 };
+  }
+
+  static getDerivedStateFromError(err) {
+    return { err };
+  }
+
+  componentDidCatch(err) {
+    hideBootSplash('content-boundary');
+    console.error('[Bilshenz] AppContentBoundary', err?.message);
+  }
+
+  render() {
+    if (this.state.err) {
+      return (
+        <BootFallback
+          message={this.state.err?.message || 'Desk failed to load.'}
+          onRetry={() => this.setState({ err: null, key: this.state.key + 1 })}
+        />
+      );
+    }
+  return (
+      <AppContent key={this.state.key} onEngineReady={this.props.onEngineReady} />
+    );
+  }
+}
 
 function AppRoot() {
   const { styles } = useBilshenzTheme();
-  const [splashDone, setSplashDone] = useState(false);
+  const [showOverlay, setShowOverlay] = useState(!IS_PRODUCTION_DESK);
   const [engineReady, setEngineReady] = useState(false);
 
+  useEffect(() => {
+    hideBootSplash('app-root');
+  }, []);
+
   return (
-    <View style={styles.appShell}>
-      <View style={styles.appUnderlay} pointerEvents={splashDone ? 'auto' : 'none'}>
-        <AppContent onEngineReady={() => setEngineReady(true)} />
-      </View>
-      {!splashDone ? (
+    <View style={[styles.appShell, { backgroundColor: styles.safeRoot.backgroundColor }]}>
+      <AppContentBoundary onEngineReady={() => setEngineReady(true)} />
+      {showOverlay && IS_PRODUCTION_DESK ? (
+        <ProductionBootSplash onComplete={() => setShowOverlay(false)} />
+      ) : null}
+      {showOverlay && !IS_PRODUCTION_DESK ? (
         <View style={styles.splashOverlay}>
-          <CinematicSplash appReady={engineReady} onComplete={() => setSplashDone(true)} />
+          <CinematicSplash appReady={engineReady} onComplete={() => setShowOverlay(false)} />
         </View>
       ) : null}
     </View>

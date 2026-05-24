@@ -43,6 +43,16 @@ yarn-error.*
 /ios
 /android
 
+# Mobile release artifacts
+frontend/android/
+frontend/dist/
+frontend/.expo/
+frontend/.expo-boot-verify/
+frontend/.expo-export-test*/
+frontend/.expo-release-verify/
+frontend/.env.local
+frontend/.env.production
+
 # Python / local tooling
 **/__pycache__/
 *.py[cod]

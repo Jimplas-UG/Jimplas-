@@ -61,8 +61,6 @@ export function formatMt5NetworkError(message, baseUrl) {
   if (!isLocalhostApiUrl(baseUrl)) {
     return `${msg}\n\n${apiHint}\nSame Wi‑Fi · firewall allows port 8765 · URL http://PC_IP:8765`;
   }
-  const lan = getMetroLanHost();
-  const suggest = lan ? `http://${lan}:8765` : 'http://YOUR_PC_IP:8765';
   return (
     `${msg}\n\n` +
     `127.0.0.1 on a phone is the phone itself — not your PC.\n` +

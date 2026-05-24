@@ -13,7 +13,7 @@ import {
   resolveJournalOnBar,
   sliceMarketBundleToM30End,
 } from './deskComputeLocal';
-import { fetchDeskSnapshot } from '../client/deskRemote';
+import { requestDeskSnapshot, offlineSnapshotFallback } from '../services/strategyService';
 import { ensureDeskSnapshot } from '../lib/snapshotDefaults';
 import { buildDeskPrefs, sanitizeSnapshot } from '../security/sanitizeDesk';
 import { ENABLE_DESK_DIAGNOSTICS, IS_PRODUCTION_DESK, USE_REMOTE_DESK } from '../security/deskMode';
@@ -390,6 +390,21 @@ export function useBilshenzMarketEngine({
     };
   }, [runMode, mt5MarketBundle, useMt5Data, mt5Connected]);
 
+  /** Release APK: don't block UI if MT5 bridge never responds. */
+  useEffect(() => {
+    if (bundleReady || runMode !== 'live' || !useMt5Data || !mt5Connected) return;
+    const waitMs = USE_REMOTE_DESK ? 1200 : 6000;
+    const t = setTimeout(() => {
+      if (baseRef.current) return;
+      baseRef.current = buildSyntheticMarketBundle({
+        anchorClose: anchorPriceRef.current,
+        count: Platform.OS === 'web' ? 480 : 240,
+      });
+      setBundleReady(true);
+    }, waitMs);
+    return () => clearTimeout(t);
+  }, [bundleReady, runMode, useMt5Data, mt5Connected]);
+
   const [state, dispatch] = useReducer(engineReducer, {
     journalRows: [],
     tradeCount: initialTradeCount,
@@ -483,7 +498,7 @@ export function useBilshenzMarketEngine({
       maxDailyTrades,
       simUsdPerEnginePip,
     });
-    fetchDeskSnapshot({
+    requestDeskSnapshot({
       bundle,
       prefs,
       journalRows: state.journalRows,
@@ -496,9 +511,10 @@ export function useBilshenzMarketEngine({
           setRemoteError(null);
         }
       })
-      .catch((e) => {
+      .catch(() => {
         if (!cancelled) {
-          setRemoteError(e instanceof Error ? e.message : String(e));
+          setRemoteSnapshot((prev) => offlineSnapshotFallback(prev));
+          setRemoteError(IS_PRODUCTION_DESK ? 'OFFLINE' : 'Desk API error');
         }
       });
     return () => {

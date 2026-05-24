@@ -1,9 +1,13 @@
 import 'react-native-reanimated';
-import React from 'react';
+import './security/productionGuard';
+import React, { useEffect } from 'react';
 import { Platform, ScrollView, Text, View } from 'react-native';
 import { registerRootComponent } from 'expo';
+import { initBootSplash, hideBootSplash } from './lib/bootSplash';
 
 import App from './App';
+
+initBootSplash();
 
 class RootErrorBoundary extends React.Component {
   constructor(props) {
@@ -16,6 +20,7 @@ class RootErrorBoundary extends React.Component {
   }
 
   componentDidCatch(err, info) {
+    hideBootSplash('error-boundary');
     console.error('[Bilshenz] RootErrorBoundary', err?.message, info?.componentStack);
   }
 
@@ -23,13 +28,20 @@ class RootErrorBoundary extends React.Component {
     if (this.state.err) {
       const msg = this.state.err?.message ? String(this.state.err.message) : String(this.state.err);
       return (
-        <View style={{ flex: 1, backgroundColor: '#1a0a0a', paddingTop: 48, paddingHorizontal: 16 }}>
-          <Text style={{ color: '#f2e2b0', fontSize: 16, fontWeight: '800', marginBottom: 12 }}>App crashed on load</Text>
-          <Text style={{ color: '#aaa', fontSize: 12, marginBottom: 8 }}>
-            Copy this text from the screen (or use Expo Go → View error log) and share it for debugging.
+        <View style={{ flex: 1, backgroundColor: '#100E0A', paddingTop: 48, paddingHorizontal: 16 }}>
+          <Text style={{ color: '#D4B45A', fontSize: 18, fontWeight: '800', marginBottom: 8 }}>Bilshenz</Text>
+          <Text style={{ color: '#ff8b8a', fontSize: 14, fontWeight: '700', marginBottom: 12 }}>
+            Something went wrong on startup
           </Text>
           <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 32 }}>
-            <Text selectable style={{ color: '#ff8b8a', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 11 }}>
+            <Text
+              selectable
+              style={{
+                color: '#F2E2B0',
+                fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                fontSize: 11,
+                lineHeight: 16,
+              }}>
               {msg}
             </Text>
           </ScrollView>
@@ -40,10 +52,11 @@ class RootErrorBoundary extends React.Component {
   }
 }
 
-// registerRootComponent calls AppRegistry.registerComponent('main', () => App);
-// It also ensures that whether you load the app in Expo Go or in a native build,
-// the environment is set up appropriately
 function Root() {
+  useEffect(() => {
+    hideBootSplash('root-mounted');
+  }, []);
+
   return (
     <RootErrorBoundary>
       <App />

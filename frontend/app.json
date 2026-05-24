@@ -1,8 +1,8 @@
 {
   "expo": {
-    "name": "Bilshenz Desk",
+    "name": "Bilshenz",
     "slug": "bilshenz-desk",
-    "version": "1.0.0",
+    "version": "1.0.3",
     "jsEngine": "hermes",
     "updates": {
       "enabled": false,
@@ -39,7 +39,6 @@
       }
     },
     "android": {
-      "permissions": ["READ_MEDIA_IMAGES", "READ_EXTERNAL_STORAGE"],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#000000"
@@ -47,6 +46,14 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "extra": {
+      "deskApiUrl": "http://127.0.0.1:8791",
+      "deskRemote": "1",
+      "eas": {
+        "projectId": "91d965de-38e5-4677-b383-946e37390e50"
+      }
+    },
+    "owner": "jimplas"
   }
 }
