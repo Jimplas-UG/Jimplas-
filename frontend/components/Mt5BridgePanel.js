@@ -433,7 +433,7 @@ function Mt5BridgePanel() {
               : '127.0.0.1 will not reach your PC from a phone. Use your Windows LAN IP (same Wi‑Fi as Expo).'}
           </Text>
         ) : null}
-  if (showVps) {
+        {showVps ? (
           <Pressable style={styles.lanBtn} onPress={applyVpsUrl}>
             <Text style={styles.lanBtnTxt}>USE VPS SERVER (port 8791 — no PC needed)</Text>
           </Pressable>
