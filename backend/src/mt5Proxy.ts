@@ -45,11 +45,12 @@ export async function handleMt5Proxy(
   }
 
   try {
+    const timeoutMs = target.includes('/health') ? 8_000 : 45_000;
     const upstream = await fetch(target, {
       method,
       headers,
       body: body?.length ? body : undefined,
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await upstream.text();
     copyResponseHeaders(upstream, res);

@@ -16,7 +16,9 @@
         "BABEL_ENV": "production",
         "EAS_BUILD": "true",
         "EXPO_PUBLIC_DESK_LOCAL": "0",
-        "EXPO_PUBLIC_DESK_REMOTE": "1"
+        "EXPO_PUBLIC_DESK_REMOTE": "1",
+        "EXPO_PUBLIC_DESK_API_URL": "http://104.194.140.203:8791",
+        "EXPO_PUBLIC_MT5_API_URL": "http://104.194.140.203:8791/v1/mt5"
       }
     },
     "production-local": {

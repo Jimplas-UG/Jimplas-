@@ -103,6 +103,9 @@ function Mt5BridgePanel() {
   const { colors: C } = useBilshenzTheme();
   const metroLan = getMetroLanHost();
   const { baseUrl, setBaseUrl, connected, setConnected } = useMt5Bridge();
+  const vpsUrl = getDefaultMt5ApiUrl();
+  const showVps = isVpsDeployed() || !isLocalhostApiUrl(vpsUrl);
+
   const skin = useMemo(
     () => ({
       title: { color: C.gold },
@@ -115,6 +118,22 @@ function Mt5BridgePanel() {
     }),
     [C]
   );
+
+  useEffect(() => {
+    if (!showVps) return;
+    const canonical = getDefaultMt5ApiUrl();
+    if (canonical && mustForceVpsUrl(baseUrl, canonical)) {
+      setBaseUrl(canonical);
+    }
+  }, [showVps, baseUrl, setBaseUrl]);
+
+  function mustForceVpsUrl(current, canonical) {
+    if (!canonical) return false;
+    if (isLocalhostApiUrl(current)) return true;
+    if (/:8765(\/|$)/.test(current)) return true;
+    if (canonical.includes('/v1/mt5') && !current.includes('/v1/mt5')) return true;
+    return false;
+  }
 
   useEffect(() => {
     if (metroLan && isLocalhostApiUrl(baseUrl)) setBaseUrl(`http://${metroLan}:8765`);
@@ -390,17 +409,15 @@ function Mt5BridgePanel() {
     setBaseUrl(getDefaultMt5ApiUrl());
   };
 
-  const vpsUrl = getDefaultMt5ApiUrl();
-  const showVps = isVpsDeployed() || !isLocalhostApiUrl(vpsUrl);
-
   const onTestApi = async () => {
     setBusy(true);
     setErr('');
     const b = baseUrl.trim();
     try {
-      const res = await fetch(`${b}/health`, { method: 'GET' });
+      const hdrs = b.includes('/v1/mt5') ? { Authorization: `Bearer ${getDeskApiKey()}` } : {};
+      const res = await fetch(`${b}/health`, { method: 'GET', headers: hdrs });
       const txt = await res.text();
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${txt}`);
+      if (!res.ok) throw new Error(parseApiErrorBody(txt, res.status));
       setErr('');
       setConnected(false);
       Alert.alert('API reachable', `${txt}\n\nNow tap CONNECT MT5.`);
