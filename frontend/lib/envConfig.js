@@ -1,36 +1,78 @@
-/**
- * Production env — process.env (EAS) + app.config extra (runtime fallback).
- */
-import Constants from 'expo-constants';
-
-function extra(key) {
-  const c = Constants.expoConfig?.extra ?? Constants.manifest2?.extra ?? Constants.manifest?.extra;
-  return c?.[key];
-}
-
-export function getDeskApiUrl() {
-  const fromEnv = process.env.EXPO_PUBLIC_DESK_API_URL?.trim();
-  if (fromEnv) return fromEnv.replace(/\/$/, '');
-  const fromExtra = extra('deskApiUrl');
-  if (fromExtra) return String(fromExtra).replace(/\/$/, '');
-  return 'http://127.0.0.1:8791';
-}
-
-export function getDeskApiKey() {
-  return process.env.EXPO_PUBLIC_DESK_API_KEY?.trim() || extra('deskApiKey') || '';
-}
-
-export function isDeskRemote() {
-  if (process.env.EXPO_PUBLIC_DESK_LOCAL === '1') return false;
-  if (process.env.EXPO_PUBLIC_DESK_REMOTE === '1') return true;
-  return extra('deskRemote') !== '0';
-}
-
-export function envDiagnostics() {
-  return {
-    deskApiUrl: getDeskApiUrl(),
-    hasDeskKey: !!getDeskApiKey(),
-    deskRemote: isDeskRemote(),
-    dev: typeof __DEV__ !== 'undefined' ? __DEV__ : false,
-  };
-}
+/**
+ * Production env — process.env (EAS) + app.config extra (runtime fallback).
+ */
+import Constants from 'expo-constants';
+
+function extra(key) {
+  const c = Constants.expoConfig?.extra ?? Constants.manifest2?.extra ?? Constants.manifest?.extra;
+  return c?.[key];
+}
+
+function stripTrailingSlash(url) {
+  return String(url || '').replace(/\/$/, '');
+}
+
+function isLocalhostUrl(url) {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(String(url || '').trim());
+}
+
+/** MT5 bridge URL for mobile — same VPS host as desk-api when not set explicitly. */
+export function getMt5ApiUrl() {
+  const fromEnv = process.env.EXPO_PUBLIC_MT5_API_URL?.trim();
+  if (fromEnv) return stripTrailingSlash(fromEnv);
+
+  const fromExtra = extra('mt5ApiUrl');
+  if (fromExtra) return stripTrailingSlash(fromExtra);
+
+  const desk = getDeskApiUrl();
+  if (desk && !isLocalhostUrl(desk)) {
+    try {
+      const u = new URL(desk);
+      u.port = '8765';
+      u.pathname = '';
+      u.search = '';
+      u.hash = '';
+      return stripTrailingSlash(u.toString());
+    } catch {
+      return stripTrailingSlash(desk.replace(/:8791\/?$/, ':8765'));
+    }
+  }
+
+  return 'http://127.0.0.1:8765';
+}
+
+export function getDeskApiUrl() {
+  const fromEnv = process.env.EXPO_PUBLIC_DESK_API_URL?.trim();
+  if (fromEnv) return stripTrailingSlash(fromEnv);
+  const fromExtra = extra('deskApiUrl');
+  if (fromExtra) return stripTrailingSlash(fromExtra);
+  return 'http://127.0.0.1:8791';
+}
+
+export function getDeskApiKey() {
+  return process.env.EXPO_PUBLIC_DESK_API_KEY?.trim() || extra('deskApiKey') || '';
+}
+
+export function isDeskRemote() {
+  if (process.env.EXPO_PUBLIC_DESK_LOCAL === '1') return false;
+  if (process.env.EXPO_PUBLIC_DESK_REMOTE === '1') return true;
+  return extra('deskRemote') !== '0';
+}
+
+export function isVpsDeployed() {
+  const mt5 = getMt5ApiUrl();
+  const desk = getDeskApiUrl();
+  return !isLocalhostUrl(mt5) || !isLocalhostUrl(desk);
+}
+
+export function envDiagnostics() {
+  return {
+    deskApiUrl: getDeskApiUrl(),
+    mt5ApiUrl: getMt5ApiUrl(),
+    hasDeskKey: !!getDeskApiKey(),
+    deskRemote: isDeskRemote(),
+    vpsDeployed: isVpsDeployed(),
+    dev: typeof __DEV__ !== 'undefined' ? __DEV__ : false,
+  };
+}
+

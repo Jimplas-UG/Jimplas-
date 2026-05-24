@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getMt5ApiUrl } from '../lib/envConfig';
 import { getDefaultMt5ApiUrl, getMetroLanHost, isLocalhostApiUrl } from '../utils/mt5ApiUrl';
 import { fetchMt5Connected } from '../broker/mt5PythonApi';
 
@@ -8,13 +9,22 @@ const STORAGE_MT5_CONNECTED = '@bilshenz_v1/mt5ApiConnected';
 
 const Mt5BridgeContext = createContext(null);
 
-export function Mt5BridgeProvider({ children }) {
+function resolveProductionUrl(storedUrl) {
+  const vpsUrl = getDefaultMt5ApiUrl();
+  if (vpsUrl && !isLocalhostApiUrl(vpsUrl)) {
+    if (!storedUrl || isLocalhostApiUrl(storedUrl)) return vpsUrl;
+  }
+  if (storedUrl) return storedUrl;
+  const baked = getMt5ApiUrl();
+  if (baked && !isLocalhostApiUrl(baked)) return baked;
   const metroLan = getMetroLanHost();
-  const [baseUrl, setBaseUrlState] = useState(() => {
-    const d = getDefaultMt5ApiUrl();
-    if (metroLan && isLocalhostApiUrl(d)) return `http://${metroLan}:8765`;
-    return d;
-  });
+  const d = getDefaultMt5ApiUrl();
+  if (metroLan && isLocalhostApiUrl(d)) return `http://${metroLan}:8765`;
+  return d;
+}
+
+export function Mt5BridgeProvider({ children }) {
+  const [baseUrl, setBaseUrlState] = useState(() => resolveProductionUrl(null));
   const [connected, setConnected] = useState(false);
   const [hydrated, setHydrated] = useState(false);
 
@@ -27,15 +37,10 @@ export function Mt5BridgeProvider({ children }) {
           STORAGE_MT5_CONNECTED,
         ]);
         if (cancelled) return;
-        let resolvedUrl = storedUrl || null;
-        if (resolvedUrl) {
-          setBaseUrlState(resolvedUrl);
-        } else if (metroLan) {
-          const d = getDefaultMt5ApiUrl();
-          if (isLocalhostApiUrl(d)) {
-            resolvedUrl = `http://${metroLan}:8765`;
-            setBaseUrlState(resolvedUrl);
-          }
+        const resolvedUrl = resolveProductionUrl(storedUrl || null);
+        setBaseUrlState(resolvedUrl);
+        if (resolvedUrl !== storedUrl) {
+          AsyncStorage.setItem(STORAGE_MT5_BASE, resolvedUrl).catch(() => {});
         }
         if (conn !== '1' || !resolvedUrl) {
           setConnected(false);

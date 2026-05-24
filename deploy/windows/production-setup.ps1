@@ -82,13 +82,18 @@ if (-not (Test-Path $EnvFile)) {
 }
 
 Write-Host '==> Firewall' -ForegroundColor Cyan
-if (-not (Get-NetFirewallRule -DisplayName 'Bilshenz-Block-8765-Public' -EA SilentlyContinue)) {
-  New-NetFirewallRule -DisplayName 'Bilshenz-Block-8765-Public' -Direction Inbound -Action Block `
-    -Protocol TCP -LocalPort 8765 -RemoteAddress Internet 2>$null
-}
+Remove-NetFirewallRule -DisplayName 'Bilshenz-Block-8765-Public' -ErrorAction SilentlyContinue
 if (-not (Get-NetFirewallRule -DisplayName 'Bilshenz-Allow-8765-Local' -EA SilentlyContinue)) {
   New-NetFirewallRule -DisplayName 'Bilshenz-Allow-8765-Local' -Direction Inbound -Action Allow `
     -Protocol TCP -LocalPort 8765 -RemoteAddress LocalSubnet,127.0.0.1 2>$null
+}
+if (-not (Get-NetFirewallRule -DisplayName 'Bilshenz-Allow-8765-Public' -EA SilentlyContinue)) {
+  New-NetFirewallRule -DisplayName 'Bilshenz-Allow-8765-Public' -Direction Inbound -Action Allow `
+    -Protocol TCP -LocalPort 8765 2>$null
+}
+if (-not (Get-NetFirewallRule -DisplayName 'Bilshenz-Allow-8791-Public' -EA SilentlyContinue)) {
+  New-NetFirewallRule -DisplayName 'Bilshenz-Allow-8791-Public' -Direction Inbound -Action Allow `
+    -Protocol TCP -LocalPort 8791 2>$null
 }
 
 Write-Host '==> Scheduled tasks (24/7)' -ForegroundColor Cyan

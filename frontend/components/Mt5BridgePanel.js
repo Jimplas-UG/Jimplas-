@@ -8,7 +8,8 @@ import {
   postMt5Login,
   tryExistingMt5Session,
 } from '../broker/mt5PythonApi';
-import { formatMt5NetworkError, getMetroLanHost, isLocalhostApiUrl } from '../utils/mt5ApiUrl';
+import { formatMt5NetworkError, getDefaultMt5ApiUrl, getMetroLanHost, isLocalhostApiUrl } from '../utils/mt5ApiUrl';
+import { isVpsDeployed } from '../lib/envConfig';
 
 const STORAGE_MT5_SERVER = '@bilshenz_v1/mt5Server';
 const STORAGE_MT5_LOGIN = '@bilshenz_v1/mt5Login';
@@ -378,6 +379,13 @@ function Mt5BridgePanel() {
     if (metroLan) setBaseUrl(`http://${metroLan}:8765`);
   };
 
+  const applyVpsUrl = () => {
+    setBaseUrl(getDefaultMt5ApiUrl());
+  };
+
+  const vpsUrl = getDefaultMt5ApiUrl();
+  const showVps = isVpsDeployed() || !isLocalhostApiUrl(vpsUrl);
+
   const onTestApi = async () => {
     setBusy(true);
     setErr('');
@@ -408,15 +416,22 @@ function Mt5BridgePanel() {
           onChangeText={(t) => setBaseUrl(t)}
           autoCapitalize="none"
           autoCorrect={false}
-          placeholder={metroLan ? `http://${metroLan}:8765` : 'http://192.168.x.x:8765'}
+          placeholder={showVps ? vpsUrl : metroLan ? `http://${metroLan}:8765` : 'http://192.168.x.x:8765'}
           placeholderTextColor="#666"
         />
         {Platform.OS !== 'web' && isLocalhostApiUrl(baseUrl) ? (
           <Text style={[styles.hint, { color: '#ffb86c', marginTop: 6 }]}>
-            127.0.0.1 will not reach your PC from a phone. Use your Windows LAN IP (same Wi‑Fi as Expo).
+            {showVps
+              ? '127.0.0.1 is the phone itself — tap USE VPS SERVER below (no PC window needed).'
+              : '127.0.0.1 will not reach your PC from a phone. Use your Windows LAN IP (same Wi‑Fi as Expo).'}
           </Text>
         ) : null}
-        {metroLan ? (
+        {showVps ? (
+          <Pressable style={styles.lanBtn} onPress={applyVpsUrl}>
+            <Text style={styles.lanBtnTxt}>USE VPS SERVER ({vpsUrl.replace(/^https?:\/\//, '')})</Text>
+          </Pressable>
+        ) : null}
+        {metroLan && !showVps ? (
           <Pressable style={styles.lanBtn} onPress={applyLanUrl}>
             <Text style={styles.lanBtnTxt}>USE PC IP FROM EXPO ({metroLan})</Text>
           </Pressable>

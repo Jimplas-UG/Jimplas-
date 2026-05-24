@@ -8,6 +8,8 @@ param(
 
   [string]$DeskApiKey = '',
 
+  [string]$Mt5ApiUrl = '',
+
   [switch]$UseEasCloud
 
 )
@@ -23,6 +25,12 @@ Set-Location $Root
 if ($DeskApiUrl) { $env:EXPO_PUBLIC_DESK_API_URL = $DeskApiUrl }
 
 if ($DeskApiKey) { $env:EXPO_PUBLIC_DESK_API_KEY = $DeskApiKey }
+
+if ($Mt5ApiUrl) {
+  $env:EXPO_PUBLIC_MT5_API_URL = $Mt5ApiUrl
+} elseif ($DeskApiUrl -and $DeskApiUrl -notmatch '127\.0\.0\.1|localhost') {
+  $env:EXPO_PUBLIC_MT5_API_URL = ($DeskApiUrl -replace ':8791/?$', ':8765')
+}
 
 
 
