@@ -4,6 +4,8 @@ import { getDeskApiUrl, getMt5ApiUrl, isVpsDeployed } from '../lib/envConfig';
 import { getDefaultMt5ApiUrl, getMetroLanHost, isLocalhostApiUrl } from '../utils/mt5ApiUrl';
 import { fetchMt5Connected } from '../broker/mt5PythonApi';
 
+const Mt5BridgeContext = createContext(null);
+
 const STORAGE_MT5_BASE = '@bilshenz_v1/mt5ApiBaseUrl';
 const STORAGE_MT5_CONNECTED = '@bilshenz_v1/mt5ApiConnected';
 /** Bump when API URL scheme changes — forces migration off :8765 direct. */
