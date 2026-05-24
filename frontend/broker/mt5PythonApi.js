@@ -7,6 +7,34 @@ function base(baseUrl) {
   return baseUrl.replace(/\/$/, '');
 }
 
+function mt5Headers(baseUrl, extraHeaders = {}) {
+  const headers = { ...extraHeaders };
+  if (baseUrl.includes('/v1/mt5')) {
+    const { getDeskApiKey } = require('../lib/envConfig');
+    const key = getDeskApiKey();
+    if (key) headers.Authorization = `Bearer ${key}`;
+  }
+  return headers;
+}
+
+export function parseApiErrorBody(text, status) {
+  const raw = String(text || '').trim();
+  if (raw.startsWith('<') || raw.includes('<!DOCTYPE')) {
+    if (/squid|ERR_CONNECT|Connection timed out|could not be retrieved/i.test(raw)) {
+      return 'VPS unreachable from your network (proxy timeout). Use Wi‑Fi or try again — desk-api port 8791 is used automatically.';
+    }
+    return `Server returned HTML instead of JSON (HTTP ${status}). Check API URL and VPS is online.`;
+  }
+  try {
+    const j = JSON.parse(raw);
+    if (typeof j.detail === 'string') return j.detail;
+    if (j.error) return String(j.error);
+  } catch {
+    /* plain text */
+  }
+  return raw.slice(0, 280) || `HTTP ${status}`;
+}
+
 /** Fetch with timeout so CONNECT does not spin forever on slow MT5 IPC. */
 export async function fetchWithTimeout(url, options = {}, timeoutMs = 45000) {
   const ctrl = new AbortController();
@@ -34,7 +62,10 @@ export async function fetchMt5Connected(apiBaseUrl, timeoutMs = 5000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(`${b}/api/status`, { signal: ctrl.signal });
+    const res = await fetch(`${b}/api/status`, {
+      signal: ctrl.signal,
+      headers: mt5Headers(b),
+    });
     if (!res.ok) return false;
     const j = await res.json();
     return !!j.connected;
@@ -85,7 +116,7 @@ export async function postMt5Attach(apiBaseUrl, timeoutMs = 12000) {
   try {
     const res = await fetchWithTimeout(
       `${b}/api/attach`,
-      { method: 'POST' },
+      { method: 'POST', headers: mt5Headers(b) },
       timeoutMs,
     );
     const j = await res.json().catch(() => ({}));
@@ -107,7 +138,7 @@ export async function postMt5Login(apiBaseUrl, body, timeoutMs = 45000) {
       `${b}/api/login`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: mt5Headers(b, { 'Content-Type': 'application/json' }),
         body: JSON.stringify(body),
       },
       timeoutMs,
@@ -130,7 +161,7 @@ export async function tryExistingMt5Session(apiBaseUrl, login, server) {
   const loginNum = parseInt(String(login).trim(), 10);
   if (!Number.isFinite(loginNum) || loginNum <= 0) return { ok: false };
   try {
-    const res = await fetchWithTimeout(`${b}/api/status`, {}, 8000);
+    const res = await fetchWithTimeout(`${b}/api/status`, { headers: mt5Headers(b) }, 8000);
     if (!res.ok) return { ok: false };
     const j = await res.json();
     const acc = j.account;

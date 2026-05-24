@@ -16,7 +16,7 @@ module.exports = ({ config }) => {
     process.env.EXPO_PUBLIC_MT5_API_URL ||
       (deskApiUrl.includes('127.0.0.1') || deskApiUrl.includes('localhost')
         ? `http://${lanIp}:8765`
-        : deskApiUrl.replace(/:8791\/?$/, ':8765')),
+        : `${deskApiUrl.replace(/\/$/, '')}/v1/mt5`),
   );
   const extra = {
     ...config.extra,

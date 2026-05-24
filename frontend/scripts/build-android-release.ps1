@@ -29,14 +29,14 @@ if ($DeskApiKey) { $env:EXPO_PUBLIC_DESK_API_KEY = $DeskApiKey }
 if ($Mt5ApiUrl) {
   $env:EXPO_PUBLIC_MT5_API_URL = $Mt5ApiUrl
 } elseif ($DeskApiUrl -and $DeskApiUrl -notmatch '127\.0\.0\.1|localhost') {
-  $env:EXPO_PUBLIC_MT5_API_URL = ($DeskApiUrl -replace ':8791/?$', ':8765')
+  $env:EXPO_PUBLIC_MT5_API_URL = ($DeskApiUrl.TrimEnd('/') + '/v1/mt5')
 }
 
 
 
 Write-Host '==> Assets' -ForegroundColor Cyan
-
-node scripts/generate-assets.js
+node scripts/apply-source-icon.js
+if ($LASTEXITCODE -ne 0) { node scripts/generate-assets.js }
 
 
 

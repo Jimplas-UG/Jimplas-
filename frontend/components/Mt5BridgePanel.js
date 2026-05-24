@@ -8,8 +8,14 @@ import {
   postMt5Login,
   tryExistingMt5Session,
 } from '../broker/mt5PythonApi';
-import { formatMt5NetworkError, getDefaultMt5ApiUrl, getMetroLanHost, isLocalhostApiUrl } from '../utils/mt5ApiUrl';
-import { isVpsDeployed } from '../lib/envConfig';
+import {
+  formatMt5NetworkError,
+  getDefaultMt5ApiUrl,
+  getMetroLanHost,
+  isLocalhostApiUrl,
+} from '../utils/mt5ApiUrl';
+import { isVpsDeployed, getDeskApiKey } from '../lib/envConfig';
+import { parseApiErrorBody } from '../broker/mt5PythonApi';
 
 const STORAGE_MT5_SERVER = '@bilshenz_v1/mt5Server';
 const STORAGE_MT5_LOGIN = '@bilshenz_v1/mt5Login';
@@ -240,10 +246,11 @@ function Mt5BridgePanel() {
   };
 
   const ensureApiReachable = async (b) => {
-    const health = await fetch(`${b}/health`, { method: 'GET' });
+    const hdrs = b.includes('/v1/mt5') ? { Authorization: `Bearer ${getDeskApiKey()}` } : {};
+    const health = await fetch(`${b}/health`, { method: 'GET', headers: hdrs });
     if (!health.ok) {
       const txt = await health.text().catch(() => '');
-      throw new Error(`API not running (HTTP ${health.status}${txt ? `: ${txt}` : ''})`);
+      throw new Error(parseApiErrorBody(txt, health.status));
     }
   };
 
@@ -426,9 +433,9 @@ function Mt5BridgePanel() {
               : '127.0.0.1 will not reach your PC from a phone. Use your Windows LAN IP (same Wi‑Fi as Expo).'}
           </Text>
         ) : null}
-        {showVps ? (
+  if (showVps) {
           <Pressable style={styles.lanBtn} onPress={applyVpsUrl}>
-            <Text style={styles.lanBtnTxt}>USE VPS SERVER ({vpsUrl.replace(/^https?:\/\//, '')})</Text>
+            <Text style={styles.lanBtnTxt}>USE VPS SERVER (port 8791 — no PC needed)</Text>
           </Pressable>
         ) : null}
         {metroLan && !showVps ? (
