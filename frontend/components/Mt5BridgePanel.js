@@ -4,6 +4,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useMt5Bridge } from '../contexts/Mt5BridgeContext';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import {
+  mt5Fetch,
+  mt5Headers,
   postMt5Attach,
   postMt5Login,
   tryExistingMt5Session,
@@ -14,7 +16,7 @@ import {
   getMetroLanHost,
   isLocalhostApiUrl,
 } from '../utils/mt5ApiUrl';
-import { isVpsDeployed, getDeskApiKey } from '../lib/envConfig';
+import { isVpsDeployed } from '../lib/envConfig';
 import { parseApiErrorBody } from '../broker/mt5PythonApi';
 
 const STORAGE_MT5_SERVER = '@bilshenz_v1/mt5Server';
@@ -165,7 +167,8 @@ function Mt5BridgePanel() {
     if (!b) return;
     const light = !!opts.light;
     try {
-      const st = await fetch(`${b}/api/status`).then((r) => r.json());
+      const stRes = await mt5Fetch(b, '/api/status', {}, 18000);
+      const st = await stRes.json();
       setConnected(!!st.connected);
       setAccount(st.account || null);
       setErr('');
@@ -175,17 +178,19 @@ function Mt5BridgePanel() {
         return;
       }
       if (light) return;
-      const [pos, tk] = await Promise.all([
-        fetch(`${b}/api/positions`).then((r) => r.json()),
-        fetch(`${b}/api/tick/XAUUSD`).then((r) => (r.ok ? r.json() : null)),
+      const [posRes, tkRes] = await Promise.all([
+        mt5Fetch(b, '/api/positions', {}, 18000),
+        mt5Fetch(b, '/api/tick/XAUUSD', {}, 12000),
       ]);
+      const pos = await posRes.json();
+      const tk = tkRes.ok ? await tkRes.json() : null;
       setPositions(Array.isArray(pos.positions) ? pos.positions : []);
       setTick(tk);
     } catch (e) {
       const raw = e instanceof Error ? e.message : String(e);
       setErr(formatMt5NetworkError(raw, b));
     }
-  }, [baseUrl]);
+  }, [baseUrl, setConnected]);
 
   const finishConnected = useCallback(
     async (account) => {
@@ -200,6 +205,17 @@ function Mt5BridgePanel() {
   );
 
   useEffect(() => () => stopPoll(), []);
+
+  useEffect(() => {
+    if (!baseUrl?.trim()) return;
+    void refresh({ light: true });
+  }, [baseUrl, refresh]);
+
+  useEffect(() => {
+    if (!showVps || connected || !baseUrl?.trim()) return;
+    const id = setInterval(() => void refresh({ light: true }), 15000);
+    return () => clearInterval(id);
+  }, [showVps, connected, baseUrl, refresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -265,8 +281,7 @@ function Mt5BridgePanel() {
   };
 
   const ensureApiReachable = async (b) => {
-    const hdrs = b.includes('/v1/mt5') ? { Authorization: `Bearer ${getDeskApiKey()}` } : {};
-    const health = await fetch(`${b}/health`, { method: 'GET', headers: hdrs });
+    const health = await mt5Fetch(b, '/health', { method: 'GET' }, 15000);
     if (!health.ok) {
       const txt = await health.text().catch(() => '');
       throw new Error(parseApiErrorBody(txt, health.status));
@@ -371,7 +386,7 @@ function Mt5BridgePanel() {
     setBusy(true);
     try {
       const b = baseUrl.trim();
-      await fetch(`${b}/api/logout`, { method: 'POST' });
+      await mt5Fetch(b, '/api/logout', { method: 'POST' }, 12000);
     } catch {
       /* ignore */
     }
@@ -387,11 +402,16 @@ function Mt5BridgePanel() {
     const b = baseUrl.trim();
     setErr('');
     try {
-      const res = await fetch(`${b}/api/order`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: 'XAUUSD', side, volume: 0.01 }),
-      });
+      const res = await mt5Fetch(
+        b,
+        '/api/order',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol: 'XAUUSD', side, volume: 0.01 }),
+        },
+        30000,
+      );
       const j = await res.json();
       if (!res.ok) throw new Error(typeof j.detail === 'string' ? j.detail : JSON.stringify(j));
       await refresh();
@@ -414,8 +434,7 @@ function Mt5BridgePanel() {
     setErr('');
     const b = baseUrl.trim();
     try {
-      const hdrs = b.includes('/v1/mt5') ? { Authorization: `Bearer ${getDeskApiKey()}` } : {};
-      const res = await fetch(`${b}/health`, { method: 'GET', headers: hdrs });
+      const res = await mt5Fetch(b, '/health', { method: 'GET' }, 15000);
       const txt = await res.text();
       if (!res.ok) throw new Error(parseApiErrorBody(txt, res.status));
       setErr('');

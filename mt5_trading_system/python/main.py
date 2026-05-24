@@ -29,7 +29,9 @@ app.add_middleware(
 
 connector = MT5Connector(MT5Config(path=os.environ.get("MT5_TERMINAL_PATH") or None))
 _login_pool = ThreadPoolExecutor(max_workers=2)
+_ipc_pool = ThreadPoolExecutor(max_workers=4)
 LOGIN_TIMEOUT_SEC = float(os.environ.get("MT5_LOGIN_TIMEOUT_SEC", "45"))
+IPC_TIMEOUT_SEC = float(os.environ.get("MT5_IPC_TIMEOUT_SEC", "8"))
 
 
 class LoginBody(BaseModel):
@@ -65,16 +67,24 @@ def _login_detail() -> str:
     return "MT5 login failed — open MT5, log in manually, or use USE TERMINAL SESSION"
 
 
+def _ipc_call(fn, default=None):
+    try:
+        return _ipc_pool.submit(fn).result(timeout=IPC_TIMEOUT_SEC)
+    except FuturesTimeoutError:
+        return default
+
+
 @app.post("/api/attach")
 def api_attach():
     """Fast connect when MT5 is already logged in (any broker). No password IPC call."""
-    ok = connector.try_attach_existing()
+    ok = _ipc_call(connector.try_attach_existing, False)
     if not ok:
         raise HTTPException(
             status_code=401,
             detail="No active MT5 session — open your broker terminal and log in, then try again",
         )
-    return {"ok": True, "account": connector.account_info(), "mode": "terminal_session"}
+    account = _ipc_call(connector.account_info, None)
+    return {"ok": True, "account": account, "mode": "terminal_session"}
 
 
 @app.post("/api/login")
@@ -111,10 +121,8 @@ def api_logout():
 
 @app.get("/api/status")
 def api_status():
-    info = connector.account_info()
-    if info is None:
-        return {"connected": False}
-    return {"connected": True, "account": info}
+    snap = _ipc_call(connector.status_snapshot, {"connected": False})
+    return snap if isinstance(snap, dict) else {"connected": False}
 
 
 @app.get("/api/symbol/{symbol}")

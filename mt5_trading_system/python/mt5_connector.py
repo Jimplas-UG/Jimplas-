@@ -273,6 +273,28 @@ class MT5Connector:
             return []
         return self._rates_to_bars(rates)
 
+    def status_snapshot(self) -> dict[str, Any]:
+        """Lightweight status for polling — never triggers attach/login IPC."""
+        if mt5 is None or not self._init_ok:
+            return {"connected": False}
+        a = mt5.account_info()
+        if a is None:
+            return {"connected": False}
+        return {
+            "connected": True,
+            "account": {
+                "login": a.login,
+                "server": a.server,
+                "balance": a.balance,
+                "equity": a.equity,
+                "margin": a.margin,
+                "margin_free": a.margin_free,
+                "profit": a.profit,
+                "currency": a.currency,
+                "trade_allowed": a.trade_allowed,
+            },
+        }
+
     def account_info(self) -> dict[str, Any] | None:
         if not self._alive():
             return None

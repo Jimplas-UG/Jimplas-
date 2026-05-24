@@ -7,4 +7,14 @@ New-Item -ItemType Directory -Force -Path $env:TRADINGBOT_LOG_DIR | Out-Null
 Set-Location $PyDir
 $env:PORT = '8765'
 $py = Join-Path $PyDir '.venv\Scripts\python.exe'
-& $py main.py 2>> $ErrLog | Tee-Object -FilePath $Log -Append
+$errStream = [System.IO.StreamWriter]::new($ErrLog, $true)
+try {
+  & $py main.py 2>&1 | ForEach-Object {
+    $line = "$_"
+    Add-Content -Path $Log -Value $line -ErrorAction SilentlyContinue
+    $errStream.WriteLine($line)
+    $errStream.Flush()
+  }
+} finally {
+  $errStream.Close()
+}

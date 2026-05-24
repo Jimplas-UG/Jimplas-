@@ -82,6 +82,12 @@ if (appJs.includes('SplashScreen.preventAutoHideAsync()') && !fs.existsSync(path
   ok('App.js splash guard clean');
 }
 
+if (!appJs.includes('CinematicSplash') || !appJs.includes('SPLASH_MAX_MS')) {
+  fail('App.js must use CinematicSplash with SPLASH_MAX_MS for 5s production boot');
+} else {
+  ok('CinematicSplash 5s boot wired in App.js');
+}
+
 if (!fs.existsSync(path.join(ROOT, 'lib', 'bootSplash.js'))) {
   fail('Missing lib/bootSplash.js');
 } else {

@@ -3,14 +3,12 @@
  */
 import * as SplashScreen from 'expo-splash-screen';
 
-const FORCE_HIDE_MS = 4000;
+const FORCE_HIDE_MS = 5500;
 let hideStarted = false;
 let forceTimer = null;
 
 export function initBootSplash() {
-  if (typeof __DEV__ !== 'undefined' && __DEV__) {
-    SplashScreen.preventAutoHideAsync().catch(() => {});
-  }
+  SplashScreen.preventAutoHideAsync().catch(() => {});
   if (forceTimer) clearTimeout(forceTimer);
   forceTimer = setTimeout(() => {
     hideBootSplash('force-timeout');

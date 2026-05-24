@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, createContext } from 'react';
 import { hideBootSplash } from './lib/bootSplash';
-import CinematicSplash from './components/CinematicSplash';
+import CinematicSplash, { SPLASH_MAX_MS } from './components/CinematicSplash';
 import {
   Alert,
   Image,
@@ -36,7 +36,6 @@ import { Mt5BridgeProvider, useMt5Bridge } from './contexts/Mt5BridgeContext';
 import { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';
 import { mapJournalToHistRows, mapSessionBitsFromEngine, mapSrFromEngine } from './hooks/deskComputeLocal';
 import { useBilshenzMarketEngine } from './hooks/useBilshenzMarketEngine';
-import ProductionBootSplash from './components/ProductionBootSplash';
 import BootFallback from './components/BootFallback';
 import { useMt5LiveFeed } from './hooks/useMt5LiveFeed';
 import {
@@ -3691,22 +3690,20 @@ class AppContentBoundary extends React.Component {
 
 function AppRoot() {
   const { styles } = useBilshenzTheme();
-  const [showOverlay, setShowOverlay] = useState(!IS_PRODUCTION_DESK);
-  const [engineReady, setEngineReady] = useState(false);
+  const [showOverlay, setShowOverlay] = useState(true);
+  const [splashDone, setSplashDone] = useState(false);
 
   useEffect(() => {
-    hideBootSplash('app-root');
+    const t = setTimeout(() => setSplashDone(true), SPLASH_MAX_MS);
+    return () => clearTimeout(t);
   }, []);
 
   return (
     <View style={[styles.appShell, { backgroundColor: styles.safeRoot.backgroundColor }]}>
-      <AppContentBoundary onEngineReady={() => setEngineReady(true)} />
-      {showOverlay && IS_PRODUCTION_DESK ? (
-        <ProductionBootSplash onComplete={() => setShowOverlay(false)} />
-      ) : null}
-      {showOverlay && !IS_PRODUCTION_DESK ? (
+      <AppContentBoundary />
+      {showOverlay ? (
         <View style={styles.splashOverlay}>
-          <CinematicSplash appReady={engineReady} onComplete={() => setShowOverlay(false)} />
+          <CinematicSplash appReady={splashDone} onComplete={() => setShowOverlay(false)} />
         </View>
       ) : null}
     </View>

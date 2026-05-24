@@ -7,7 +7,7 @@ function base(baseUrl) {
   return baseUrl.replace(/\/$/, '');
 }
 
-function mt5Headers(baseUrl, extraHeaders = {}) {
+export function mt5Headers(baseUrl, extraHeaders = {}) {
   const headers = { ...extraHeaders };
   if (baseUrl.includes('/v1/mt5')) {
     const { getDeskApiKey } = require('../lib/envConfig');
@@ -15,6 +15,18 @@ function mt5Headers(baseUrl, extraHeaders = {}) {
     if (key) headers.Authorization = `Bearer ${key}`;
   }
   return headers;
+}
+
+function vpsTimeoutMs(baseUrl, fallbackMs) {
+  return baseUrl.includes('/v1/mt5') ? Math.max(fallbackMs, 18000) : fallbackMs;
+}
+
+/** Authenticated MT5 fetch with VPS-aware timeouts. */
+export async function mt5Fetch(baseUrl, path, options = {}, timeoutMs = 15000) {
+  const b = base(baseUrl);
+  const url = path.startsWith('http') ? path : `${b}${path.startsWith('/') ? path : `/${path}`}`;
+  const ms = vpsTimeoutMs(b, timeoutMs);
+  return fetchWithTimeout(url, { ...options, headers: mt5Headers(b, options.headers || {}) }, ms);
 }
 
 export function parseApiErrorBody(text, status) {
@@ -57,23 +69,41 @@ function normServer(s) {
     .toLowerCase();
 }
 
-export async function fetchMt5Connected(apiBaseUrl, timeoutMs = 5000) {
+export async function fetchMt5Health(apiBaseUrl, timeoutMs = 8000) {
   const b = base(apiBaseUrl);
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(`${b}/api/status`, {
-      signal: ctrl.signal,
-      headers: mt5Headers(b),
-    });
+    const res = await fetchWithTimeout(`${b}/health`, { headers: mt5Headers(b) }, vpsTimeoutMs(b, timeoutMs));
+    if (!res.ok) return false;
+    const j = await res.json().catch(() => ({}));
+    return j.ok === true || j.status === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+export async function fetchMt5Connected(apiBaseUrl, timeoutMs = 12000) {
+  const b = base(apiBaseUrl);
+  const ms = vpsTimeoutMs(b, timeoutMs);
+  try {
+    if (!(await fetchMt5Health(b, Math.min(ms, 10000)))) return false;
+    const res = await fetchWithTimeout(`${b}/api/status`, { headers: mt5Headers(b) }, ms);
     if (!res.ok) return false;
     const j = await res.json();
     return !!j.connected;
   } catch {
     return false;
-  } finally {
-    clearTimeout(timer);
   }
+}
+
+/** Retry bridge probe on cold VPS / hung MT5 IPC. */
+export async function probeMt5Bridge(apiBaseUrl, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    if (await fetchMt5Connected(apiBaseUrl)) return true;
+    if (i < attempts - 1) {
+      await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+    }
+  }
+  return false;
 }
 
 export async function fetchMt5ResolvedSymbol(apiBaseUrl, symbol = 'XAUUSD') {
@@ -197,11 +227,15 @@ export async function postMt5OrderFromIntent(intent, opts) {
   };
 
   try {
-    const res = await fetch(`${b}/api/order`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const res = await fetchWithTimeout(
+      `${b}/api/order`,
+      {
+        method: 'POST',
+        headers: mt5Headers(b, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+      vpsTimeoutMs(b, 30000),
+    );
     const text = await res.text();
     let snippet = trimSnippet(text || (res.ok ? 'OK' : 'Empty body'));
     if (!res.ok) {

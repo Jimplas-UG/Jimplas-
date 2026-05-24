@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getDeskApiUrl, getMt5ApiUrl, isVpsDeployed } from '../lib/envConfig';
 import { getDefaultMt5ApiUrl, getMetroLanHost, isLocalhostApiUrl } from '../utils/mt5ApiUrl';
-import { fetchMt5Connected } from '../broker/mt5PythonApi';
+import { fetchMt5Connected, postMt5Attach, probeMt5Bridge } from '../broker/mt5PythonApi';
 
 const Mt5BridgeContext = createContext(null);
 
@@ -75,10 +75,14 @@ export function Mt5BridgeProvider({ children }) {
           [STORAGE_MT5_BASE, resolvedUrl],
           [STORAGE_MT5_URL_REV, MT5_URL_REV],
         ]);
-        if (conn !== '1' || !resolvedUrl) {
+        if (!resolvedUrl) {
           setConnected(false);
         } else {
-          const ok = await fetchMt5Connected(resolvedUrl);
+          let ok = await probeMt5Bridge(resolvedUrl, 3);
+          if (!ok && (isVpsDeployed() || !isLocalhostApiUrl(resolvedUrl))) {
+            const attach = await postMt5Attach(resolvedUrl, 20000);
+            if (attach.ok) ok = true;
+          }
           if (!cancelled) setConnected(!!ok);
         }
       } catch {
@@ -111,7 +115,7 @@ export function Mt5BridgeProvider({ children }) {
     let cancelled = false;
     const tick = async () => {
       try {
-        const ok = await fetchMt5Connected(baseUrl);
+        const ok = await probeMt5Bridge(baseUrl, 2);
         if (cancelled) return;
         if (!ok) markConnected(false);
       } catch {
