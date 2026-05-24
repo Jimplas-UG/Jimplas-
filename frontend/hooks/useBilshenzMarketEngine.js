@@ -700,6 +700,7 @@ export function useBilshenzMarketEngine({
     lastBarSig: state.lastBarSig,
     incrementExecuteTrade,
     bumpAutoTradeCount,
+    maxDailyTrades: cfg.maxDailyTrades,
     bundle: IS_PRODUCTION_DESK ? null : bundle,
     cfg: IS_PRODUCTION_DESK ? null : cfg,
     hydrated: state.hydrated,

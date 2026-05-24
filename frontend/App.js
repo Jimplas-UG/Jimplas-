@@ -2694,7 +2694,7 @@ function AppContent({ onEngineReady }) {
 
   const incrementExecuteTrade = bilshenzEngine.incrementExecuteTrade;
   const bumpAutoTradeCount = bilshenzEngine.bumpAutoTradeCount;
-  const dailyTradeCap = bilshenzEngine.cfg.maxDailyTrades;
+  const dailyTradeCap = bilshenzEngine.maxDailyTrades ?? displayCfg(bilshenzEngine.cfg).maxDailyTrades;
 
   const chartPrice = useMemo(() => {
     if (runMode === 'backtest' && bilshenzEngine.bundle?.m30?.length) {

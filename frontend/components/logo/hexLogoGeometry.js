@@ -27,3 +27,16 @@ export const FRAGMENT_ANCHORS = {
   letterB: { x: 30, y: 42 },
   letterS: { x: 44, y: 42 },
 };
+
+/** Logo layout presets — icon variants fit Android adaptive safe zone (~66%). */
+export const LOGO_LAYOUTS = {
+  icon: { scale: 0.62, ox: CX, oy: CY + 3.5 },
+  adaptiveIcon: { scale: 0.58, ox: CX, oy: CY + 4 },
+  splash: { scale: 0.76, ox: CX, oy: CY + 0.65 },
+  default: { scale: 0.88, ox: CX, oy: CY },
+};
+
+export function logoTransform(variant = 'default') {
+  const layout = LOGO_LAYOUTS[variant] ?? LOGO_LAYOUTS.default;
+  return `translate(${layout.ox}, ${layout.oy}) scale(${layout.scale}) translate(-${CX}, -${CY})`;
+}

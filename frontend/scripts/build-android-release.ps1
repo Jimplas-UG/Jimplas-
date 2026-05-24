@@ -60,15 +60,16 @@ if ($UseEasCloud) {
 
   Write-Host '==> EAS cloud build (signed APK)' -ForegroundColor Cyan
 
-  $buildOut = cmd /c "npx eas-cli build --platform android --profile production --non-interactive 2>&1"
-  $easLog = @($buildOut)
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  $easLog = @(npx eas-cli build --platform android --profile production --non-interactive 2>&1)
+  $easExit = $LASTEXITCODE
+  $ErrorActionPreference = $prevEap
+  $easText = $easLog -join "`n"
+  $easLog | Out-Host
 
-  if ($LASTEXITCODE -ne 0) {
-
-    $easLog | Out-Host
-
+  if ($easExit -ne 0 -and $easText -notmatch 'builds/[a-f0-9-]{36}') {
     throw 'EAS build failed'
-
   }
 
   $buildId = [regex]::Match(($easLog -join "`n"), 'builds/([a-f0-9-]{36})').Groups[1].Value

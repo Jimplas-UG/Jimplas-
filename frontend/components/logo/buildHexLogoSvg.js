@@ -1,24 +1,12 @@
-import { CX, CY, DIAMONDS, INNER_HEX, MAIN_HEX, VB } from './hexLogoGeometry.js';
-
-/** Layout presets — icon uses adaptive-icon safe zone + optical centering. */
-const LAYOUTS = {
-  /** iOS / legacy icon — logo mass sits low vs needle at top. */
-  icon: { scale: 0.54, ox: CX, oy: CY + 5.25 },
-  /** Android adaptive foreground (~66% mask) — extra downward nudge. */
-  adaptiveIcon: { scale: 0.48, ox: CX, oy: CY + 7.5 },
-  splash: { scale: 0.76, ox: CX, oy: CY + 0.65 },
-  default: { scale: 0.88, ox: CX, oy: CY },
-};
+import { CX, CY, DIAMONDS, INNER_HEX, LOGO_LAYOUTS, MAIN_HEX, VB, logoTransform } from './hexLogoGeometry.js';
 
 /**
  * Static Bilshenz hex logo SVG (matches CinematicSplash solid mode).
  * @param {{ size?: number, background?: string, variant?: 'icon'|'adaptiveIcon'|'splash'|'default' }} [options]
  */
 export function buildHexLogoSvg({ size = VB, background = '#000000', variant = 'default' } = {}) {
-  const layout = LAYOUTS[variant] ?? LAYOUTS.default;
-  const transform = `translate(${layout.ox}, ${layout.oy}) scale(${layout.scale}) translate(-${CX}, -${CY})`;
-
   const isIcon = variant === 'icon' || variant === 'adaptiveIcon';
+  const transform = logoTransform(variant);
   const bX = isIcon ? 30.5 : 27;
   const sX = isIcon ? 41.5 : 39;
   const textY = isIcon ? 44.5 : 45;
@@ -27,6 +15,14 @@ export function buildHexLogoSvg({ size = VB, background = '#000000', variant = '
     (pts, i) =>
       `<polygon points="${pts}" fill="${i < 4 ? '#F2E2B0' : '#D4B45A'}" fill-opacity="${i < 4 ? 0.92 : 0.62}"/>`,
   ).join('\n    ');
+
+  const outerTicks = isIcon
+    ? ''
+    : `
+    <line x1="40" y1="5" x2="40" y2="9" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>
+    <line x1="40" y1="71" x2="40" y2="75" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>
+    <line x1="71" y1="40" x2="75" y2="40" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>
+    <line x1="5" y1="40" x2="9" y2="40" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>`;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${VB} ${VB}">
@@ -50,18 +46,15 @@ export function buildHexLogoSvg({ size = VB, background = '#000000', variant = '
       <stop offset="0%" stop-color="#F2E2B0"/>
       <stop offset="100%" stop-color="#7A5C18"/>
     </linearGradient>
-    <radialGradient id="iconBg" cx="50%" cy="52%" r="58%">
-      <stop offset="0%" stop-color="#1a1510"/>
+    <radialGradient id="iconBg" cx="50%" cy="54%" r="62%">
+      <stop offset="0%" stop-color="#221c14"/>
+      <stop offset="45%" stop-color="#12100c"/>
       <stop offset="100%" stop-color="${background}"/>
     </radialGradient>
   </defs>
   <rect x="0" y="0" width="${VB}" height="${VB}" fill="${isIcon ? 'url(#iconBg)' : background}"/>
-  <g transform="${transform}">
+  <g transform="${transform}">${outerTicks}
     <circle cx="${CX}" cy="${CY}" r="35" fill="none" stroke="#D4B45A" stroke-width="0.4" stroke-opacity="0.55" stroke-dasharray="2,4"/>
-    <line x1="40" y1="5" x2="40" y2="9" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>
-    <line x1="40" y1="71" x2="40" y2="75" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>
-    <line x1="71" y1="40" x2="75" y2="40" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>
-    <line x1="5" y1="40" x2="9" y2="40" stroke="url(#goldLine)" stroke-width="1" stroke-opacity="0.92"/>
     <polygon points="${MAIN_HEX}" fill="url(#metalFill)" stroke="url(#goldLine)" stroke-width="1.2"/>
     <polygon points="${INNER_HEX}" fill="none" stroke="#D4B45A" stroke-width="0.58" stroke-opacity="0.72" stroke-dasharray="2,2"/>
     ${diamondPolys}
