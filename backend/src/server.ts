@@ -161,11 +161,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   const urlEarly = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
-  if (urlEarly.pathname === '/v1/mt5/health' && req.method === 'GET') {
+
+  // MT5 proxy: allow all /v1/mt5/* without desk-api auth — MT5 bridge is internal-only
+  if (isMt5ProxyPath(urlEarly.pathname)) {
     try {
       if (await handleMt5Proxy(req, res, urlEarly)) return;
     } catch {
-      /* fall through */
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ detail: 'MT5 bridge unreachable on VPS. Ensure Bilshenz-MT5-API task is running.' }));
+      return;
     }
   }
 
@@ -177,10 +181,6 @@ const server = http.createServer(async (req, res) => {
 
   try {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
-
-    if (isMt5ProxyPath(url.pathname)) {
-      if (await handleMt5Proxy(req, res, url)) return;
-    }
 
     if (handleValidationRoute(req, res, url)) return;
 
