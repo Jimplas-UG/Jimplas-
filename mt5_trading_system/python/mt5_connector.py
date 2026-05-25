@@ -274,14 +274,18 @@ class MT5Connector:
         return self._rates_to_bars(rates)
 
     def status_snapshot(self) -> dict[str, Any]:
-        """Lightweight status for polling — never triggers attach/login IPC."""
-        if mt5 is None or not self._init_ok:
+        """Fast status check — initializes IPC if needed, reports actual state."""
+        if mt5 is None:
             return {"connected": False}
+        if not self._init_ok:
+            self.ensure_init()
+        t = mt5.terminal_info()
         a = mt5.account_info()
-        if a is None:
+        if a is None or t is None:
             return {"connected": False}
+        connected = bool(t.connected) and bool(a.currency)
         return {
-            "connected": True,
+            "connected": connected,
             "account": {
                 "login": a.login,
                 "server": a.server,
@@ -293,6 +297,7 @@ class MT5Connector:
                 "currency": a.currency,
                 "trade_allowed": a.trade_allowed,
             },
+            "terminal_trade_allowed": t.trade_allowed,
         }
 
     def account_info(self) -> dict[str, Any] | None:
@@ -451,6 +456,17 @@ class MT5Connector:
         self._server = str(a.server)
         return True
 
+    def _reinit(self) -> bool:
+        """Shutdown and re-initialize MT5 IPC — fixes stale connections."""
+        log.info("Re-initializing MT5 IPC connection...")
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+        self._init_ok = False
+        self._symbol_cache.clear()
+        return self.ensure_init()
+
     def _alive(self) -> bool:
         if mt5 is None:
             return False
@@ -458,5 +474,40 @@ class MT5Connector:
             return False
         if not self._logged_in and not self.try_attach_existing():
             return False
+
         t = mt5.terminal_info()
-        return t is not None and bool(t.connected)
+        if t is not None and bool(t.connected):
+            a = mt5.account_info()
+            if a is not None and a.trade_allowed and a.currency:
+                return True
+            if a is not None and not a.trade_allowed:
+                log.warning("account trade_allowed=false, currency=%s — re-initializing", a.currency)
+            if t is not None and not t.trade_allowed:
+                log.warning("terminal AutoTrading disabled (start with /algotrading)")
+
+        # Connection dropped or IPC stale — try to recover
+        if not self._reinit():
+            return False
+
+        # Re-attach to the terminal session after re-init
+        a = mt5.account_info()
+        if a is not None:
+            self._logged_in = True
+            self._login = int(a.login)
+            self._server = str(a.server)
+            if a.trade_allowed and a.currency:
+                log.info("MT5 recovered: %s@%s", a.login, a.server)
+                return True
+
+        # Last resort: if we have stored credentials, try a full login
+        if self._login and self._password and self._server:
+            log.info("Attempting reconnect login %s@%s", self._login, self._server)
+            ok = mt5.login(self._login, password=self._password, server=self._server)
+            if ok:
+                self._logged_in = True
+                self._symbol_cache.clear()
+                log.info("Reconnect login succeeded")
+                return True
+            log.warning("Reconnect login failed: %s", mt5.last_error())
+
+        return False

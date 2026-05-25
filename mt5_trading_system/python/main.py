@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 from fastapi import FastAPI, HTTPException
@@ -31,7 +33,25 @@ connector = MT5Connector(MT5Config(path=os.environ.get("MT5_TERMINAL_PATH") or N
 _login_pool = ThreadPoolExecutor(max_workers=2)
 _ipc_pool = ThreadPoolExecutor(max_workers=4)
 LOGIN_TIMEOUT_SEC = float(os.environ.get("MT5_LOGIN_TIMEOUT_SEC", "45"))
-IPC_TIMEOUT_SEC = float(os.environ.get("MT5_IPC_TIMEOUT_SEC", "8"))
+IPC_TIMEOUT_SEC = float(os.environ.get("MT5_IPC_TIMEOUT_SEC", "12"))
+KEEPALIVE_SEC = int(os.environ.get("MT5_KEEPALIVE_SEC", "30"))
+
+
+def _keepalive_loop():
+    """Background thread: ping MT5 every 30s, auto-recover if connection drops."""
+    while True:
+        try:
+            time.sleep(KEEPALIVE_SEC)
+            snap = connector.status_snapshot()
+            if not snap.get("connected"):
+                log.warning("[keepalive] MT5 not connected — triggering recovery")
+                connector._alive()
+        except Exception as e:
+            log.error("[keepalive] error: %s", e)
+
+
+_keepalive_thread = threading.Thread(target=_keepalive_loop, daemon=True)
+_keepalive_thread.start()
 
 
 class LoginBody(BaseModel):

@@ -12,6 +12,8 @@ const INTERVAL_MS = Number(process.env.WATCHDOG_INTERVAL_MS ?? 60_000);
 const LOG_DIR = process.env.TRADINGBOT_LOG_DIR ?? 'C:\\logs\\tradingbot';
 const SAFETY_FILE = process.env.SAFETY_STATE_PATH ?? path.join(LOG_DIR, 'safety-state.json');
 
+const MT5_TERMINAL_PATH = process.env.MT5_TERMINAL_PATH ?? 'C:\\Program Files\\MetaTrader 5 Exness';
+
 let prevDesk = true;
 let prevMt5 = true;
 let deskDownCount = 0;
@@ -59,6 +61,24 @@ async function probe(url: string): Promise<{ ok: boolean; detail: string }> {
   }
 }
 
+function ensureTerminal64(): void {
+  try {
+    const result = runPs("(Get-Process terminal64 -ErrorAction SilentlyContinue).Id");
+    if (result && result.match(/\d+/)) return;
+    const exe = `${MT5_TERMINAL_PATH}\\terminal64.exe`;
+    const check = runPs(`Test-Path '${exe}'`);
+    if (check.toLowerCase() !== 'true') {
+      log(`terminal64.exe not found at ${exe}`);
+      return;
+    }
+    log('terminal64 not running — starting with /algotrading...');
+    runPs(`Start-Process '${exe}' -ArgumentList '/algotrading'`);
+    logReconnect('terminal64 started by watchdog', { service: 'terminal64' });
+  } catch (e) {
+    log(`ensureTerminal64 error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 function resetBotFailsafe(): void {
   try {
     if (!fs.existsSync(SAFETY_FILE)) return;
@@ -74,6 +94,8 @@ function resetBotFailsafe(): void {
 }
 
 async function tick(): Promise<void> {
+  ensureTerminal64();
+
   const desk = await probe(DESK);
   const mt5 = await probe(`${MT5}/api/status`);
 
