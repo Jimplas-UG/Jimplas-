@@ -30,11 +30,27 @@ app.add_middleware(
 )
 
 connector = MT5Connector(MT5Config(path=os.environ.get("MT5_TERMINAL_PATH") or None))
-_login_pool = ThreadPoolExecutor(max_workers=2)
-_ipc_pool = ThreadPoolExecutor(max_workers=4)
 LOGIN_TIMEOUT_SEC = float(os.environ.get("MT5_LOGIN_TIMEOUT_SEC", "45"))
 IPC_TIMEOUT_SEC = float(os.environ.get("MT5_IPC_TIMEOUT_SEC", "12"))
 KEEPALIVE_SEC = int(os.environ.get("MT5_KEEPALIVE_SEC", "30"))
+
+# MetaTrader5 uses a single named pipe — ALL calls must be serialized
+_mt5_lock = threading.Lock()
+_ipc_pool = ThreadPoolExecutor(max_workers=1)
+
+
+def _ipc_call(fn, default=None):
+    """Run a connector call on the single IPC thread with a lock to prevent pipe corruption."""
+    def _guarded():
+        with _mt5_lock:
+            return fn()
+    try:
+        return _ipc_pool.submit(_guarded).result(timeout=IPC_TIMEOUT_SEC)
+    except FuturesTimeoutError:
+        return default
+    except Exception as e:
+        log.error("IPC call error: %s", e)
+        return default
 
 
 def _keepalive_loop():
@@ -42,10 +58,10 @@ def _keepalive_loop():
     while True:
         try:
             time.sleep(KEEPALIVE_SEC)
-            snap = connector.status_snapshot()
+            snap = _ipc_call(connector.status_snapshot, {"connected": False})
             if not snap.get("connected"):
                 log.warning("[keepalive] MT5 not connected — triggering recovery")
-                connector._alive()
+                _ipc_call(connector._alive, False)
         except Exception as e:
             log.error("[keepalive] error: %s", e)
 
@@ -87,13 +103,6 @@ def _login_detail() -> str:
     return "MT5 login failed — open MT5, log in manually, or use USE TERMINAL SESSION"
 
 
-def _ipc_call(fn, default=None):
-    try:
-        return _ipc_pool.submit(fn).result(timeout=IPC_TIMEOUT_SEC)
-    except FuturesTimeoutError:
-        return default
-
-
 @app.post("/api/attach")
 def api_attach():
     """Fast connect when MT5 is already logged in (any broker). No password IPC call."""
@@ -116,10 +125,11 @@ def api_login(body: LoginBody):
         raise HTTPException(status_code=400, detail="Invalid login number")
 
     def _do_login() -> bool:
-        return connector.login(body.login, body.password, server, body.path)
+        with _mt5_lock:
+            return connector.login(body.login, body.password, server, body.path)
 
     try:
-        ok = _login_pool.submit(_do_login).result(timeout=LOGIN_TIMEOUT_SEC)
+        ok = _ipc_pool.submit(_do_login).result(timeout=LOGIN_TIMEOUT_SEC)
     except FuturesTimeoutError:
         raise HTTPException(
             status_code=504,
@@ -130,12 +140,12 @@ def api_login(body: LoginBody):
         )
     if not ok:
         raise HTTPException(status_code=401, detail=_login_detail())
-    return {"ok": True, "account": connector.account_info()}
+    return {"ok": True, "account": _ipc_call(connector.account_info, None)}
 
 
 @app.post("/api/logout")
 def api_logout():
-    connector.shutdown()
+    _ipc_call(connector.shutdown, None)
     return {"ok": True}
 
 
@@ -147,10 +157,10 @@ def api_status():
 
 @app.get("/api/symbol/{symbol}")
 def api_resolve_symbol(symbol: str, pip_size: float = 0.1):
-    sym = connector.resolve_symbol(symbol)
+    sym = _ipc_call(lambda: connector.resolve_symbol(symbol))
     if sym is None:
         raise HTTPException(status_code=503, detail="Symbol not found on broker")
-    spec = connector.symbol_spec(symbol, pip_size=pip_size)
+    spec = _ipc_call(lambda: connector.symbol_spec(symbol, pip_size=pip_size))
     if spec is None:
         return {"requested": symbol, "resolved": sym}
     return {"requested": symbol, "resolved": sym, **spec}
@@ -159,18 +169,18 @@ def api_resolve_symbol(symbol: str, pip_size: float = 0.1):
 @app.get("/api/bars/{symbol}")
 def api_bars(symbol: str, count: int = 320, from_ms: int | None = None, to_ms: int | None = None):
     if from_ms is not None and to_ms is not None:
-        bars = connector.bars_m30_range(symbol, from_ms, to_ms)
+        bars = _ipc_call(lambda: connector.bars_m30_range(symbol, from_ms, to_ms), [])
     else:
-        bars = connector.bars_m30(symbol, count)
+        bars = _ipc_call(lambda: connector.bars_m30(symbol, count), [])
     if not bars:
         raise HTTPException(status_code=503, detail="No bars — login, symbol, or chart history")
-    sym = connector.resolve_symbol(symbol) or symbol
+    sym = _ipc_call(lambda: connector.resolve_symbol(symbol)) or symbol
     return {"symbol": sym, "timeframe": "M30", "bars": bars}
 
 
 @app.get("/api/tick/{symbol}")
 def api_tick(symbol: str):
-    t = connector.tick(symbol)
+    t = _ipc_call(lambda: connector.tick(symbol))
     if t is None:
         raise HTTPException(status_code=503, detail="No tick — login or symbol")
     return t
@@ -178,12 +188,12 @@ def api_tick(symbol: str):
 
 @app.get("/api/positions")
 def api_positions(symbol: str | None = None):
-    return {"positions": connector.positions(symbol)}
+    return {"positions": _ipc_call(lambda: connector.positions(symbol), [])}
 
 
 @app.post("/api/order")
 def api_order(body: OrderBody):
-    r = connector.order_market(body.symbol, body.side, body.volume, body.sl, body.tp, body.magic)
+    r = _ipc_call(lambda: connector.order_market(body.symbol, body.side, body.volume, body.sl, body.tp, body.magic), {"ok": False, "error": "IPC timeout"})
     if not r.get("ok"):
         raise HTTPException(status_code=400, detail=r)
     return r
@@ -191,7 +201,7 @@ def api_order(body: OrderBody):
 
 @app.get("/api/logs")
 def api_logs(limit: int = 50):
-    return {"deals": connector.trade_logs(limit)}
+    return {"deals": _ipc_call(lambda: connector.trade_logs(limit), [])}
 
 
 if __name__ == "__main__":
