@@ -1,16 +1,31 @@
 /**
- * Polls desk-api /health and MT5 /api/status; logs reconnect transitions to reconnect.jsonl.
+ * Production watchdog — polls services, auto-restarts on failure, resets bot failsafe.
+ * Runs via Bilshenz-Watchdog scheduled task.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 
 const DESK = process.env.DESK_HEALTH_URL ?? 'http://127.0.0.1:8791/health';
 const MT5 = (process.env.MT5_API_URL ?? 'http://127.0.0.1:8765').replace(/\/$/, '');
 const INTERVAL_MS = Number(process.env.WATCHDOG_INTERVAL_MS ?? 60_000);
 const LOG_DIR = process.env.TRADINGBOT_LOG_DIR ?? 'C:\\logs\\tradingbot';
+const SAFETY_FILE = process.env.SAFETY_STATE_PATH ?? path.join(LOG_DIR, 'safety-state.json');
 
 let prevDesk = true;
 let prevMt5 = true;
+let deskDownCount = 0;
+let mt5DownCount = 0;
+const RESTART_AFTER = 3;
+
+function log(msg: string): void {
+  const ts = new Date().toISOString();
+  const line = `${ts} [watchdog] ${msg}`;
+  console.log(line);
+  try {
+    fs.appendFileSync(path.join(LOG_DIR, 'watchdog.log'), line + '\n', 'utf8');
+  } catch { /* ignore */ }
+}
 
 function logReconnect(message: string, extra: Record<string, unknown> = {}): void {
   if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
@@ -19,18 +34,24 @@ function logReconnect(message: string, extra: Record<string, unknown> = {}): voi
   fs.appendFileSync(path.join(LOG_DIR, 'reconnect.jsonl'), line, 'utf8');
 }
 
-async function check(url: string): Promise<{ ok: boolean; detail: string }> {
+function runPs(cmd: string): string {
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    return execSync(`powershell -NoProfile -Command "${cmd}"`, { timeout: 20_000, encoding: 'utf8' }).trim();
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function probe(url: string): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
     const text = await res.text();
     let ok = res.ok;
     if (url.includes('/api/status') && res.ok) {
       try {
         const j = JSON.parse(text) as { connected?: boolean };
         ok = Boolean(j.connected);
-      } catch {
-        ok = false;
-      }
+      } catch { ok = false; }
     }
     return { ok, detail: text.slice(0, 200) };
   } catch (e) {
@@ -38,31 +59,74 @@ async function check(url: string): Promise<{ ok: boolean; detail: string }> {
   }
 }
 
+function resetBotFailsafe(): void {
+  try {
+    if (!fs.existsSync(SAFETY_FILE)) return;
+    const state = JSON.parse(fs.readFileSync(SAFETY_FILE, 'utf8'));
+    if (state.failsafe || state.consecutiveApiFailures >= 6) {
+      state.consecutiveApiFailures = 0;
+      state.failsafe = false;
+      state.failsafeReason = null;
+      fs.writeFileSync(SAFETY_FILE, JSON.stringify(state, null, 2), 'utf8');
+      log('Reset bot failsafe — MT5 is healthy again');
+    }
+  } catch { /* ignore */ }
+}
+
 async function tick(): Promise<void> {
-  const ts = new Date().toISOString();
-  const desk = await check(DESK);
-  const mt5 = await check(`${MT5}/api/status`);
-  const line = `${ts} desk=${desk.ok} mt5=${mt5.ok} ${!mt5.ok ? mt5.detail : ''}`;
-  console.log(line);
+  const desk = await probe(DESK);
+  const mt5 = await probe(`${MT5}/api/status`);
 
-  if (!desk.ok && prevDesk) {
-    logReconnect('desk-api down', { service: 'desk-api' });
-    console.error('ALERT: desk-api down');
+  if (!desk.ok) {
+    deskDownCount++;
+    if (prevDesk) {
+      logReconnect('desk-api down', { service: 'desk-api' });
+      log(`desk-api DOWN: ${desk.detail}`);
+    }
+    if (deskDownCount >= RESTART_AFTER) {
+      log('Restarting Bilshenz-DeskAPI...');
+      runPs("Get-NetTCPConnection -LocalPort 8791 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }; Start-Sleep 3; Start-ScheduledTask -TaskName 'Bilshenz-DeskAPI'");
+      deskDownCount = 0;
+    }
+  } else {
+    if (!prevDesk) {
+      logReconnect('desk-api recovered', { service: 'desk-api' });
+      log('desk-api recovered');
+    }
+    deskDownCount = 0;
   }
-  if (desk.ok && !prevDesk) logReconnect('desk-api recovered', { service: 'desk-api' });
 
-  if (!mt5.ok && prevMt5) {
-    logReconnect('mt5-api disconnected', { service: 'mt5-api', detail: mt5.detail });
-    console.error('ALERT: MT5 API unreachable — ensure MT5 terminal logged in');
+  if (!mt5.ok) {
+    mt5DownCount++;
+    if (prevMt5) {
+      logReconnect('mt5-api disconnected', { service: 'mt5-api', detail: mt5.detail });
+      log(`MT5 DOWN: ${mt5.detail}`);
+    }
+    if (mt5DownCount >= RESTART_AFTER) {
+      log('Restarting MT5 API...');
+      runPs("Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }; Start-Sleep 3; Start-ScheduledTask -TaskName 'Bilshenz-MT5-API'");
+      mt5DownCount = 0;
+    }
+  } else {
+    if (!prevMt5) {
+      logReconnect('mt5-api connected', { service: 'mt5-api' });
+      log('MT5 recovered');
+      resetBotFailsafe();
+    }
+    mt5DownCount = 0;
+    resetBotFailsafe();
   }
-  if (mt5.ok && !prevMt5) logReconnect('mt5-api connected', { service: 'mt5-api' });
+
+  const ts = new Date().toISOString().slice(11, 19);
+  console.log(`${ts} desk=${desk.ok} mt5=${mt5.ok}${!mt5.ok ? ' ' + mt5.detail.slice(0, 80) : ''}`);
 
   prevDesk = desk.ok;
   prevMt5 = mt5.ok;
 }
 
 async function main(): Promise<void> {
-  console.log(`Watchdog started desk=${DESK} mt5=${MT5}/api/status logDir=${LOG_DIR}`);
+  if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+  log(`Started — desk=${DESK} mt5=${MT5}/api/status interval=${INTERVAL_MS}ms`);
   await tick();
   setInterval(() => void tick(), INTERVAL_MS);
 }
