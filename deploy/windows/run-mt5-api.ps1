@@ -11,7 +11,7 @@ if (Test-Path "$mt5Path\terminal64.exe") {
     if (-not (Get-Process terminal64 -ErrorAction SilentlyContinue)) {
         "$(Get-Date -Format o) Starting terminal64.exe from $mt5Path (with /algotrading)" *>> $Log
         Start-Process "$mt5Path\terminal64.exe" -ArgumentList '/algotrading'
-        Start-Sleep 25
+        Start-Sleep 60
     }
 }
 $env:MT5_TERMINAL_PATH = $mt5Path
