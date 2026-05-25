@@ -75,6 +75,12 @@ deploy/windows/Bilshenz-VPS.zip
 tradingbot.env
 **/tradingbot.env
 C:/ProgramData/Bilshenz/
+*.pem
+*.key
+*.pfx
+credentials.json
+secrets.json
+**/safety-state.json
 
 # VPS runtime logs and state (outside repo, listed for safety)
 # C:\logs\tradingbot\

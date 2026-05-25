@@ -20,13 +20,44 @@ from mt5_connector import MT5Connector, MT5Config
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("api")
 
-app = FastAPI(title="Bilshenz MT5 Bridge", version="1.0.0")
+app = FastAPI(title="Bilshenz MT5 Bridge", version="1.0.0", docs_url=None, redoc_url=None, openapi_url=None)
+
+# Simple rate limiter — max requests per second per endpoint
+_rate_buckets: dict[str, float] = {}
+_RATE_LIMIT_PER_SEC = float(os.environ.get("MT5_RATE_LIMIT", "5"))
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        now = time.monotonic()
+        key = request.url.path
+        last = _rate_buckets.get(key, 0.0)
+        if now - last < 1.0 / _RATE_LIMIT_PER_SEC:
+            return JSONResponse({"detail": "rate limited"}, status_code=429)
+        _rate_buckets[key] = now
+        return await call_next(request)
+
+app.add_middleware(RateLimitMiddleware)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origins=os.environ.get("CORS_ORIGINS", "http://127.0.0.1:8791").split(","),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 connector = MT5Connector(MT5Config(path=os.environ.get("MT5_TERMINAL_PATH") or None))
@@ -71,19 +102,19 @@ _keepalive_thread.start()
 
 
 class LoginBody(BaseModel):
-    login: int = Field(..., description="MT5 account number")
-    password: str
-    server: str = Field(..., description="Broker server name (any MT5 broker)")
-    path: str | None = Field(None, description="Optional path to terminal64.exe folder")
+    login: int = Field(..., gt=0, description="MT5 account number")
+    password: str = Field(..., min_length=1, max_length=128)
+    server: str = Field(..., min_length=1, max_length=128, description="Broker server name (any MT5 broker)")
+    path: str | None = Field(None, max_length=256, description="Optional path to terminal64.exe folder")
 
 
 class OrderBody(BaseModel):
-    symbol: str = "XAUUSD"
-    side: str = "BUY"
-    volume: float = 0.01
-    sl: float | None = None
-    tp: float | None = None
-    magic: int = 77002002
+    symbol: str = Field("XAUUSD", max_length=20, pattern=r"^[A-Za-z0-9_.]+$")
+    side: str = Field("BUY", pattern=r"^(BUY|SELL)$")
+    volume: float = Field(0.01, ge=0.01, le=10.0)
+    sl: float | None = Field(None, ge=0)
+    tp: float | None = Field(None, ge=0)
+    magic: int = Field(77002002, ge=0)
 
 
 @app.get("/health")
@@ -208,4 +239,5 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("PORT", "8765"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    host = os.environ.get("HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=port)
