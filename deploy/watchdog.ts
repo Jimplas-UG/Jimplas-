@@ -36,9 +36,9 @@ function logReconnect(message: string, extra: Record<string, unknown> = {}): voi
   fs.appendFileSync(path.join(LOG_DIR, 'reconnect.jsonl'), line, 'utf8');
 }
 
-function runPs(cmd: string): string {
+function runPs(cmd: string, timeoutMs = 90_000): string {
   try {
-    return execSync(`powershell -NoProfile -Command "${cmd}"`, { timeout: 20_000, encoding: 'utf8' }).trim();
+    return execSync(`powershell -NoProfile -Command "${cmd}"`, { timeout: timeoutMs, encoding: 'utf8' }).trim();
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
@@ -125,8 +125,25 @@ async function tick(): Promise<void> {
       log(`MT5 DOWN: ${mt5.detail}`);
     }
     if (mt5DownCount >= RESTART_AFTER) {
-      log('Restarting MT5 API...');
-      runPs("Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }; Start-Sleep 3; Start-ScheduledTask -TaskName 'Bilshenz-MT5-API'");
+      log('MT5 down for 3 checks — full restart (terminal64 + Python API)...');
+      // Kill Python API
+      runPs("Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue");
+      // Kill terminal64 (IPC pipe is dead, process is a zombie)
+      runPs("taskkill /f /im terminal64.exe 2>$null");
+      log('Killed terminal64 + python. Waiting 10s...');
+      // Synchronous wait before restart
+      runPs("Start-Sleep 10");
+      // Start terminal64 fresh with /algotrading
+      const exe = `${MT5_TERMINAL_PATH}\\terminal64.exe`;
+      runPs(`Start-Process '${exe}' -ArgumentList '/algotrading'`);
+      log('terminal64 started. Waiting 60s for full init...');
+      // Wait for terminal to fully initialize (critical — needs 60s on VPS)
+      runPs("Start-Sleep 60");
+      // Now start the Python API
+      runPs("Start-ScheduledTask -TaskName 'Bilshenz-MT5-API'");
+      log('MT5 API task started. Waiting 15s for API to come up...');
+      runPs("Start-Sleep 15");
+      logReconnect('full MT5 stack restarted by watchdog', { service: 'mt5-full' });
       mt5DownCount = 0;
     }
   } else {
