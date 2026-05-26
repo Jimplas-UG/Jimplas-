@@ -35,6 +35,7 @@ import {
 import { Mt5BridgeProvider, useMt5Bridge } from './contexts/Mt5BridgeContext';
 import { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';
 import { mapJournalToHistRows, mapSessionBitsFromEngine, mapSrFromEngine } from './hooks/deskComputeLocal';
+import { mapMt5DealsToHistRows, mt5DealsDailyPnl, mt5DealsTotalPnl } from './lib/journalHistMap';
 import { useBilshenzMarketEngine } from './hooks/useBilshenzMarketEngine';
 import BootFallback from './components/BootFallback';
 import { useMt5LiveFeed } from './hooks/useMt5LiveFeed';
@@ -1395,6 +1396,7 @@ function RightColumn({
   accountEquity,
   mt5LiveAccount,
   mt5Account,
+  mt5Deals,
 }) {
   const { colors: C, styles } = useBilshenzTheme();
   const pr = Math.round(pnl);
@@ -1433,9 +1435,11 @@ function RightColumn({
   const simUsd = cfg?.simUsdPerEnginePip ?? 12.5;
   const journalRows = eng?.journalRows ?? [];
   const jStat = journalClosedStats(journalRows, pipRm);
-  const closedUsd = mt5LiveAccount
-    ? Math.round(journalClosedUsd(journalRows, cfg, accountEquity, effPct))
-    : Math.round(jStat.netP * simUsd);
+  const closedUsd = mt5LiveAccount && mt5Deals?.length
+    ? Math.round(mt5DealsDailyPnl(mt5Deals) * 100) / 100
+    : mt5LiveAccount
+      ? Math.round(journalClosedUsd(journalRows, cfg, accountEquity, effPct))
+      : Math.round(jStat.netP * simUsd);
   const closedTodayVal = fmtUsd(closedUsd);
   const closedTodayCol = closedUsd >= 0 ? C.green : C.red;
   const openTrade = snap?.trade;
@@ -1840,9 +1844,11 @@ function ProfileTab({
     engPr?.cfg
   );
   const eqPr = engPr?.accountEquity ?? SIM_DESK_EQUITY;
-  const totalPlUsd = useRealMt5Pr
-    ? Math.round(journalClosedUsd(engPr?.journalRows ?? [], engPr?.cfg, eqPr, effPctPr))
-    : Math.round(jStatPr.netP * (engPr?.cfg?.simUsdPerEnginePip ?? 12.5));
+  const totalPlUsd = useRealMt5Pr && engPr?.mt5Deals?.length
+    ? Math.round(mt5DealsTotalPnl(engPr.mt5Deals) * 100) / 100
+    : useRealMt5Pr
+      ? Math.round(journalClosedUsd(engPr?.journalRows ?? [], engPr?.cfg, eqPr, effPctPr))
+      : Math.round(jStatPr.netP * (engPr?.cfg?.simUsdPerEnginePip ?? 12.5));
   const totalPlStr = fmtUsd(totalPlUsd);
   const totalPlCol = totalPlUsd >= 0 ? C.green : C.red;
   const sparkW = Math.max(220, width - pad * 2 - 56);
@@ -2678,9 +2684,10 @@ function AppContent({ onEngineReady }) {
       useMt5ForEngine,
       mt5Connected,
       mt5Account: useRealMt5 ? mt5Live.account : null,
+      mt5Deals: useRealMt5 ? mt5Live.mt5Deals : [],
       accountEquity: sizingEquity,
     }),
-    [bilshenzEngine, useRealMt5, useMt5PaperBacktest, useMt5ForEngine, mt5Connected, mt5Live.account, sizingEquity]
+    [bilshenzEngine, useRealMt5, useMt5PaperBacktest, useMt5ForEngine, mt5Connected, mt5Live.account, mt5Live.mt5Deals, sizingEquity]
   );
   const bzSnapshot = bilshenzEngine.snapshot;
   const tradeCount = bilshenzEngine.tradeCount;
@@ -2873,11 +2880,14 @@ function AppContent({ onEngineReady }) {
   }, [runMode]);
 
   const histRows = useMemo(() => {
+    if (useRealMt5 && mt5Live.mt5Deals?.length) {
+      return mapMt5DealsToHistRows(mt5Live.mt5Deals);
+    }
     const mapped = mapJournalToHistRows(bilshenzEngine.journalRows);
     if (mapped.length) return mapped;
     if (useRealMt5) return [];
     return SIGNAL_HISTORY_SIM;
-  }, [bilshenzEngine.journalRows, useRealMt5]);
+  }, [bilshenzEngine.journalRows, useRealMt5, mt5Live.mt5Deals]);
 
   const engineWinRatePctStr =
     (bzSnapshot.winRate?.totalWins ?? 0) + (bzSnapshot.winRate?.totalLosses ?? 0) > 0
@@ -3473,6 +3483,7 @@ function AppContent({ onEngineReady }) {
                     accountEquity={sizingEquity}
                     mt5LiveAccount={useRealMt5}
                     mt5Account={useRealMt5 ? mt5Live.account : null}
+                    mt5Deals={useRealMt5 ? mt5Live.mt5Deals : null}
                   />
                 </View>
               </View>
@@ -3534,6 +3545,7 @@ function AppContent({ onEngineReady }) {
                     accountEquity={sizingEquity}
                     mt5LiveAccount={useRealMt5}
                     mt5Account={useRealMt5 ? mt5Live.account : null}
+                    mt5Deals={useRealMt5 ? mt5Live.mt5Deals : null}
                   />
                 </View>
               </View>
@@ -3623,6 +3635,7 @@ function AppContent({ onEngineReady }) {
                   accountEquity={sizingEquity}
                   mt5LiveAccount={useRealMt5}
                   mt5Account={useRealMt5 ? mt5Live.account : null}
+                  mt5Deals={useRealMt5 ? mt5Live.mt5Deals : null}
                 />
               </View>
             ) : null}

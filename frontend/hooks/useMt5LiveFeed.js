@@ -4,6 +4,7 @@ import { buildBundleFromM30Bars } from '../lib/marketBundle';
 import { DISPLAY_PIP_SIZE } from '../security/deskConstants';
 import {
   fetchMt5BarsM30,
+  fetchMt5Deals,
   fetchMt5ResolvedSymbol,
   fetchMt5Tick,
 } from '../broker/mt5PythonApi';
@@ -80,6 +81,7 @@ export function useMt5LiveFeed({
   const [account, setAccount] = useState(null);
   const [marketBundle, setMarketBundle] = useState(null);
   const [resolvedSymbol, setResolvedSymbol] = useState(symbol);
+  const [mt5Deals, setMt5Deals] = useState([]);
   const [feedError, setFeedError] = useState('');
   const [feedReady, setFeedReady] = useState(false);
   const symRef = useRef(symbol);
@@ -298,10 +300,21 @@ export function useMt5LiveFeed({
       const st = await fetchStatusAccount(b);
       if (st.account) setAccount(st.account);
     }, 5000);
+    const dealsId = setInterval(async () => {
+      const b = baseUrl.trim();
+      const d = await fetchMt5Deals(b, 100);
+      if (d.length) setMt5Deals(d);
+    }, 30_000);
+    void (async () => {
+      const b = baseUrl.trim();
+      const d = await fetchMt5Deals(b, 100);
+      if (d.length) setMt5Deals(d);
+    })();
     return () => {
       cancelled = true;
       clearInterval(barId);
       clearInterval(acctId);
+      clearInterval(dealsId);
     };
   }, [enabled, connected, baseUrl, symbol, bootstrap, loadHistory]);
 
@@ -334,5 +347,6 @@ export function useMt5LiveFeed({
     resolvedSymbol,
     feedError,
     feedReady,
+    mt5Deals,
   };
 }

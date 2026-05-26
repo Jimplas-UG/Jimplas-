@@ -205,6 +205,18 @@ export async function tryExistingMt5Session(apiBaseUrl, login, server) {
   }
 }
 
+export async function fetchMt5Deals(apiBaseUrl, limit = 50) {
+  const b = base(apiBaseUrl);
+  try {
+    const res = await mt5Fetch(b, `/api/logs?limit=${limit}`, {}, 15000);
+    if (!res.ok) return [];
+    const j = await res.json();
+    return Array.isArray(j.deals) ? j.deals : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function postMt5OrderFromIntent(intent, opts) {
   const b = base(opts.baseUrl);
   const side = intent.side;
