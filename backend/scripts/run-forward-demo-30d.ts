@@ -93,6 +93,7 @@ function orderIdempotencyKey(barT: number, side: string, setup: string): string 
 
 async function mt5Status(): Promise<{
   connected: boolean;
+  trade_allowed: boolean;
   equity: number;
   server: string | null;
   spreadPips: number;
@@ -102,7 +103,8 @@ async function mt5Status(): Promise<{
   if (!st.ok) throw new Error(`MT5 status HTTP ${st.status}`);
   const j = (await st.json()) as {
     connected?: boolean;
-    account?: { equity?: number; server?: string };
+    account?: { equity?: number; server?: string; trade_allowed?: boolean };
+    trade_allowed?: boolean;
   };
   let spreadPips = 3.08;
   let usdPerPip = 10;
@@ -118,6 +120,7 @@ async function mt5Status(): Promise<{
   }
   return {
     connected: !!j.connected,
+    trade_allowed: !!(j.trade_allowed ?? j.account?.trade_allowed),
     equity: j.account?.equity ?? 1000,
     server: j.account?.server ?? null,
     spreadPips,
@@ -178,10 +181,26 @@ async function tickOnce(session: SessionState): Promise<void> {
   session.dryRun = effectiveDryRun(safety);
 
   if (safety.failsafe) {
-    console.error(`[forward-demo] FAILSAFE — no trading: ${safety.failsafeReason ?? 'halted'}`);
-    saveSession(session);
-    saveSafetyState(safety);
-    return;
+    try {
+      const probe = await mt5Status();
+      if (probe.connected && probe.trade_allowed) {
+        safety.failsafe = false;
+        safety.failsafeReason = null;
+        safety.consecutiveApiFailures = 0;
+        saveSafetyState(safety);
+        session.dryRun = effectiveDryRun(safety);
+        console.error('[forward-demo] Self-healed from FAILSAFE — MT5 is back online');
+      } else {
+        console.error(`[forward-demo] FAILSAFE — MT5 probe: connected=${probe.connected} trade=${probe.trade_allowed}`);
+        saveSession(session);
+        return;
+      }
+    } catch {
+      console.error(`[forward-demo] FAILSAFE — no trading: ${safety.failsafeReason ?? 'halted'}`);
+      saveSession(session);
+      saveSafetyState(safety);
+      return;
+    }
   }
 
   let status: Awaited<ReturnType<typeof mt5Status>>;
@@ -249,7 +268,10 @@ async function tickOnce(session: SessionState): Promise<void> {
   const signalIdx = cfg.signalOnClosedBarOnly !== false && n >= 2 ? n - 2 : n - 1;
   const bar = bundle.m30[signalIdx]!;
 
-  if (session.lastClosedBarT === bar.t) return;
+  if (session.lastClosedBarT === bar.t) {
+    console.error(`[forward-demo] ${new Date().toISOString().slice(11, 19)} waiting for new M30 bar (last: ${new Date(bar.t).toISOString().slice(11, 16)})`);
+    return;
+  }
 
   const ymd = nyYmdKey(bar.t);
   if (session.nyDay !== ymd) {

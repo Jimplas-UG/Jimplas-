@@ -156,6 +156,21 @@ async function tick(): Promise<void> {
     resetBotFailsafe();
   }
 
+  if (desk.ok && mt5.ok) {
+    try {
+      if (fs.existsSync(SAFETY_FILE)) {
+        const state = JSON.parse(fs.readFileSync(SAFETY_FILE, 'utf8'));
+        if (state.failsafe || state.consecutiveApiFailures > 0) {
+          state.consecutiveApiFailures = 0;
+          state.failsafe = false;
+          state.failsafeReason = null;
+          fs.writeFileSync(SAFETY_FILE, JSON.stringify(state, null, 2), 'utf8');
+          log('Cleared bot failsafe + API failure counter — both services healthy');
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
   const ts = new Date().toISOString().slice(11, 19);
   console.log(`${ts} desk=${desk.ok} mt5=${mt5.ok}${!mt5.ok ? ' ' + mt5.detail.slice(0, 80) : ''}`);
 
