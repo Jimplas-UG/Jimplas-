@@ -22,26 +22,11 @@ log = logging.getLogger("api")
 
 app = FastAPI(title="Bilshenz MT5 Bridge", version="1.0.0", docs_url=None, redoc_url=None, openapi_url=None)
 
-# Simple rate limiter — max requests per second per endpoint
-_rate_buckets: dict[str, float] = {}
-_RATE_LIMIT_PER_SEC = float(os.environ.get("MT5_RATE_LIMIT", "5"))
-
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        now = time.monotonic()
-        key = request.url.path
-        last = _rate_buckets.get(key, 0.0)
-        if now - last < 1.0 / _RATE_LIMIT_PER_SEC:
-            return JSONResponse({"detail": "rate limited"}, status_code=429)
-        _rate_buckets[key] = now
-        return await call_next(request)
-
-app.add_middleware(RateLimitMiddleware)
-
+# No rate limiter needed — API is bound to 127.0.0.1 only (not externally reachable)
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
