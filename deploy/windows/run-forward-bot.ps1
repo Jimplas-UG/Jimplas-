@@ -6,4 +6,4 @@ New-Item -ItemType Directory -Force -Path $env:TRADINGBOT_LOG_DIR | Out-Null
 Set-Location $Backend
 $env:PRODUCTION_MODE = '1'
 $env:PRODUCTION_NO_EXPIRY = '1'
-npx tsx scripts/run-forward-demo-30d.ts 2>&1 | Tee-Object -FilePath $Log -Append
+npx tsx scripts/run-forward-demo-30d.ts 2>&1 | ForEach-Object { $_ | Out-File -FilePath $Log -Append -Encoding utf8; $_ }

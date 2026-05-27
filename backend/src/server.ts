@@ -261,7 +261,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`[desk-api] listening on http://127.0.0.1:${PORT}`);
   console.log(`[desk-api] POST /v1/desk/compute · POST /v1/desk/execute-gate · /v1/mt5/* MT5 proxy`);
   console.log(`[desk-api] POST /v1/validation/event · GET /v1/validation/events · GET /v1/validation/freeze-status`);

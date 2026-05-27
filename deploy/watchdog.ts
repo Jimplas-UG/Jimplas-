@@ -171,6 +171,20 @@ async function tick(): Promise<void> {
     } catch { /* ignore */ }
   }
 
+  // Ensure forward bot process is alive
+  try {
+    const botCheck = runPs(
+      "Get-Process node -ErrorAction SilentlyContinue | " +
+      "Where-Object { (Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.Id)).CommandLine -match 'run-forward-demo' } | " +
+      "Select-Object -First 1 -ExpandProperty Id"
+    );
+    if (!botCheck || !botCheck.match(/\d+/)) {
+      log('Forward bot process not found — restarting Bilshenz-ForwardBot...');
+      runPs("Start-ScheduledTask -TaskName 'Bilshenz-ForwardBot'");
+      logReconnect('forward bot restarted by watchdog', { service: 'forward-bot' });
+    }
+  } catch { /* ignore */ }
+
   const ts = new Date().toISOString().slice(11, 19);
   console.log(`${ts} desk=${desk.ok} mt5=${mt5.ok}${!mt5.ok ? ' ' + mt5.detail.slice(0, 80) : ''}`);
 
