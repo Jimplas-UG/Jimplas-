@@ -102,6 +102,12 @@ class OrderBody(BaseModel):
     magic: int = Field(77002002, ge=0)
 
 
+@app.get("/ping")
+def ping():
+    st = connector.status()
+    return {"pong": True, "connected": bool(st.get("connected"))}
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "service": "bilshenz-mt5-bridge"}

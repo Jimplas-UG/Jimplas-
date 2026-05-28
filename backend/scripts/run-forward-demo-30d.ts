@@ -40,6 +40,12 @@ import {
   type SafetyState,
 } from '../production/safetyControls';
 import { mergeFrozenDeskCfg, productionFrozenConfig, verifyFrozenStrategy } from '../strategy/frozenProduction';
+import {
+  jcmWebhookConfigured,
+  publishSystemState,
+  publishTradeBlocked,
+  publishTradeExecuted,
+} from '../jcm/jcmSupervisorPublisher';
 import { logEquitySnapshot, logForwardMissed, logForwardSignal } from '../validation/logForwardEvent';
 import { forwardDemoLogPath } from '../validation/forwardDemoStore';
 
@@ -155,8 +161,37 @@ function saveSession(s: SessionState): void {
 
 function loadJournal(): TradeJournalRow[] {
   if (!fs.existsSync(JOURNAL_FILE)) return [];
-  const j = JSON.parse(fs.readFileSync(JOURNAL_FILE, 'utf8')) as { rows?: TradeJournalRow[] };
+  const raw = fs.readFileSync(JOURNAL_FILE, 'utf8').replace(/^\uFEFF/, '');
+  const j = JSON.parse(raw) as { rows?: TradeJournalRow[] };
   return j.rows ?? [];
+}
+
+const DESK_API = (process.env.DESK_API_URL ?? 'http://127.0.0.1:8791').replace(/\/$/, '');
+let jcmStatePolls = 0;
+
+async function deskHealthOk(): Promise<boolean> {
+  try {
+    const r = await fetch(`${DESK_API}/health`);
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function maybePublishJcmSystemState(
+  status: Awaited<ReturnType<typeof mt5Status>>,
+  dryRun: boolean
+): Promise<void> {
+  if (!jcmWebhookConfigured()) return;
+  jcmStatePolls += 1;
+  if (jcmStatePolls % 10 !== 1) return;
+  await publishSystemState({
+    mt5Connected: status.connected,
+    deskApiOk: await deskHealthOk(),
+    forwardBotOk: true,
+    accountEquity: status.equity,
+    dryRun,
+  });
 }
 
 function saveJournal(rows: TradeJournalRow[]): void {
@@ -288,8 +323,14 @@ async function tickOnce(session: SessionState): Promise<void> {
     cfg,
   });
 
+  await maybePublishJcmSystemState(status, effectiveDryRun(safety));
+
   if (dailyLossBreached(safety, status.equity)) {
     logForwardMissed({ reason: 'daily loss limit', barTimeMs: bar.t });
+    void publishTradeBlocked({
+      symbol: SYMBOL,
+      blockedBy: ['daily_loss_limit'],
+    });
     console.error(`[forward-demo] ${new Date(bar.t).toISOString()} blocked: daily loss limit`);
     session.lastClosedBarT = bar.t;
     saveJournal(journalRows);
@@ -322,6 +363,11 @@ async function tickOnce(session: SessionState): Promise<void> {
   if (!gate.ok) {
     if (snap.signals?.anyBuy || snap.signals?.anySell) {
       logForwardMissed({ reason: gate.reason, barTimeMs: bar.t });
+      void publishTradeBlocked({
+        symbol: SYMBOL,
+        direction: trade?.side === 'BUY' ? 'long' : trade?.side === 'SELL' ? 'short' : null,
+        blockedBy: [gate.reason],
+      });
     }
     console.error(`[forward-demo] ${new Date(bar.t).toISOString()} blocked: ${gate.reason}`);
     return;
@@ -415,6 +461,19 @@ async function tickOnce(session: SessionState): Promise<void> {
     );
     saveJournal(next.rows);
     console.error(`[forward-demo] EXEC ${intent.side} ${intent.setup} vol=${volume} · ${r.summary}`);
+    void publishTradeExecuted({
+      symbol: SYMBOL,
+      direction: intent.side === 'BUY' ? 'long' : 'short',
+      lotSize: volume,
+      entryPrice: intent.entry ?? bar.c,
+      filledPrice: intent.entry ?? bar.c,
+      stopLoss: intent.sl,
+      takeProfit: intent.tp1,
+      setup: intent.setup,
+      barTimeMs: bar.t,
+      filtersPassed: ['risk_gating'],
+      mt5Connected: status.connected,
+    });
   } else {
     const reason = recordApiFailure(safety, `order: ${r.summary}`);
     if (reason) {
