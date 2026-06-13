@@ -4,6 +4,12 @@
   "main": "index.js",
   "scripts": {
     "start": "node scripts/run-expo-go.js",
+    "start:dev": "node scripts/run-dev-preview.js",
+    "start:dev:lan": "node scripts/run-dev-preview.js --lan",
+    "start:dev:tunnel": "set EXPO_FORCE_TUNNEL=1&& node scripts/run-dev-preview.js",
+    "start:dev:clear": "node scripts/run-dev-preview.js --clear",
+    "android:dev": "node scripts/run-dev-preview.js --android",
+    "android:emulator": "node scripts/run-dev-preview.js --android",
     "start:go": "node scripts/run-expo-go.js",
     "go:52": "node scripts/run-expo-go.js",
     "expo-go-52": "node scripts/run-expo-go.js",

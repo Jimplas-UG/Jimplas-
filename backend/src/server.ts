@@ -9,6 +9,7 @@ import type { BilshenzEngineConfig, EquityRiskContext, MarketBundle } from '../e
 import { canExecuteTrade } from '../broker/tradeExecutionGates';
 import { publicBlockReason } from '../security/publicLabels';
 import { handleValidationRoute } from './validationRoutes';
+import { handleBinanceProxy, isBinanceProxyPath } from './binanceProxy';
 import { handleMt5Proxy, isMt5ProxyPath } from './mt5Proxy';
 import { isStrategyFreezeEnforced, mergeFrozenDeskCfg, verifyFrozenStrategy } from '../strategy/frozenProduction';
 import * as path from 'node:path';
@@ -188,6 +189,17 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // Binance proxy: allow all /v1/binance/* without desk-api auth
+  if (isBinanceProxyPath(urlEarly.pathname)) {
+    try {
+      if (await handleBinanceProxy(req, res, urlEarly)) return;
+    } catch {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ detail: 'Binance bridge unreachable. Ensure Bilshenz-Binance-API is running.' }));
+      return;
+    }
+  }
+
   if (!authOk(req)) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'unauthorized' }));
@@ -264,7 +276,7 @@ const server = http.createServer(async (req, res) => {
 // Bind 0.0.0.0 so mobile app can reach VPS; MT5 Python API stays on 127.0.0.1 only.
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[desk-api] listening on http://0.0.0.0:${PORT} (LAN/VPS + localhost)`);
-  console.log(`[desk-api] POST /v1/desk/compute · POST /v1/desk/execute-gate · /v1/mt5/* MT5 proxy`);
+  console.log(`[desk-api] POST /v1/desk/compute · POST /v1/desk/execute-gate · /v1/mt5/* · /v1/binance/*`);
   console.log(`[desk-api] POST /v1/validation/event · GET /v1/validation/events · GET /v1/validation/freeze-status`);
   if (isStrategyFreezeEnforced()) console.log('[desk-api] STRATEGY_FREEZE=1 — locked production config');
   if (!API_KEY) console.warn('[desk-api] WARNING: DESK_API_KEY not set — open to LAN');

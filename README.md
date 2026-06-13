@@ -5,9 +5,22 @@ Project layout after frontend/backend split:
 | Folder | Purpose |
 |--------|---------|
 | **`frontend/`** | Expo Go mobile/web UI |
-| **`backend/`** | Strategy engine, desk API, backtests, MT5 bridge |
-| **`mt5_trading_system/`** | Python MT5 API (unchanged) |
+| **`backend/`** | Strategy engine, desk API, backtests |
+| **`binance_trading_system/`** | Binance Futures Python API (port 8766) |
+| **`mt5_trading_system/`** | Python MT5 API (legacy, port 8765) |
 | **`myapp/`** | Legacy folder — use `frontend/` instead |
+
+## Broker modes
+
+Set `EXPO_PUBLIC_BROKER_MODE` / `BROKER_MODE`:
+
+| Mode | Execution |
+|------|-----------|
+| `mt5` | MetaTrader 5 (default) |
+| `binance` | Binance USD-M Futures testnet/live |
+| `paper` | Simulated fills (`BINANCE_PAPER=1`) |
+
+See `docs/BINANCE_DEPLOYMENT.md` and `docs/BINANCE_MIGRATION_PLAN.md`.
 
 ## Quick start
 

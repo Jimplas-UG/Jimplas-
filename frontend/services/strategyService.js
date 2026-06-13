@@ -6,6 +6,8 @@ import { fetchWithRetry } from './httpClient';
 import { deskApiHeaders, getDeskApiBase, IS_PRODUCTION_DESK } from '../security/deskMode';
 import { sanitizeSnapshot } from '../security/sanitizeDesk';
 import { EMPTY_TRADE, ensureDeskSnapshot } from '../lib/snapshotDefaults';
+import { useMockApi } from '../lib/devPreview';
+import { mockDeskCompute } from '../mocks/mockApi';
 
 let _snapshotCache = null;
 let _snapshotCacheKey = '';
@@ -25,6 +27,13 @@ function cacheKey(body) {
 export async function requestDeskSnapshot(body) {
   const key = cacheKey(body);
   if (_snapshotCache && _snapshotCacheKey === key) return _snapshotCache;
+
+  if (useMockApi()) {
+    const safe = sanitizeSnapshot(mockDeskCompute(body)) ?? ensureDeskSnapshot(null);
+    _snapshotCache = safe;
+    _snapshotCacheKey = key;
+    return safe;
+  }
 
   if (_inflightSnapshot) return _inflightSnapshot;
 

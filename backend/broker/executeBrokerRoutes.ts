@@ -1,4 +1,6 @@
 import type { BrokerOrderIntent, BrokerWebhookResult } from './brokerTypes';
+import type { BinanceOrderResult } from './binanceTypes';
+import { fetchBinanceConnected, postBinanceOrderFromIntent } from './binanceFuturesApi';
 import { fetchMt5Connected, postMt5OrderFromIntent, type Mt5OrderResult } from './mt5PythonApi';
 import { postBrokerOrderWebhook } from './webhookBroker';
 import {
@@ -15,12 +17,18 @@ export type ExecuteBrokerRoutesOpts = {
   mt5BaseUrl?: string;
   useMt5?: boolean;
   mt5Volume?: number;
+  binanceBaseUrl?: string;
+  useBinance?: boolean;
+  binanceQuantity?: number;
+  binanceVolume?: number;
+  riskUsd?: number;
   symbol?: string;
 };
 
 export type ExecuteBrokerRoutesResult = {
   webhook?: BrokerWebhookResult;
   mt5?: Mt5OrderResult;
+  binance?: BinanceOrderResult;
   summary: string;
   anyOk: boolean;
 };
@@ -33,6 +41,7 @@ export async function executeBrokerRoutes(opts: ExecuteBrokerRoutesOpts): Promis
   let anyOk = false;
   let webhook: BrokerWebhookResult | undefined;
   let mt5: Mt5OrderResult | undefined;
+  let binance: BinanceOrderResult | undefined;
 
   if (opts.useWebhook && opts.webhookUrl?.trim()) {
     webhook = await postBrokerOrderWebhook(opts.intent, {
@@ -100,9 +109,63 @@ export async function executeBrokerRoutes(opts: ExecuteBrokerRoutesOpts): Promis
     }
   }
 
-  if (!parts.length) {
-    return { webhook, mt5, summary: 'No broker route enabled', anyOk: false };
+  if (opts.useBinance && opts.binanceBaseUrl?.trim()) {
+    const base = opts.binanceBaseUrl.trim();
+    const connected = await fetchBinanceConnected(base);
+    if (!connected) {
+      binance = { ok: false, status: 0, bodySnippet: 'Binance not connected', connected: false };
+      parts.push('Binance skipped (not connected)');
+    } else {
+      const side = opts.intent.side;
+      const intended = opts.intent.entry ?? 0;
+      if (side === 'BUY' || side === 'SELL') {
+        logOrderIntent({
+          side,
+          intendedEntry: intended,
+          symbol: opts.symbol ?? opts.intent.symbol,
+        });
+      }
+      const t0 = Date.now();
+      binance = await postBinanceOrderFromIntent(opts.intent, {
+        baseUrl: base,
+        quantity: opts.binanceQuantity,
+        volume: opts.binanceVolume ?? opts.mt5Volume,
+        symbol: opts.symbol,
+        riskUsd: opts.riskUsd,
+      });
+      const latencyMs = binance.latencyMs ?? Date.now() - t0;
+      if (side === 'BUY' || side === 'SELL') {
+        if (binance.ok && binance.fillPrice != null) {
+          logOrderFill({
+            side,
+            intendedEntry: binance.intendedPrice ?? intended,
+            actualFill: binance.fillPrice,
+            spreadAtExecutionPips: binance.spreadPips,
+            latencyMs,
+            ticket: binance.orderId,
+            broker: binance.broker ?? 'binance',
+          });
+        } else {
+          logOrderRejected({
+            side,
+            rejectReason: binance.bodySnippet,
+            latencyMs,
+            symbol: opts.symbol,
+          });
+        }
+      }
+      if (binance.ok) {
+        anyOk = true;
+        parts.push(`Binance OK ${binance.status}`);
+      } else {
+        parts.push(`Binance: ${binance.bodySnippet}`);
+      }
+    }
   }
 
-  return { webhook, mt5, summary: parts.join(' · '), anyOk };
+  if (!parts.length) {
+    return { webhook, mt5, binance, summary: 'No broker route enabled', anyOk: false };
+  }
+
+  return { webhook, mt5, binance, summary: parts.join(' · '), anyOk };
 }

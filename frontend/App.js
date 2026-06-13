@@ -26,6 +26,7 @@ import BilshenzHeader from './components/BilshenzHeader';
 import GeoPoliticalTicker from './components/GeoPoliticalTicker';
 
 const Mt5BridgePanelLazy = lazy(() => import('./components/Mt5BridgePanel'));
+const BinanceBridgePanelLazy = lazy(() => import('./components/BinanceBridgePanel'));
 import {
   buildBrokerOrderIntent,
   canExecuteTrade,
@@ -33,12 +34,18 @@ import {
   postTelegramSignalRelay,
 } from './brokerClient';
 import { Mt5BridgeProvider, useMt5Bridge } from './contexts/Mt5BridgeContext';
+import { BinanceBridgeProvider, useBinanceBridge } from './contexts/BinanceBridgeContext';
+import { isBinanceBroker, defaultSymbolForBroker } from './lib/brokerMode';
 import { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';
 import { mapJournalToHistRows, mapSessionBitsFromEngine, mapSrFromEngine } from './hooks/deskComputeLocal';
 import { mapMt5DealsToHistRows, mt5DealsDailyPnl, mt5DealsTotalPnl } from './lib/journalHistMap';
 import { useBilshenzMarketEngine } from './hooks/useBilshenzMarketEngine';
 import BootFallback from './components/BootFallback';
-import { useMt5LiveFeed } from './hooks/useMt5LiveFeed';
+import { useBrokerLiveFeed } from './hooks/useBrokerLiveFeed';
+import { isDevPreview, skipSplash, useMockApi } from './lib/devPreview';
+import { DevPreviewProvider } from './contexts/DevPreviewContext';
+import DevMenu from './components/dev/DevMenu';
+import UIShowcaseScreen from './components/dev/UIShowcaseScreen';
 import {
   SHOW_STRATEGY_INTEL,
   ENABLE_DESK_DIAGNOSTICS,
@@ -71,10 +78,13 @@ import {
   journalClosedUsd,
   lotSizeSubtitle,
   lotsForTrade,
+  quantityForTrade,
   pctOfBalanceLabel,
   resolveAccountEquity,
   sizingForTrade,
 } from './utils/riskSizing';
+import { positionSizeLabel, distanceUnit } from './lib/tickUnits';
+import { beTriggerLabel, sizingModeLabel } from './lib/tickDisplay';
 
 /** Dev-only config fallback when engine cfg is withheld in production. */
 function displayCfg(engCfg) {
@@ -245,7 +255,7 @@ function deskStrategyModeLine(cfg) {
       ? `TP ${d.tp1MinRewardPips}–${d.tp1MaxRewardPips}p`
       : 'Structure TP';
   const p2 = d.p2UseStrictFilters ? 'P2 strict' : 'P2 loose';
-  const sz = d.journalSizingSlPips > 0 ? `${d.journalSizingSlPips}p risk lots` : 'SL-sized lots';
+  const sz = sizingModeLabel(cfg);
   return `Fluidity · ${tp} · ${p2} · ${sz}`;
 }
 
@@ -964,7 +974,11 @@ function CenterColumn({
   const slPipsE = tradeSizing.structuralSlPips;
   const sizingSlPips = tradeSizing.sizingSlPips;
   const riskUsd = Math.round(tradeSizing.riskUsd);
+  const u = distanceUnit();
   const lotStr = tradeSizing.lots > 0 ? tradeSizing.lots.toFixed(2) : '—';
+  const slDist = entPx != null && slPx != null ? Math.abs(entPx - slPx) : 0;
+  const approxQty = slDist > 0 ? (tradeSizing.riskUsd / slDist).toFixed(3) : lotStr;
+  const sizeStr = isBinanceBroker() ? approxQty : lotStr;
   const rrDisp =
     sizingSlPips > 0 && tp1Px != null && Number.isFinite(tp1Px)
       ? `1 : ${(Math.abs(tp1Px - entPx) / pip / sizingSlPips).toFixed(1)}`
@@ -994,11 +1008,11 @@ function CenterColumn({
   const tp2Sub = er?.yieldHigh ? 'TP2 −30% (yield rule)' : 'Next ladder zone';
   const tp1Sub =
     cfg?.useLegacyTpClampOnly && cfg?.tp1MinRewardPips != null
-      ? `Clamp ${cfg.tp1MinRewardPips}–${cfg.tp1MaxRewardPips} pips`
+      ? `Clamp ${cfg.tp1MinRewardPips}–${cfg.tp1MaxRewardPips} ${u}s`
       : 'Structure target';
   const slSub =
     trade?.side && (cfg?.journalSizingSlPips ?? 0) > 0 && slPipsE > sizingSlPips + 0.05
-      ? `Chart SL · lots on ${sizingSlPips}p risk`
+      ? `Chart SL · ${isBinanceBroker() ? 'contracts' : 'lots'} on ${sizingSlPips}${u} risk`
       : trade?.side === 'SELL'
         ? 'Above entry + buffer'
         : trade?.side === 'BUY'
@@ -1186,7 +1200,7 @@ function CenterColumn({
       <Panel shell={{}} head={{ title: 'Entry & Exit Engine', badge: 'JIMPLAS FLUIDITY' }}>
         <View style={styles.eeGrid}>
           <EeCell lab="Entry Price" val={fmtPx(entPx)} sub={`${effRiskPct.toFixed(2)}% risk tier`} valStyle={styles.eeEntry} />
-          <EeCell lab={`BE @ +${bePips}p`} val={fmtPx(bePx)} sub="Move SL to entry" valStyle={styles.eeBe} />
+          <EeCell lab={beTriggerLabel(beOff, cfg)} val={fmtPx(bePx)} sub="Move SL to entry" valStyle={styles.eeBe} />
           <EeCell lab="TP1 — Target" val={fmtPx(tp1Px)} sub={tp1Sub} valStyle={styles.eeTp1} />
           <EeCell lab="TP2 — Zone" val={fmtPx(tp2Px)} sub={tp2Sub} valStyle={styles.eeTp2} />
         </View>
@@ -1198,10 +1212,10 @@ function CenterColumn({
             sub={`${effRiskPct.toFixed(2)}% of ${equityLbl}`}
             valStyle={styles.eePlain}
           />
-          <EeCell lab="R:R Ratio" val={rrDisp} sub="On journal risk pips" valStyle={styles.eeGold} />
+          <EeCell lab="R:R Ratio" val={rrDisp} sub={`On journal risk ${u}s`} valStyle={styles.eeGold} />
           <EeCell
-            lab="Lot Size"
-            val={lotStr}
+            lab={positionSizeLabel()}
+            val={sizeStr}
             sub={lotSizeSubtitle(riskUsd, slPipsE, sizingSlPips, simUsd, cfg)}
             valStyle={styles.eePlain}
           />
@@ -1561,8 +1575,8 @@ function RightColumn({
         <DxyRow l="ATR Mode" v={atrShort} vc={C.amber} />
         <DxyRow l="Effective Risk" v={`${effRiskStr} · ${fmtUsd(riskUsdNow)}`} vc={geoVc} />
         <DxyRow
-          l="Next trade lots"
-          v={openTrade?.side ? openLotsStr : '—'}
+          l={isBinanceBroker() ? 'Next trade qty' : 'Next trade lots'}
+          v={openTrade?.side ? (isBinanceBroker() && openSlPips > 0 ? (openSizing.riskUsd / (openSlPips * pipRm)).toFixed(3) : openLotsStr) : '—'}
           vc={openTrade?.side ? C.goldL : C.dim}
         />
         <DxyRow
@@ -1570,8 +1584,8 @@ function RightColumn({
           v={
             openTrade?.side
               ? (cfg?.journalSizingSlPips ?? 0) > 0
-                ? `${openSizingSlPips}p risk · ${openSlPips.toFixed(1)}p chart SL`
-                : `${openSlPips.toFixed(1)}p SL`
+                ? `${openSizingSlPips}${distanceUnit()} risk · ${openSlPips.toFixed(1)}${distanceUnit()} chart SL`
+                : `${openSlPips.toFixed(1)}${distanceUnit()} SL`
               : '—'
           }
           vc={openTrade?.side ? C.amber : C.dim}
@@ -1581,7 +1595,7 @@ function RightColumn({
           v={openTrade?.side ? fmtUsd(riskUsdNow) : '—'}
           vc={openTrade?.side ? C.red : C.dim}
         />
-        <DxyRow l="BE Trigger" v={`+${bePipsRm} pips`} vc={C.green} />
+        <DxyRow l="BE Trigger" v={beTriggerLabel(cfg?.beOffset ?? 1.2, cfg)} vc={C.green} />
         <DxyRow l="Trades Today" v={`${tradeCountDisp} of ${tradeCap} (executes)`} vc={C.amber} />
         <DxyRow l="Dynamic Entries" v={dynEntStr} vc={r?.geoHigh || r?.chopZone ? C.amber : C.green} />
       </Panel>
@@ -2255,10 +2269,10 @@ function ProfileTab({
       <Suspense
         fallback={
           <View style={{ paddingVertical: 12, paddingHorizontal: pad }}>
-            <Text style={{ color: C.dim, fontSize: 11 }}>Loading MT5 panel…</Text>
+            <Text style={{ color: C.dim, fontSize: 11 }}>Loading broker panel…</Text>
           </View>
         }>
-        <Mt5BridgePanelLazy />
+        {isBinanceBroker() ? <BinanceBridgePanelLazy /> : <Mt5BridgePanelLazy />}
       </Suspense>
 
       <Pressable onPress={resetDefaults} style={({ pressed }) => [styles.psResetBtn, pressed && { opacity: 0.88 }]}>
@@ -2516,6 +2530,11 @@ function MobileBottomNav({ tab, onChange, bottomInset }) {
 function AppContent({ onEngineReady }) {
   const { colors: C, styles } = useBilshenzTheme();
   const { baseUrl: mt5BaseUrl, connected: mt5Connected } = useMt5Bridge();
+  const { baseUrl: binanceBaseUrl, connected: binanceConnected } = useBinanceBridge();
+  const binanceMode = isBinanceBroker();
+  const mockApi = useMockApi();
+  const brokerConnected = binanceMode ? binanceConnected : mt5Connected;
+  const brokerBaseUrl = binanceMode ? binanceBaseUrl : mt5BaseUrl;
   const { width } = useWindowDimensions();
   const isWide = width >= 880;
   const pad = Math.max(12, Math.min(24, width * 0.06));
@@ -2558,16 +2577,20 @@ function AppContent({ onEngineReady }) {
     setPaperBtAutoExec(!!enabled);
   }, []);
 
-  const useMt5PaperBacktest = mt5Connected && runMode === 'backtest';
-  const useMt5ForEngine = mt5Connected && (runMode === 'live' || runMode === 'backtest');
-  const useRealMt5 = mt5Connected && runMode === 'live';
+  const useMt5PaperBacktest = brokerConnected && runMode === 'backtest';
+  const useMt5ForEngine = !mockApi && brokerConnected && (runMode === 'live' || runMode === 'backtest');
+  const useRealMt5 = !mockApi && brokerConnected && runMode === 'live';
 
-  const mt5Live = useMt5LiveFeed({
-    baseUrl: mt5BaseUrl,
-    connected: mt5Connected,
+  const brokerLive = useBrokerLiveFeed({
+    mt5BaseUrl,
+    mt5Connected,
+    binanceBaseUrl,
+    binanceConnected,
     enabled: useMt5ForEngine,
+    symbol: defaultSymbolForBroker(),
     pollTicks: runMode === 'live',
   });
+  const mt5Live = brokerLive;
 
   const accountEquity = useMemo(() => {
     if (!useRealMt5) return SIM_DESK_EQUITY;
@@ -2616,13 +2639,13 @@ function AppContent({ onEngineReady }) {
     };
   }, []);
 
-  /** Default ON in LIVE SIM while MT5 is connected unless user turned it off (stored or this session). */
+  /** Default ON in LIVE SIM while broker is connected unless user turned it off (stored or this session). */
   useEffect(() => {
     if (runMode !== 'live') return;
-    if (mt5Connected && !userDisabledAutoExecRef.current) {
+    if (brokerConnected && !userDisabledAutoExecRef.current) {
       setAutoExecuteSignals(true);
     }
-  }, [mt5Connected, runMode]);
+  }, [brokerConnected, runMode]);
 
   useEffect(() => {
     AsyncStorage.setItem(STORAGE_BROKER_HOOK_URL, brokerWebhookUrl).catch(() => {});
@@ -2674,6 +2697,7 @@ function AppContent({ onEngineReady }) {
     useMt5Data: useMt5ForEngine,
     mt5Connected: useMt5ForEngine,
     countSignalTowardCap: runMode === 'backtest' ? paperBtAutoExec : !autoExecuteSignals,
+    accountEquity: sizingEquity,
   });
 
   const engineCtxValue = useMemo(
@@ -2732,6 +2756,17 @@ function AppContent({ onEngineReady }) {
       return lotsForTrade(tradeSnap, cfg, sizingEquity, riskPct);
     },
     [sizingEquity, bilshenzEngine.cfg, bzSnapshot.risk?.atrPips]
+  );
+
+  const execQtyForTrade = useCallback(
+    (tradeSnap) => {
+      const cfg = displayCfg(bilshenzEngine.cfg);
+      const riskPct = effectiveRiskPctFromEngine(cfg.geoRisk, bzSnapshot.risk?.atrPips ?? null, cfg);
+      const spec = brokerLive.symbolSpec ?? { stepSize: 0.001, minQty: 0.001 };
+      const s = quantityForTrade(tradeSnap, cfg, sizingEquity, riskPct, spec);
+      return s.quantity > 0 ? s.quantity : 0.001;
+    },
+    [sizingEquity, bilshenzEngine.cfg, bzSnapshot.risk?.atrPips, brokerLive.symbolSpec]
   );
 
   const sendTelegramEligibleIfNeeded = useCallback(
@@ -2817,15 +2852,19 @@ function AppContent({ onEngineReady }) {
         });
 
         const lots = execLotsForTrade(bzSnapshot.trade);
+        const qty = execQtyForTrade(bzSnapshot.trade);
         await sendTelegramEligibleIfNeeded(intent, lots, bar.t);
         const r = await executeBrokerRoutes({
           intent,
           webhookUrl: hookUrl,
-          useWebhook: !!hookUrl && !mt5Connected,
+          useWebhook: !!hookUrl && !brokerConnected,
           mt5BaseUrl,
-          useMt5: mt5Connected,
+          useMt5: !binanceMode && mt5Connected,
           mt5Volume: lots,
-          symbol: mt5Live.resolvedSymbol,
+          binanceBaseUrl,
+          useBinance: binanceMode && binanceConnected,
+          binanceQuantity: qty,
+          symbol: mt5Live.resolvedSymbol || defaultSymbolForBroker(),
         });
         if (r.anyOk) {
           bumpAutoTradeCount();
@@ -3108,7 +3147,7 @@ function AppContent({ onEngineReady }) {
         barTimeMs: barT,
         runMode: runModeRef.current,
         trigger: 'manual',
-        symbol: mt5Live.resolvedSymbol || 'XAUUSD',
+        symbol: mt5Live.resolvedSymbol || defaultSymbolForBroker(),
       });
       if (!intent) {
         setLastBrokerMsg('EXEC skipped (no side)');
@@ -3116,18 +3155,26 @@ function AppContent({ onEngineReady }) {
         return;
       }
       const lots = execLotsForTrade(tradeSnap);
+      const qty = execQtyForTrade(tradeSnap);
       await sendTelegramEligibleIfNeeded(intent, lots, barT);
-      if ((brokerHookEnabled && hookUrl) || mt5Connected) {
+      if ((brokerHookEnabled && hookUrl) || brokerConnected) {
         const r = await executeBrokerRoutes({
           intent,
           webhookUrl: hookUrl,
-          useWebhook: !!(brokerHookEnabled && hookUrl && !mt5Connected),
+          useWebhook: !!(brokerHookEnabled && hookUrl && !brokerConnected),
           mt5BaseUrl,
-          useMt5: mt5Connected,
+          useMt5: !binanceMode && mt5Connected,
           mt5Volume: lots,
-          symbol: mt5Live.resolvedSymbol,
+          binanceBaseUrl,
+          useBinance: binanceMode && binanceConnected,
+          binanceQuantity: qty,
+          symbol: mt5Live.resolvedSymbol || defaultSymbolForBroker(),
         });
-        setLastBrokerMsg(r.summary ? `${r.summary} · ${lots.toFixed(2)} lot` : r.summary);
+        setLastBrokerMsg(
+          r.summary
+            ? `${r.summary} · ${binanceMode ? `${qty} qty` : `${lots.toFixed(2)} lot`}`
+            : r.summary,
+        );
       } else {
         setLastBrokerMsg('');
       }
@@ -3235,13 +3282,15 @@ function AppContent({ onEngineReady }) {
     newsActive,
   ]);
 
-  if (!bundleReady || (useMt5ForEngine && !mt5Live.feedReady)) {
+  if (!bundleReady || (useMt5ForEngine && !mt5Live.feedReady && !mockApi)) {
     return (
       <View style={[styles.safeRoot, { alignItems: 'center', justifyContent: 'center', padding: 24 }]}>
         <Text style={{ color: C.dim, fontSize: 12, textAlign: 'center' }}>
-          {useMt5ForEngine
-            ? mt5Live.feedError || 'Loading MT5 history…'
-            : 'Loading market engine…'}
+          {mockApi
+            ? 'Loading dev preview…'
+            : useMt5ForEngine
+              ? mt5Live.feedError || 'Loading MT5 history…'
+              : 'Loading market engine…'}
         </Text>
       </View>
     );
@@ -3638,6 +3687,8 @@ function AppContent({ onEngineReady }) {
                   mt5Deals={useRealMt5 ? mt5Live.mt5Deals : null}
                 />
               </View>
+            ) : mobileTab === 'showcase' ? (
+              <UIShowcaseScreen pad={pad} />
             ) : null}
 
             {showDeskChrome ? (
@@ -3664,6 +3715,12 @@ function AppContent({ onEngineReady }) {
             )}
           </ScrollView>
           {!isWide ? <MobileBottomNav tab={mobileTab} onChange={setMobileTab} bottomInset={insets.bottom} /> : null}
+          <DevMenu
+            currentTab={mobileTab}
+            onNavigate={setMobileTab}
+            engineState={{ bundleReady, runMode }}
+            snapshot={bzSnapshot}
+          />
         </View>
       </SafeAreaView>
     </BilshenzEngineCtx.Provider>
@@ -3703,8 +3760,8 @@ class AppContentBoundary extends React.Component {
 
 function AppRoot() {
   const { styles } = useBilshenzTheme();
-  const [showOverlay, setShowOverlay] = useState(true);
-  const [splashDone, setSplashDone] = useState(false);
+  const [showOverlay, setShowOverlay] = useState(!skipSplash());
+  const [splashDone, setSplashDone] = useState(skipSplash());
 
   useEffect(() => {
     const t = setTimeout(() => setSplashDone(true), SPLASH_MAX_MS);
@@ -3727,9 +3784,13 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <ThemeProvider>
-        <Mt5BridgeProvider>
-          <AppRoot />
-        </Mt5BridgeProvider>
+        <DevPreviewProvider>
+          <Mt5BridgeProvider>
+            <BinanceBridgeProvider>
+              <AppRoot />
+            </BinanceBridgeProvider>
+          </Mt5BridgeProvider>
+        </DevPreviewProvider>
       </ThemeProvider>
     </SafeAreaProvider>
   );

@@ -1,12 +1,22 @@
 /**
  * Resilient HTTP for desk-api — retries, timeout, no secret logging.
  */
+import { useMockApi } from '../lib/devPreview';
+import { tryMockFetch } from '../mocks/mockApi';
 
 const DEFAULT_TIMEOUT_MS = 12000;
 const MAX_RETRIES = 3;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+async function fetchMaybeMock(url, init) {
+  if (useMockApi()) {
+    const mock = tryMockFetch(url, init);
+    if (mock) return mock;
+  }
+  return fetch(url, init);
 }
 
 /**
@@ -24,12 +34,16 @@ export async function fetchWithRetry(url, init = {}, opts = {}) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const res = await fetch(url, { ...init, signal: ctrl.signal });
+      const res = await fetchMaybeMock(url, { ...init, signal: ctrl.signal });
       clearTimeout(timer);
       return res;
     } catch (e) {
       clearTimeout(timer);
       lastErr = e;
+      if (useMockApi()) {
+        const mock = tryMockFetch(url, init);
+        if (mock) return mock;
+      }
       if (attempt === retries - 1) break;
     }
   }

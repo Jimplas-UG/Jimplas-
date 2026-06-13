@@ -323,6 +323,7 @@ function engineReducer(state, action) {
  * @param {boolean} [p.useMt5Data] — when true in live mode, do not build synthetic bars (wait for MT5 bundle)
  * @param {boolean} [p.mt5Connected] — blocks synthetic bundle while MT5 bridge is on (live mode)
  * @param {boolean} [p.countSignalTowardCap] — when false, journal row on signal but daily cap increments only via broker ACK
+ * @param {number|null} [p.accountEquity] — live account equity for desk daily-loss / drawdown gates
  */
 export function useBilshenzMarketEngine({
   price,
@@ -342,11 +343,26 @@ export function useBilshenzMarketEngine({
   useMt5Data = false,
   mt5Connected = false,
   countSignalTowardCap = true,
+  accountEquity = null,
 }) {
   const anchorPriceRef = useRef(price);
   const baseRef = useRef(null);
   const prevUseMt5Ref = useRef(useMt5Data);
+  const peakEquityRef = useRef(0);
+  const dayStartEquityRef = useRef(0);
+  const equityDayRef = useRef('');
   const [bundleReady, setBundleReady] = useState(false);
+
+  useEffect(() => {
+    const eq = Number(accountEquity);
+    if (!Number.isFinite(eq) || eq <= 0) return;
+    const ymd = nyYmdKey(Date.now());
+    if (equityDayRef.current !== ymd) {
+      equityDayRef.current = ymd;
+      dayStartEquityRef.current = eq;
+    }
+    peakEquityRef.current = Math.max(peakEquityRef.current || eq, eq);
+  }, [accountEquity]);
 
   useEffect(() => {
     if (!useMt5Data) {
@@ -466,6 +482,16 @@ export function useBilshenzMarketEngine({
     };
   }, [spread, geoRisk, newsActive, nfpBlackout, maxDailyTrades, simUsdPerEnginePip]);
 
+  const buildEquityRisk = useCallback(() => {
+    const eq = Number(accountEquity);
+    if (!Number.isFinite(eq) || eq <= 0) return null;
+    return {
+      currentEquity: eq,
+      peakEquity: peakEquityRef.current || eq,
+      dayStartEquity: dayStartEquityRef.current || eq,
+    };
+  }, [accountEquity]);
+
   const nowUtcMs = useMemo(() => {
     if (runMode === 'backtest' && bundle?.m30?.length) {
       return bundle.m30[bundle.m30.length - 1].t;
@@ -481,8 +507,9 @@ export function useBilshenzMarketEngine({
       dailyTradeCount: state.tradeCount,
       journalRows: state.journalRows,
       nowUtcMs,
+      equityRisk: buildEquityRisk(),
     });
-  }, [bundle, cfg, state.tradeCount, state.journalRows, nowUtcMs]);
+  }, [bundle, cfg, state.tradeCount, state.journalRows, nowUtcMs, buildEquityRisk]);
 
   const [remoteSnapshot, setRemoteSnapshot] = useState(null);
   const [remoteError, setRemoteError] = useState(null);
@@ -504,6 +531,7 @@ export function useBilshenzMarketEngine({
       journalRows: state.journalRows,
       dailyTradeCount: state.tradeCount,
       nowUtcMs,
+      equityRisk: buildEquityRisk(),
     })
       .then((snap) => {
         if (!cancelled) {
@@ -531,6 +559,8 @@ export function useBilshenzMarketEngine({
     state.tradeCount,
     state.journalRows,
     nowUtcMs,
+    accountEquity,
+    buildEquityRisk,
   ]);
 
   const rawSnapshot = USE_REMOTE_DESK ? remoteSnapshot ?? BOOT_SNAPSHOT : localSnapshot;
@@ -675,6 +705,7 @@ export function useBilshenzMarketEngine({
       journalRows: state.journalRows,
       dailyTradeCount: state.tradeCount,
       nowUtcMs,
+      equityRisk: buildEquityRisk(),
     };
   }, [
     bundle,
@@ -687,6 +718,7 @@ export function useBilshenzMarketEngine({
     state.journalRows,
     state.tradeCount,
     nowUtcMs,
+    buildEquityRisk,
   ]);
 
   if (ENABLE_DESK_DIAGNOSTICS && remoteError) {

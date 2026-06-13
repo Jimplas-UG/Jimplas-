@@ -3,6 +3,8 @@
  */
 import { fetchWithRetry } from './httpClient';
 import { deskApiHeaders, getDeskApiBase, IS_PRODUCTION_DESK, USE_REMOTE_DESK } from '../security/deskMode';
+import { useMockApi } from '../lib/devPreview';
+import { mockExecuteGate } from '../mocks/mockApi';
 
 const inflightGates = new Map();
 
@@ -14,6 +16,7 @@ const inflightGates = new Map();
 export async function validateExecutionGate(gateBody, ctx = {}) {
   if (!gateBody) return { ok: false, reason: 'NO_CONTEXT' };
   if (ctx.runMode === 'backtest') return { ok: false, reason: 'BACKTEST' };
+  if (useMockApi()) return mockExecuteGate();
 
   if (!USE_REMOTE_DESK) {
     if (IS_PRODUCTION_DESK) return { ok: false, reason: 'LOCAL_DISABLED' };

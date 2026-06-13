@@ -15,8 +15,10 @@
  *
  * Usage: node scripts/run-expo-go.js [--lan] [--usb] [--clear ...]
  */
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const os = require('os');
+const path = require('path');
+const { adbHasDevice, adbReverseTcp, resolveAdbPath } = require('./resolve-adb');
 
 const EXPO_GO_52 = 'https://expo.dev/go?sdkVersion=52';
 
@@ -68,32 +70,6 @@ function pickLanIp() {
   return rows[0].address;
 }
 
-function adbHasDevice() {
-  try {
-    const out = execSync('adb devices', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 8000 });
-    const lines = out
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith('List of devices'));
-    return lines.some((l) => /\tdevice$/.test(l));
-  } catch {
-    return false;
-  }
-}
-
-function adbReverseMetro() {
-  try {
-    execSync(`adb reverse tcp:${metroPort} tcp:${metroPort}`, {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 8000,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 const portArgs = passThru.includes('--port') ? [] : ['--port', String(metroPort)];
 
 let expoArgs;
@@ -108,11 +84,13 @@ if (forceTunnel) {
   (forceUsb || !forceLan) &&
   process.platform === 'win32' &&
   adbHasDevice() &&
-  adbReverseMetro()
+  adbReverseTcp(metroPort)
 ) {
   expoArgs = ['expo', 'start', '--localhost', '--go', ...portArgs, ...passThru];
+  const adbPath = resolveAdbPath() || 'adb';
   console.log('');
   console.log('[expo-go] Mode: USB / adb reverse tcp:' + metroPort + ' → Metro on localhost');
+  console.log('[expo-go] adb:', adbPath);
   console.log('[expo-go] In Expo Go, use the QR from THIS terminal (often exp://127.0.0.1:' + metroPort + ').');
   console.log('');
 } else {
@@ -154,12 +132,18 @@ if (!childEnv.EXPO_PUBLIC_DESK_API_URL?.trim()) {
 console.log('[expo-go] desk-api URL:', childEnv.EXPO_PUBLIC_DESK_API_URL);
 console.log('[expo-go] Start strategy server: cd ..\\backend && npm run desk-api');
 
-childEnv.CI = childEnv.CI ?? '1';
+// CI=true disables Fast Refresh and can break Expo Go reloads — never default it on locally.
+if (childEnv.CI === '1' || childEnv.CI === 'true') {
+  childEnv.CI = 'false';
+}
 
-const child = spawn('npx', expoArgs, {
+const expoCli = path.join(__dirname, '..', 'node_modules', 'expo', 'bin', 'cli');
+const cliArgs = expoArgs[0] === 'expo' ? expoArgs.slice(1) : expoArgs;
+const child = spawn(process.execPath, [expoCli, ...cliArgs], {
   stdio: 'inherit',
-  shell: true,
+  shell: false,
   env: childEnv,
+  cwd: path.join(__dirname, '..'),
 });
 
 child.on('exit', (code, signal) => {

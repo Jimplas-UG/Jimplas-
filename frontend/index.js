@@ -1,5 +1,7 @@
 import 'react-native-reanimated';
 import './security/productionGuard';
+import { useMockApi } from './lib/devPreview';
+import { tryMockFetch } from './mocks/mockApi';
 import React, { useEffect } from 'react';
 import { Platform, ScrollView, Text, View } from 'react-native';
 import { registerRootComponent } from 'expo';
@@ -8,6 +10,21 @@ import { initBootSplash, hideBootSplash } from './lib/bootSplash';
 import App from './App';
 
 initBootSplash();
+
+if (useMockApi() && typeof global.fetch === 'function') {
+  const _nativeFetch = global.fetch.bind(global);
+  global.fetch = async (url, init) => {
+    const mock = tryMockFetch(url, init);
+    if (mock) return mock;
+    try {
+      return await _nativeFetch(url, init);
+    } catch (e) {
+      const fallback = tryMockFetch(url, init);
+      if (fallback) return fallback;
+      throw e;
+    }
+  };
+}
 
 class RootErrorBoundary extends React.Component {
   constructor(props) {

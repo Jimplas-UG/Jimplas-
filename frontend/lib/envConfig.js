@@ -43,6 +43,24 @@ export function getMt5ApiUrl() {
   return 'http://127.0.0.1:8765';
 }
 
+/**
+ * Binance Futures bridge URL — production uses desk-api proxy on :8791/v1/binance
+ */
+export function getBinanceApiUrl() {
+  const fromEnv = process.env.EXPO_PUBLIC_BINANCE_API_URL?.trim();
+  if (fromEnv) return stripTrailingSlash(fromEnv);
+
+  const fromExtra = extra('binanceApiUrl');
+  if (fromExtra) return stripTrailingSlash(fromExtra);
+
+  const desk = getDeskApiUrl();
+  if (desk && !isLocalhostUrl(desk)) {
+    return `${stripTrailingSlash(desk)}/v1/binance`;
+  }
+
+  return 'http://127.0.0.1:8766';
+}
+
 export function getDeskApiKey() {
   return process.env.EXPO_PUBLIC_DESK_API_KEY?.trim() || extra('deskApiKey') || '';
 }

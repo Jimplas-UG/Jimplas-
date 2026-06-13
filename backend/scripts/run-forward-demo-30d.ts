@@ -17,6 +17,8 @@ import { fileURLToPath } from 'node:url';
 import { buildBrokerOrderIntent } from '../broker/webhookBroker';
 import { executeBrokerRoutes } from '../broker/executeBrokerRoutes';
 import { canExecuteTrade } from '../broker/tradeExecutionGates';
+import { fetchBinanceSymbolSpec } from '../broker/binanceFuturesApi';
+import { quantityFromRiskUsd } from '../broker/quantityMath';
 import {
   buildBundleFromM30Bars,
   computeBilshenzSnapshot,
@@ -55,8 +57,16 @@ const DATA_DIR = path.join(BACKEND_ROOT, 'validation', 'data');
 const SESSION_FILE = path.join(DATA_DIR, 'forward-demo-session.json');
 const JOURNAL_FILE = path.join(DATA_DIR, 'forward-demo-journal.json');
 
+const BROKER_MODE = (process.env.BROKER_MODE ?? 'mt5').trim().toLowerCase();
+const USE_BINANCE = BROKER_MODE === 'binance' || BROKER_MODE === 'paper';
+const BROKER_LABEL = USE_BINANCE ? (BROKER_MODE === 'paper' ? 'Binance paper' : 'Binance') : 'MT5';
 const MT5_API = (process.env.MT5_API_URL ?? 'http://127.0.0.1:8765').replace(/\/$/, '');
-const SYMBOL = process.env.MT5_SYMBOL?.trim() || 'XAUUSD';
+const BINANCE_API = (process.env.BINANCE_API_URL ?? 'http://127.0.0.1:8766').replace(/\/$/, '');
+const BROKER_API = USE_BINANCE ? BINANCE_API : MT5_API;
+const SYMBOL =
+  process.env.BINANCE_SYMBOL?.trim() ||
+  process.env.MT5_SYMBOL?.trim() ||
+  (USE_BINANCE ? 'XAUUSDT' : 'XAUUSD');
 const M30_MS = 30 * 60 * 1000;
 const WARMUP_BARS = 200;
 const RISK_PCT = Math.max(0.0001, Math.min(0.05, Number(process.env.RISK_PCT ?? '0.005') || 0.005));
@@ -97,7 +107,7 @@ function orderIdempotencyKey(barT: number, side: string, setup: string): string 
   return `${barT}:${side}:${setup}`;
 }
 
-async function mt5Status(): Promise<{
+async function brokerStatus(): Promise<{
   connected: boolean;
   trade_allowed: boolean;
   equity: number;
@@ -105,8 +115,8 @@ async function mt5Status(): Promise<{
   spreadPips: number;
   usdPerPip: number;
 }> {
-  const st = await fetch(`${MT5_API}/api/status`);
-  if (!st.ok) throw new Error(`MT5 status HTTP ${st.status}`);
+  const st = await fetch(`${BROKER_API}/api/status`);
+  if (!st.ok) throw new Error(`${BROKER_LABEL} status HTTP ${st.status}`);
   const j = (await st.json()) as {
     connected?: boolean;
     account?: { equity?: number; server?: string; trade_allowed?: boolean };
@@ -115,7 +125,7 @@ async function mt5Status(): Promise<{
   let spreadPips = 3.08;
   let usdPerPip = 10;
   try {
-    const specRes = await fetch(`${MT5_API}/api/symbol/${encodeURIComponent(SYMBOL)}?pip_size=0.1`);
+    const specRes = await fetch(`${BROKER_API}/api/symbol/${encodeURIComponent(SYMBOL)}?pip_size=0.1`);
     if (specRes.ok) {
       const spec = (await specRes.json()) as { spread_pips?: number; usd_per_pip_per_lot?: number };
       if (spec.spread_pips) spreadPips = spec.spread_pips;
@@ -135,9 +145,18 @@ async function mt5Status(): Promise<{
 }
 
 async function fetchM30Bars(fromMs: number, toMs: number): Promise<Bar[]> {
-  const url = `${MT5_API}/api/bars/${encodeURIComponent(SYMBOL)}?from_ms=${fromMs}&to_ms=${toMs}`;
+  const url = `${BROKER_API}/api/bars/${encodeURIComponent(SYMBOL)}?from_ms=${fromMs}&to_ms=${toMs}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`MT5 bars ${res.status}`);
+  if (!res.ok) {
+    if (USE_BINANCE) {
+      const fallback = `${BROKER_API}/api/bars/${encodeURIComponent(SYMBOL)}?count=1500`;
+      const res2 = await fetch(fallback);
+      if (!res2.ok) throw new Error(`${BROKER_LABEL} bars ${res2.status}`);
+      const j2 = (await res2.json()) as { bars?: Bar[] };
+      return (j2.bars ?? []).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t);
+    }
+    throw new Error(`${BROKER_LABEL} bars ${res.status}`);
+  }
   const j = (await res.json()) as { bars?: Bar[] };
   return (j.bars ?? []).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t);
 }
@@ -179,7 +198,7 @@ async function deskHealthOk(): Promise<boolean> {
 }
 
 async function maybePublishJcmSystemState(
-  status: Awaited<ReturnType<typeof mt5Status>>,
+  status: Awaited<ReturnType<typeof brokerStatus>>,
   dryRun: boolean
 ): Promise<void> {
   if (!jcmWebhookConfigured()) return;
@@ -205,6 +224,19 @@ function lotsForRisk(equity: number, slPips: number, usdPerPip: number): number 
   return Math.max(0.01, Math.min(1, Math.round(lots * 100) / 100));
 }
 
+async function binanceQuantityForIntent(
+  equity: number,
+  entry: number | null | undefined,
+  sl: number | null | undefined,
+  pipSize: number,
+): Promise<number> {
+  const riskUsd = equity * RISK_PCT;
+  const spec = await fetchBinanceSymbolSpec(BINANCE_API, SYMBOL, pipSize);
+  if (!spec || entry == null || sl == null) return spec?.minQty ?? 0.001;
+  const qty = quantityFromRiskUsd(riskUsd, entry, sl, spec);
+  return qty > 0 ? qty : spec.minQty;
+}
+
 async function tickOnce(session: SessionState): Promise<void> {
   const now = Date.now();
   if (now >= session.endMs) {
@@ -217,16 +249,16 @@ async function tickOnce(session: SessionState): Promise<void> {
 
   if (safety.failsafe) {
     try {
-      const probe = await mt5Status();
+      const probe = await brokerStatus();
       if (probe.connected && probe.trade_allowed) {
         safety.failsafe = false;
         safety.failsafeReason = null;
         safety.consecutiveApiFailures = 0;
         saveSafetyState(safety);
         session.dryRun = effectiveDryRun(safety);
-        console.error('[forward-demo] Self-healed from FAILSAFE — MT5 is back online');
+        console.error(`[forward-demo] Self-healed from FAILSAFE — ${BROKER_LABEL} is back online`);
       } else {
-        console.error(`[forward-demo] FAILSAFE — MT5 probe: connected=${probe.connected} trade=${probe.trade_allowed}`);
+        console.error(`[forward-demo] FAILSAFE — ${BROKER_LABEL} probe: connected=${probe.connected} trade=${probe.trade_allowed}`);
         saveSession(session);
         return;
       }
@@ -238,17 +270,17 @@ async function tickOnce(session: SessionState): Promise<void> {
     }
   }
 
-  let status: Awaited<ReturnType<typeof mt5Status>>;
+  let status: Awaited<ReturnType<typeof brokerStatus>>;
   try {
-    status = await mt5Status();
+    status = await brokerStatus();
     if (!status.connected) {
-      const reason = recordApiFailure(safety, 'MT5 not connected');
+      const reason = recordApiFailure(safety, `${BROKER_LABEL} not connected`);
       saveSafetyState(safety);
       if (reason) {
         appendSafetyLog(reason, { failsafe: true });
         console.error(`[forward-demo] FAILSAFE: ${reason}`);
       } else {
-        console.error('[forward-demo] MT5 not connected — open Exness terminal and log in');
+        console.error(`[forward-demo] ${BROKER_LABEL} not connected`);
       }
       return;
     }
@@ -261,7 +293,7 @@ async function tickOnce(session: SessionState): Promise<void> {
       appendSafetyLog(reason, { failsafe: true });
       console.error(`[forward-demo] FAILSAFE: ${reason}`);
     } else {
-      console.error(`[forward-demo] MT5 API error: ${msg}`);
+      console.error(`[forward-demo] ${BROKER_LABEL} API error: ${msg}`);
     }
     return;
   }
@@ -399,7 +431,9 @@ async function tickOnce(session: SessionState): Promise<void> {
     intent.entry != null && intent.sl != null
       ? Math.abs(intent.entry - intent.sl) / cfg.pipSize
       : 20;
-  const volume = lotsForRisk(status.equity, slPips, status.usdPerPip);
+  const volume = USE_BINANCE
+    ? await binanceQuantityForIntent(status.equity, intent.entry, intent.sl, cfg.pipSize)
+    : lotsForRisk(status.equity, slPips, status.usdPerPip);
   const setup =
     intent.setup === 'P1' || intent.setup === 'P2' || intent.setup === 'P3' ? intent.setup : 'NONE';
   const idemKey = orderIdempotencyKey(bar.t, intent.side, setup);
@@ -427,15 +461,22 @@ async function tickOnce(session: SessionState): Promise<void> {
     return;
   }
 
+  const useBinance = USE_BINANCE;
+  const riskUsd = status.equity * RISK_PCT;
   const r = await executeBrokerRoutes({
     intent,
-    useMt5: true,
+    useMt5: !useBinance,
     mt5BaseUrl: MT5_API,
     mt5Volume: volume,
+    useBinance,
+    binanceBaseUrl: BINANCE_API,
+    binanceQuantity: useBinance ? volume : undefined,
+    riskUsd: useBinance ? riskUsd : undefined,
     symbol: SYMBOL,
   });
 
   if (r.anyOk) {
+    recordApiSuccess(safety);
     markOrderExecuted(safety, bar.t, idemKey);
     session.tradeCountToday += 1;
     const prev = { rows: journalRows, count: journalRows.length };
@@ -505,9 +546,14 @@ async function main() {
   if (!session || now >= session.endMs) {
     const startMs = now;
     const endMs = startMs + DAYS * 86400000;
-    const st = await mt5Status();
+    const st = await brokerStatus();
     if (!st.connected) {
-      console.error('Start Exness MT5 + login, then: npm run mt5-api');
+      if (USE_BINANCE) {
+        console.error('Start Binance bridge: cd binance_trading_system/python && .\\start-api.ps1');
+        if (BROKER_MODE === 'paper') console.error('  Set BINANCE_PAPER=1 for simulated fills');
+      } else {
+        console.error('Start Exness MT5 + login, then: npm run mt5-api');
+      }
       process.exit(1);
     }
     session = {
@@ -527,7 +573,8 @@ async function main() {
     console.error(`[forward-demo] Session started → ${session.endsAt}`);
     console.error(`[forward-demo] Server: ${st.server} · equity $${st.equity.toFixed(2)}`);
     console.error(`[forward-demo] Log: ${forwardDemoLogPath()}`);
-    if (isDry) console.error('[forward-demo] DRY-RUN — no MT5 orders');
+    console.error(`[forward-demo] Broker: ${BROKER_LABEL} · symbol ${SYMBOL}`);
+    if (isDry) console.error(`[forward-demo] DRY-RUN — no ${BROKER_LABEL} orders`);
   } else {
     session.dryRun = isDry;
     saveSession(session);
@@ -541,7 +588,7 @@ async function main() {
         ? 'failsafe'
         : 'CLI --dry-run'
     : 'LIVE ORDERS ENABLED';
-  console.error(`[forward-demo] Poll every ${pollSec}s · risk ${(RISK_PCT * 100).toFixed(2)}% · ${dryLabel}`);
+  console.error(`[forward-demo] Poll every ${pollSec}s · risk ${(RISK_PCT * 100).toFixed(2)}% · ${BROKER_LABEL} · ${dryLabel}`);
 
   const runTick = async () => {
     const s = loadSession();

@@ -1,0 +1,154 @@
+"""
+In-memory paper trading for BSV3.2 Binance migration.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class PaperPosition:
+    symbol: str
+    side: str
+    volume: float
+    price_open: float
+    sl: float | None
+    tp: float | None
+    magic: int
+    opened_at: float = field(default_factory=time.time)
+
+
+class PaperStore:
+    def __init__(self, equity: float = 50_000.0):
+        self.equity = equity
+        self.balance = equity
+        self._positions: list[PaperPosition] = []
+        self._last_tick: dict[str, dict[str, float]] = {}
+        self._deals: list[dict[str, Any]] = []
+
+    def set_tick(self, symbol: str, bid: float, ask: float) -> None:
+        self._last_tick[symbol.upper()] = {"bid": bid, "ask": ask}
+        self._check_exits(symbol.upper())
+
+    def _mid(self, symbol: str) -> float | None:
+        t = self._last_tick.get(symbol.upper())
+        if not t:
+            return None
+        return (t["bid"] + t["ask"]) / 2
+
+    def _check_exits(self, symbol: str) -> None:
+        mid = self._mid(symbol)
+        if mid is None:
+            return
+        remaining: list[PaperPosition] = []
+        for p in self._positions:
+            if p.symbol != symbol:
+                remaining.append(p)
+                continue
+            hit_sl = p.sl is not None and (
+                (p.side == "BUY" and mid <= p.sl) or (p.side == "SELL" and mid >= p.sl)
+            )
+            hit_tp = p.tp is not None and (
+                (p.side == "BUY" and mid >= p.tp) or (p.side == "SELL" and mid <= p.tp)
+            )
+            if hit_sl or hit_tp:
+                pnl = (mid - p.price_open) * p.volume * (1 if p.side == "BUY" else -1)
+                self.balance += pnl
+                self.equity = self.balance
+                self._deals.append(
+                    {
+                        "ticket": len(self._deals) + 1,
+                        "symbol": p.symbol,
+                        "type": p.side,
+                        "volume": p.volume,
+                        "price": mid,
+                        "profit": pnl,
+                        "time": int(time.time() * 1000),
+                    }
+                )
+            else:
+                remaining.append(p)
+        self._positions = remaining
+
+    def positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        sym = symbol.upper() if symbol else None
+        out = []
+        for i, p in enumerate(self._positions):
+            if sym and p.symbol != sym:
+                continue
+            mid = self._mid(p.symbol) or p.price_open
+            pnl = (mid - p.price_open) * p.volume * (1 if p.side == "BUY" else -1)
+            out.append(
+                {
+                    "ticket": i + 1,
+                    "symbol": p.symbol,
+                    "type": p.side,
+                    "volume": p.volume,
+                    "price_open": p.price_open,
+                    "sl": p.sl or 0,
+                    "tp": p.tp or 0,
+                    "profit": pnl,
+                    "magic": p.magic,
+                }
+            )
+        return out
+
+    def has_open(self, symbol: str) -> bool:
+        sym = symbol.upper()
+        return any(p.symbol == sym for p in self._positions)
+
+    def order_market(
+        self,
+        symbol: str,
+        side: str,
+        volume: float,
+        sl: float | None,
+        tp: float | None,
+        magic: int,
+    ) -> dict[str, Any]:
+        sym = symbol.upper()
+        if self.has_open(sym):
+            return {"ok": False, "error": "position_already_open"}
+        tick = self._last_tick.get(sym)
+        if not tick:
+            return {"ok": False, "error": "no tick — call set_tick first"}
+        fill = tick["ask"] if side.upper() == "BUY" else tick["bid"]
+        intended = fill
+        self._positions.append(
+            PaperPosition(sym, side.upper(), volume, fill, sl, tp, magic)
+        )
+        deal_id = len(self._deals) + 1
+        self._deals.append(
+            {
+                "ticket": deal_id,
+                "symbol": sym,
+                "type": side.upper(),
+                "volume": volume,
+                "price": fill,
+                "profit": 0.0,
+                "time": int(time.time() * 1000),
+            }
+        )
+        return {
+            "ok": True,
+            "symbol": sym,
+            "side": side.upper(),
+            "volume": volume,
+            "intended_price": intended,
+            "fill_price": fill,
+            "spread_pips": (tick["ask"] - tick["bid"]) / 0.1,
+            "slippage_pips": 0.0,
+            "latency_ms": 1.0,
+            "order": int(time.time()),
+            "deal": int(time.time()),
+            "broker": "binance-paper",
+        }
+
+    def recent_deals(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self._deals[-max(1, limit) :]
+
+
+paper_store = PaperStore()
