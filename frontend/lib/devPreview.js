@@ -18,7 +18,10 @@ export function useMockApi() {
 
 export function skipSplash() {
   if (!isDevPreview()) return false;
-  return process.env.EXPO_PUBLIC_SKIP_SPLASH !== '0';
+  if (process.env.EXPO_PUBLIC_SKIP_SPLASH !== '0') {
+    return true;
+  }
+  return false;
 }
 
 export function devScreens() {

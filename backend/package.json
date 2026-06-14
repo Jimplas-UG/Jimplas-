@@ -15,6 +15,7 @@
     "backtest:3yr": "npx tsx scripts/run-3yr-backtest.ts",
     "backtest:3mo": "npx tsx scripts/run-3mo-autotrade-backtest.ts",
     "backtest:xau12mo": "npx tsx scripts/run-xau-12mo-yahoo-backtest.ts",
+    "backtest:xau12mo:binance": "npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --binance --live-profile --from=2025-06-13 --to=2026-06-13 --out-suffix=binance-xau12mo",
     "backtest:xau12mo:mt5": "npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --mt5-api=http://127.0.0.1:8765 --equity-from-mt5 --risk-pct=1",
     "backtest:xau12mo:realistic": "npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --exness --equity-from-mt5 --risk-pct=1 --realistic --broker-sl-pips=20 --live-profile",
     "backtest:xau:exness:jan-now": "npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --from=2026-01-01 --to=2026-05-20 --exness --equity-from-mt5 --risk-pct=1 --realistic --broker-sl-pips=20 --live-profile --out-suffix=exness-jan-now",

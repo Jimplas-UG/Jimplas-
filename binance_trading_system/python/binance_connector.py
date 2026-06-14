@@ -92,8 +92,10 @@ class BinanceConnector:
         params: dict[str, Any] | None = None,
         signed: bool = False,
         timeout: float = 15.0,
+        base_url: str | None = None,
     ) -> Any:
         params = dict(params or {})
+        root = (base_url or self.base_url).rstrip("/")
         if signed:
             params["timestamp"] = int(time.time() * 1000)
             params["recvWindow"] = 10000
@@ -103,10 +105,10 @@ class BinanceConnector:
                 query.encode("utf-8"),
                 hashlib.sha256,
             ).hexdigest()
-            url = f"{self.base_url}{path}?{query}&signature={sig}"
+            url = f"{root}{path}?{query}&signature={sig}"
         else:
             qs = urllib.parse.urlencode(params) if params else ""
-            url = f"{self.base_url}{path}" + (f"?{qs}" if qs else "")
+            url = f"{root}{path}" + (f"?{qs}" if qs else "")
 
         req = urllib.request.Request(url, method=method, headers=self._headers(signed))
         try:
@@ -269,6 +271,12 @@ class BinanceConnector:
     def tick(self, symbol: str | None = None) -> dict[str, Any] | None:
         return self.book_ticker(symbol)
 
+    def _klines_base_url(self) -> str:
+        """Public klines — mainnet has full XAUUSDT history; testnet is too shallow for backtests."""
+        if _truthy(os.environ.get("BINANCE_KLINES_TESTNET", "0")):
+            return self.base_url
+        return MAINNET
+
     def bars_m30(self, symbol: str | None = None, count: int = 320) -> list[dict[str, Any]]:
         sym = (symbol or self.cfg.symbol).upper()
         n = max(50, min(1500, int(count)))
@@ -276,6 +284,7 @@ class BinanceConnector:
             "GET",
             "/fapi/v1/klines",
             {"symbol": sym, "interval": "30m", "limit": n},
+            base_url=self._klines_base_url(),
         )
         return self._klines_to_bars(data)
 
@@ -287,6 +296,7 @@ class BinanceConnector:
         out: list[dict[str, Any]] = []
         cursor = t0
         m30_ms = 30 * 60 * 1000
+        klines_base = self._klines_base_url()
         while cursor < t1:
             data = self._request(
                 "GET",
@@ -298,6 +308,7 @@ class BinanceConnector:
                     "endTime": t1,
                     "limit": 1500,
                 },
+                base_url=klines_base,
             )
             if not data:
                 break
@@ -309,9 +320,11 @@ class BinanceConnector:
                     out.append(bar)
             last_t = chunk[-1]["t"]
             next_cursor = last_t + m30_ms
-            if next_cursor <= cursor or len(data) < 1500:
+            if next_cursor <= cursor:
                 break
             cursor = next_cursor
+            if len(data) < 1500:
+                break
         if not out:
             return []
         dedup: dict[int, dict[str, Any]] = {b["t"]: b for b in out}

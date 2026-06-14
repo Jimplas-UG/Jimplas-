@@ -22,6 +22,7 @@
  *   npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --max-daily-trades=10
  *   npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --from=2026-01-01 --to=2026-05-18 --live-profile --mt5-api=http://127.0.0.1:8765
  *   npx tsx scripts/run-xau-12mo-yahoo-backtest.ts ... --export-closed-trades=scripts/mc-seed-journal.json
+ *   npx tsx scripts/run-xau-12mo-yahoo-backtest.ts --binance --from=2025-06-13 --to=2026-06-13 --live-profile
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -380,7 +381,26 @@ function readMt5CsvPathFromArgs(): string | null {
   return null;
 }
 
+function useBinanceFromArgs(): boolean {
+  return process.argv.slice(2).some((a) => a === '--binance' || a.startsWith('--binance-api=') || a === '--binance-api');
+}
+
+function readBinanceApiUrlFromArgs(): string | null {
+  if (!useBinanceFromArgs()) return null;
+  const env = process.env.BINANCE_API_URL?.trim();
+  if (env) return env.replace(/\/$/, '');
+  const argv = process.argv.slice(2);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a.startsWith('--binance-api=')) return a.slice('--binance-api='.length).replace(/\/$/, '');
+    if (a === '--binance-api' && argv[i + 1]) return argv[i + 1]!.replace(/\/$/, '');
+    if (a === '--binance') return 'http://127.0.0.1:8766';
+  }
+  return 'http://127.0.0.1:8766';
+}
+
 function readMt5ApiUrlFromArgs(): string | null {
+  if (useBinanceFromArgs()) return null;
   const env = process.env.MT5_API_URL?.trim();
   if (env) return env.replace(/\/$/, '');
   const argv = process.argv.slice(2);
@@ -422,6 +442,83 @@ async function fetchMt5ApiM30Bars(
   const j = (await res.json()) as { bars?: Bar[]; symbol?: string };
   const bars = Array.isArray(j.bars) ? j.bars : [];
   return bars.filter((x) => Number.isFinite(x.t) && Number.isFinite(x.c)).sort((a, b) => a.t - b.t);
+}
+
+async function fetchBinanceApiM30Bars(
+  baseUrl: string,
+  symbol: string,
+  fromMs: number,
+  toMs: number
+): Promise<Bar[]> {
+  const b = baseUrl.replace(/\/$/, '');
+  const url = `${b}/api/bars/${encodeURIComponent(symbol)}?from_ms=${fromMs}&to_ms=${toMs}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Binance bars HTTP ${res.status}: ${txt.slice(0, 300)}`);
+  }
+  const j = (await res.json()) as { bars?: Bar[]; symbol?: string };
+  const bars = Array.isArray(j.bars) ? j.bars : [];
+  return bars.filter((x) => Number.isFinite(x.t) && Number.isFinite(x.c)).sort((a, b) => a.t - b.t);
+}
+
+async function fetchBinanceBrokerContext(
+  baseUrl: string,
+  symbol: string,
+  pipSize: number,
+  fallbackUsdPerPip: number
+): Promise<Mt5BrokerContext> {
+  const b = baseUrl.replace(/\/$/, '');
+  let equity: number | null = null;
+  let balance: number | null = null;
+  let server: string | null = 'binance-futures';
+  let currency: string | null = 'USDT';
+  try {
+    const res = await fetch(`${b}/api/status`);
+    if (res.ok) {
+      const j = (await res.json()) as {
+        connected?: boolean;
+        paper?: boolean;
+        testnet?: boolean;
+        account?: { equity?: number; balance?: number };
+      };
+      if (j.connected && j.account) {
+        const eq = j.account.equity;
+        const bal = j.account.balance;
+        if (eq != null && Number.isFinite(eq) && eq > 0) equity = eq;
+        if (bal != null && Number.isFinite(bal) && bal > 0) balance = bal;
+      }
+      server = j.testnet ? 'binance-testnet' : j.paper ? 'binance-paper' : 'binance-futures';
+    }
+  } catch {
+    /* offline */
+  }
+
+  let spreadPips = defaultBilshenzConfig.currentSpreadPips;
+  let usdPerPipPerLot = fallbackUsdPerPip;
+  try {
+    const specRes = await fetch(`${b}/api/symbol/${encodeURIComponent(symbol)}?pip_size=${pipSize}`);
+    if (specRes.ok) {
+      const spec = (await specRes.json()) as {
+        spread_pips?: number;
+        usd_per_pip_per_lot?: number;
+      };
+      if (spec.spread_pips != null && Number.isFinite(spec.spread_pips) && spec.spread_pips > 0) {
+        spreadPips = spec.spread_pips;
+      }
+      if (
+        spec.usd_per_pip_per_lot != null &&
+        Number.isFinite(spec.usd_per_pip_per_lot) &&
+        spec.usd_per_pip_per_lot > 0
+      ) {
+        usdPerPipPerLot = spec.usd_per_pip_per_lot;
+      }
+    }
+  } catch {
+    /* spec optional */
+  }
+
+  return { equity, balance, spreadPips, usdPerPipPerLot, server, currency };
 }
 
 function readTradingViewCsvPathFromArgs(): string | null {
@@ -476,22 +573,32 @@ async function main() {
   const windowAnchor = readWindowAnchorFromArgs();
   const maxDailyTrades = readMaxDailyTradesFromArgs();
   const mt5Api = readMt5ApiUrlFromArgs();
-  const useMt5Equity = process.argv.includes('--equity-from-mt5');
+  const binanceApi = readBinanceApiUrlFromArgs();
+  const useMt5Equity = process.argv.includes('--equity-from-mt5') || process.argv.includes('--equity-from-broker');
   const realisticMode = readRealisticFromArgs();
   const slippagePips = readSlippagePipsFromArgs();
   const spreadPipsOverride = readSpreadPipsOverrideFromArgs();
   const outSuffix = readOutSuffixFromArgs();
   const brokerSlCap = readBrokerSlPipsFromArgs();
   let mt5Broker: Mt5BrokerContext | null = null;
-  const symbol = process.env.MT5_SYMBOL?.trim() || 'XAUUSD';
+  const symbol = binanceApi
+    ? process.env.BINANCE_SYMBOL?.trim() || 'XAUUSDT'
+    : process.env.MT5_SYMBOL?.trim() || 'XAUUSD';
 
-  if (useMt5Equity && mt5Api) {
-    mt5Broker = await fetchMt5BrokerContext(
-      mt5Api,
-      symbol,
-      defaultBilshenzConfig.pipSize,
-      defaultBilshenzConfig.simUsdPerEnginePip
-    );
+  if (useMt5Equity && (mt5Api || binanceApi)) {
+    mt5Broker = binanceApi
+      ? await fetchBinanceBrokerContext(
+          binanceApi,
+          symbol,
+          defaultBilshenzConfig.pipSize,
+          defaultBilshenzConfig.simUsdPerEnginePip
+        )
+      : await fetchMt5BrokerContext(
+          mt5Api!,
+          symbol,
+          defaultBilshenzConfig.pipSize,
+          defaultBilshenzConfig.simUsdPerEnginePip
+        );
     const eq = mt5Broker.equity ?? mt5Broker.balance;
     if (eq != null) STARTING_EQUITY_USD = eq;
     else console.error('MT5 connected but no equity in /api/status — using default starting equity');
@@ -538,6 +645,26 @@ async function main() {
       throw new Error(`Too few M30 bars after CSV parse (${m30All.length}). Load more history in TV before export.`);
     }
     dataNote = `TradingView chart export: ${path.basename(tvCsv)} (${raw.length} rows → ${m30All.length} M30 bars)`;
+  } else if (binanceApi) {
+    const fetchEndMs = RANGE_END_MS + 24 * 3600 * 1000;
+    if (!mt5Broker) {
+      mt5Broker = await fetchBinanceBrokerContext(
+        binanceApi,
+        symbol,
+        defaultBilshenzConfig.pipSize,
+        defaultBilshenzConfig.simUsdPerEnginePip
+      );
+    }
+    console.error(
+      `Fetching ${symbol} M30 from Binance via ${binanceApi} (${new Date(FETCH_START_MS).toISOString()} → ${new Date(fetchEndMs).toISOString()}) ...`
+    );
+    m30All = await fetchBinanceApiM30Bars(binanceApi, symbol, FETCH_START_MS, fetchEndMs);
+    if (m30All.length < WARMUP + 100) {
+      throw new Error(
+        `Too few M30 bars from Binance API (${m30All.length}). Check bridge is running: npm run binance-api`
+      );
+    }
+    dataNote = `Binance Futures — ${symbol} M30 (${m30All.length} bars via ${binanceApi})`;
   } else if (mt5Api) {
     const fetchEndMs = RANGE_END_MS + 24 * 3600 * 1000;
     if (!mt5Broker) {
@@ -570,7 +697,7 @@ async function main() {
     const p2 = Math.floor(fetchEndMs / 1000);
     if (!allowYahooFallbackFromArgs()) {
       throw new Error(
-        'No MT5 data source. Start Exness MT5 + start-api.ps1 (port 8765), or pass --mt5-api=… / --mt5-csv=…. Yahoo only with --yahoo-fallback.'
+        'No data source. Use --binance (Binance XAUUSDT), start MT5 + start-api.ps1, pass --mt5-api=… / --mt5-csv=…. Yahoo only with --yahoo-fallback.'
       );
     }
     console.error(

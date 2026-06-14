@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Dimensions, Platform, StyleSheet, View } from 'react-native';
+import { Dimensions, Image, Platform, StyleSheet, View } from 'react-native';
 import Svg, {
   Circle,
   Defs,
@@ -28,8 +28,10 @@ import { CX, CY, DIAMONDS, FRAGMENT_ANCHORS, INNER_HEX, MAIN_HEX, VB } from './l
 
 const AnimatedView = Animated.View;
 
+const BRAND_LOGO = require('../assets/brand/bs-app-logo.png');
+
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-const LOGO_SIZE = Math.min(SCREEN_W * 0.52, 192);
+const LOGO_SIZE = Math.min(SCREEN_W * 0.58, 220);
 
 /** Black + gold ethereal palette (no blue). */
 const COLORS = {
@@ -45,15 +47,15 @@ const COLORS = {
   bronze: '#7A5C18',
 };
 
-/** Hard cap: fade to home within 5s even if engine is still loading. */
-export const SPLASH_MAX_MS = 5000;
+/** Hard cap: cinematic open — fade to home within 8s. */
+export const SPLASH_MAX_MS = 8000;
 
-const WIRE_ASSEMBLY_MS = 1750;
-const MATERIALIZE_MS = 650;
-const GOLD_SWEEP_MS = 550;
-const MIN_GLOW_MS = 300;
-const FADE_MS = 420;
-const START_DELAY_MS = 120;
+const WIRE_ASSEMBLY_MS = 2800;
+const MATERIALIZE_MS = 1000;
+const GOLD_SWEEP_MS = 900;
+const MIN_GLOW_MS = 700;
+const FADE_MS = 500;
+const START_DELAY_MS = 180;
 const ANIM_DONE_MS = START_DELAY_MS + WIRE_ASSEMBLY_MS + MATERIALIZE_MS + GOLD_SWEEP_MS + MIN_GLOW_MS;
 
 const FRAGMENTS = [
@@ -293,7 +295,7 @@ function FragmentSlot({ frag, assembly, lockPulse, materialize }) {
   }));
 
   const solidLayerStyle = useAnimatedStyle(() => ({
-    opacity: materialize.value,
+    opacity: 0,
   }));
 
   return (
@@ -489,6 +491,32 @@ function Particle({ p, assembly, camera }) {
   );
 }
 
+function BrandLogoBitmap({ assembly, materialize, glow, camera }) {
+  const style = useAnimatedStyle(() => {
+    const assemble = assembly.value;
+    const mat = materialize.value;
+    const breathe = 1 + glow.value * 0.06;
+    return {
+      opacity: interpolate(assemble, [0, 0.25, 0.55, 1], [0, 0.2, 0.72, 1], Extrapolation.CLAMP) * mat,
+      transform: [
+        { translateY: interpolate(camera.value, [0, 1], [18, -4]) },
+        {
+          scale:
+            interpolate(assemble, [0, 0.7, 1], [0.68, 0.94, 1], Extrapolation.CLAMP) *
+            interpolate(mat, [0, 1], [0.92, 1.04], Extrapolation.CLAMP) *
+            breathe,
+        },
+      ],
+    };
+  });
+
+  return (
+    <AnimatedView style={[styles.brandLogoWrap, { width: LOGO_SIZE, height: LOGO_SIZE }, style]} pointerEvents="none">
+      <Image source={BRAND_LOGO} style={styles.brandLogoImg} resizeMode="contain" />
+    </AnimatedView>
+  );
+}
+
 function DepthGrid({ camera }) {
   const style = useAnimatedStyle(() => ({
     opacity: 0.06 + camera.value * 0.08,
@@ -571,15 +599,15 @@ export default function CinematicSplash({ appReady = false, onComplete }) {
     lockPulse.value = withDelay(
       wireEnd + 100,
       withRepeat(
-        withSequence(withTiming(1, { duration: 80 }), withTiming(0, { duration: 120 })),
-        4,
+        withSequence(withTiming(1, { duration: 100 }), withTiming(0, { duration: 140 })),
+        5,
         false,
       ),
     );
 
     glow.value = withDelay(
       scanEnd,
-      withTiming(1, { duration: 320, easing: Easing.out(Easing.quad) }),
+      withTiming(1, { duration: 480, easing: Easing.out(Easing.quad) }),
     );
 
     const doneTimer = setTimeout(() => setAnimDone(true), ANIM_DONE_MS);
@@ -598,7 +626,7 @@ export default function CinematicSplash({ appReady = false, onComplete }) {
       return;
     }
     glow.value = withRepeat(
-      withSequence(withTiming(1, { duration: 900 }), withTiming(0.78, { duration: 900 })),
+      withSequence(withTiming(1, { duration: 1100 }), withTiming(0.82, { duration: 1100 })),
       -1,
       true,
     );
@@ -677,6 +705,7 @@ export default function CinematicSplash({ appReady = false, onComplete }) {
                 materialize={materialize}
               />
             ))}
+            <BrandLogoBitmap assembly={assembly} materialize={materialize} glow={glow} camera={camera} />
             <GoldLightSweep sweep={sweep} materialize={materialize} />
             <LockSparks lockPulse={lockPulse} materialize={materialize} />
           </View>
@@ -855,5 +884,15 @@ const styles = StyleSheet.create({
     shadowOpacity: 1,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 0 },
+  },
+  brandLogoWrap: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 12,
+  },
+  brandLogoImg: {
+    width: '100%',
+    height: '100%',
   },
 });
