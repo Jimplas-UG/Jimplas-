@@ -319,9 +319,10 @@ function engineReducer(state, action) {
  * @param {number} [p.initialTradeCount]
  * @param {'live'|'backtest'} [p.runMode]
  * @param {number} [p.backtestEndIndex] — inclusive M30 index into the full synthetic series (only when runMode === 'backtest')
- * @param {import('../engine').MarketBundle | null} [p.mt5MarketBundle] — live M30 bundle from MT5 API (replaces synthetic when set)
- * @param {boolean} [p.useMt5Data] — when true in live mode, do not build synthetic bars (wait for MT5 bundle)
- * @param {boolean} [p.mt5Connected] — blocks synthetic bundle while MT5 bridge is on (live mode)
+ * @param {import('../engine').MarketBundle | null} [p.brokerMarketBundle] — live M30 bundle from Binance bridge
+ * @param {boolean} [p.useBrokerData] — when true, do not build synthetic bars (wait for bridge bundle)
+ * @param {boolean} [p.brokerFeedReady] — blocks synthetic bundle while Binance feed is loading
+ * @param {boolean} [p.noSyntheticFallback] — never fall back to synthetic bars (Binance live feed)
  * @param {boolean} [p.countSignalTowardCap] — when false, journal row on signal but daily cap increments only via broker ACK
  * @param {number|null} [p.accountEquity] — live account equity for desk daily-loss / drawdown gates
  */
@@ -339,15 +340,16 @@ export function useBilshenzMarketEngine({
   initialTradeCount = 0,
   runMode = 'live',
   backtestEndIndex = 0,
-  mt5MarketBundle = null,
-  useMt5Data = false,
-  mt5Connected = false,
+  brokerMarketBundle = null,
+  useBrokerData = false,
+  brokerFeedReady = false,
+  noSyntheticFallback = false,
   countSignalTowardCap = true,
   accountEquity = null,
 }) {
   const anchorPriceRef = useRef(price);
   const baseRef = useRef(null);
-  const prevUseMt5Ref = useRef(useMt5Data);
+  const prevUseBrokerRef = useRef(useBrokerData);
   const peakEquityRef = useRef(0);
   const dayStartEquityRef = useRef(0);
   const equityDayRef = useRef('');
@@ -365,34 +367,34 @@ export function useBilshenzMarketEngine({
   }, [accountEquity]);
 
   useEffect(() => {
-    if (!useMt5Data) {
-      if (prevUseMt5Ref.current && runMode === 'live') {
+    if (!useBrokerData) {
+      if (prevUseBrokerRef.current && runMode === 'live') {
         baseRef.current = null;
         setBundleReady(false);
       }
-      prevUseMt5Ref.current = false;
+      prevUseBrokerRef.current = false;
       return;
     }
     if (runMode !== 'live' && runMode !== 'backtest') return;
-    if (!mt5MarketBundle?.m30?.length) {
+    if (!brokerMarketBundle?.m30?.length) {
       baseRef.current = null;
       setBundleReady(false);
       return;
     }
-    baseRef.current = mt5MarketBundle;
-    anchorPriceRef.current = mt5MarketBundle.m30[mt5MarketBundle.m30.length - 1].c;
+    baseRef.current = brokerMarketBundle;
+    anchorPriceRef.current = brokerMarketBundle.m30[brokerMarketBundle.m30.length - 1].c;
     setBundleReady(true);
-    prevUseMt5Ref.current = true;
-  }, [mt5MarketBundle, runMode, useMt5Data]);
+    prevUseBrokerRef.current = true;
+  }, [brokerMarketBundle, runMode, useBrokerData]);
 
   useEffect(() => {
     let cancelled = false;
     const barCount = Platform.OS === 'web' ? 480 : 320;
     const build = () => {
       if (cancelled || baseRef.current) return;
-      if (useMt5Data && mt5MarketBundle?.m30?.length) return;
-      if (runMode === 'live' && (useMt5Data || mt5Connected)) return;
-      if (runMode === 'backtest' && useMt5Data) return;
+      if (useBrokerData && brokerMarketBundle?.m30?.length) return;
+      if (runMode === 'live' && (useBrokerData || brokerFeedReady)) return;
+      if (runMode === 'backtest' && useBrokerData) return;
       baseRef.current = buildSyntheticMarketBundle({
         anchorClose: anchorPriceRef.current,
         count: barCount,
@@ -404,11 +406,12 @@ export function useBilshenzMarketEngine({
       cancelled = true;
       handle.cancel?.();
     };
-  }, [runMode, mt5MarketBundle, useMt5Data, mt5Connected]);
+  }, [runMode, brokerMarketBundle, useBrokerData, brokerFeedReady]);
 
-  /** Release APK: don't block UI if MT5 bridge never responds. */
+  /** Don't block UI forever if bridge never responds (non-Binance builds only). */
   useEffect(() => {
-    if (bundleReady || runMode !== 'live' || !useMt5Data || !mt5Connected) return;
+    if (bundleReady || runMode !== 'live' || !useBrokerData || !brokerFeedReady) return;
+    if (noSyntheticFallback) return;
     const waitMs = USE_REMOTE_DESK ? 1200 : 6000;
     const t = setTimeout(() => {
       if (baseRef.current) return;
@@ -419,7 +422,7 @@ export function useBilshenzMarketEngine({
       setBundleReady(true);
     }, waitMs);
     return () => clearTimeout(t);
-  }, [bundleReady, runMode, useMt5Data, mt5Connected]);
+  }, [bundleReady, runMode, useBrokerData, brokerFeedReady, noSyntheticFallback]);
 
   const [state, dispatch] = useReducer(engineReducer, {
     journalRows: [],
@@ -460,10 +463,10 @@ export function useBilshenzMarketEngine({
     }
     const lastDx = base.dxyCloseSeries?.length ? base.dxyCloseSeries[base.dxyCloseSeries.length - 1] : 99;
     const lastUy = base.us10yCloseSeries?.length ? base.us10yCloseSeries[base.us10yCloseSeries.length - 1] : 4.35;
-    const dx = useMt5Data ? (dxy ?? lastDx) : dxy;
-    const uy = useMt5Data ? (us10y ?? lastUy) : (us10y ?? 4.35);
+    const dx = useBrokerData ? (dxy ?? lastDx) : dxy;
+    const uy = useBrokerData ? (us10y ?? lastUy) : (us10y ?? 4.35);
     return patchBundleLast(base, price, dx, uy);
-  }, [bundleReady, runMode, clampedBtEnd, price, dxy, us10y, useMt5Data]);
+  }, [bundleReady, runMode, clampedBtEnd, price, dxy, us10y, useBrokerData]);
 
   const cfg = useMemo(() => {
     const cap = Number.isFinite(maxDailyTrades) ? Math.max(1, Math.min(10, Math.floor(maxDailyTrades))) : 5;

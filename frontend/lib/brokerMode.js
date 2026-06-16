@@ -1,14 +1,20 @@
-/** Broker execution mode — mt5 (default) | binance | paper */
+import { TRADING_SYMBOL } from './tradingSymbol';
+
+/** Binance Futures — live keys or paper simulator. */
 export function getBrokerMode() {
-  const m = (process.env.EXPO_PUBLIC_BROKER_MODE || 'mt5').trim().toLowerCase();
-  return m === 'binance' || m === 'paper' ? m : 'mt5';
+  const m = (process.env.EXPO_PUBLIC_BROKER_MODE || 'binance').trim().toLowerCase();
+  return m === 'paper' ? 'paper' : 'binance';
 }
 
+export function isPaperBroker() {
+  return getBrokerMode() === 'paper';
+}
+
+/** @deprecated alias — app is Binance-only */
 export function isBinanceBroker() {
-  const m = getBrokerMode();
-  return m === 'binance' || m === 'paper';
+  return true;
 }
 
 export function defaultSymbolForBroker() {
-  return isBinanceBroker() ? 'XAUUSDT' : 'XAUUSD';
+  return TRADING_SYMBOL;
 }

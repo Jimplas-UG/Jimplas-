@@ -1,4 +1,3 @@
-import { isBinanceBroker } from './brokerMode';
 import { engineTickSize, distanceUnit } from './tickUnits';
 
 export function contractSizeSubtitle(riskUsd, structuralSlTicks, sizingSlTicks, tickValueUsd, cfg) {
@@ -15,14 +14,14 @@ export function beTriggerLabel(beOffsetPrice, cfg) {
   const tick = engineTickSize(cfg);
   const ticks = Math.max(1, Math.round(beOffsetPrice / tick));
   const unit = distanceUnit();
-  return isBinanceBroker() ? `BE @ +${ticks} ${unit}s` : `BE @ +${ticks}p`;
+  return `BE @ +${ticks} ${unit}s`;
 }
 
 export function sizingModeLabel(cfg) {
   const fixed = cfg?.journalSizingSlTicks ?? cfg?.journalSizingSlPips ?? 0;
   const unit = distanceUnit();
   if (fixed > 0) return `${fixed}${unit} risk contracts`;
-  return isBinanceBroker() ? 'SL-sized contracts' : 'SL-sized lots';
+  return 'SL-sized contracts';
 }
 
 /** @deprecated */

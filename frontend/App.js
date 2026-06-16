@@ -23,9 +23,9 @@ import Slider from '@react-native-community/slider';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import BilshenzHeader from './components/BilshenzHeader';
+import BinanceStatusStrip from './components/BinanceStatusStrip';
 import GeoPoliticalTicker from './components/GeoPoliticalTicker';
 
-const Mt5BridgePanelLazy = lazy(() => import('./components/Mt5BridgePanel'));
 const BinanceBridgePanelLazy = lazy(() => import('./components/BinanceBridgePanel'));
 import {
   buildBrokerOrderIntent,
@@ -33,12 +33,19 @@ import {
   executeBrokerRoutes,
   postTelegramSignalRelay,
 } from './brokerClient';
-import { Mt5BridgeProvider, useMt5Bridge } from './contexts/Mt5BridgeContext';
 import { BinanceBridgeProvider, useBinanceBridge } from './contexts/BinanceBridgeContext';
-import { isBinanceBroker, defaultSymbolForBroker } from './lib/brokerMode';
+import { defaultSymbolForBroker } from './lib/brokerMode';
+import { TRADING_PAIR_LABEL, TRADING_SYMBOL } from './lib/tradingSymbol';
 import { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';
 import { mapJournalToHistRows, mapSessionBitsFromEngine, mapSrFromEngine } from './hooks/deskComputeLocal';
-import { mapMt5DealsToHistRows, mt5DealsDailyPnl, mt5DealsTotalPnl } from './lib/journalHistMap';
+import {
+  filterJournalRowsByRange,
+  filterBinanceDealsByRange,
+  HIST_RANGE_OPTIONS,
+  mapBinanceDealsToHistRows,
+  brokerDealsDailyPnl,
+  brokerDealsTotalPnl,
+} from './lib/journalHistMap';
 import { useBilshenzMarketEngine } from './hooks/useBilshenzMarketEngine';
 import BootFallback from './components/BootFallback';
 import { useBrokerLiveFeed } from './hooks/useBrokerLiveFeed';
@@ -342,9 +349,12 @@ function LeftColumn({ sr, dxy }) {
   const { colors: C, styles } = useBilshenzTheme();
   const eng = useContext(BilshenzEngineCtx);
   const snap = eng?.snapshot;
-  const useRealMt5 = !!eng?.useRealMt5;
-  const useMt5Paper = !!eng?.useMt5PaperBacktest;
-  const dxyLive = snap?.dxyClose ?? (useRealMt5 || useMt5Paper ? null : dxy);
+  const useBrokerSession = !!eng?.useBrokerSession;
+  const useLiveQuotesCtx = !!eng?.useLiveQuotes;
+  const liveData = useBrokerSession || useLiveQuotesCtx;
+  const liveTag = eng?.liveBrokerLabel ?? (liveData ? 'BINANCE' : null);
+  const usePaperMode = !!eng?.usePaperBacktest;
+  const dxyLive = snap?.dxyClose ?? (useBrokerSession || usePaperMode ? null : dxy);
   const cfg = eng?.cfg;
   const bias = snap?.bias;
   const risk = snap?.risk;
@@ -401,11 +411,11 @@ function LeftColumn({ sr, dxy }) {
         ? '⚠ MEDIUM GEO — monitor headlines\nSize capped per protocol'
         : 'GEO filter clear — full protocol sizing';
 
-  const liveBadge = useRealMt5 ? 'MT5 LIVE' : useMt5Paper ? 'MT5 PAPER BT' : 'SIM';
+  const liveBadge = liveData ? `${liveTag} LIVE` : usePaperMode ? 'BINANCE PAPER BT' : 'SIM';
 
   return (
     <View style={styles.leftCol}>
-      <Panel shell={{}} head={{ title: SHOW_STRATEGY_INTEL ? 'HTF Bias · Jimplas' : 'HTF Bias', badge: useRealMt5 ? 'MT5 · H4/D1' : 'H4 EMA50' }}>
+      <Panel shell={{}} head={{ title: SHOW_STRATEGY_INTEL ? 'HTF Bias · Jimplas' : 'HTF Bias', badge: liveData ? `${liveTag} · H4/D1` : 'H4 EMA50' }}>
         <View style={styles.biasHero}>
           <Text style={styles.biasTag}>OVERALL BIAS</Text>
           <Text style={[styles.biasWord, biasWordStyle]}>{biasWord}</Text>
@@ -492,7 +502,7 @@ function LeftColumn({ sr, dxy }) {
         headTint={styles.gmHeaderTint}
         head={{
           title: 'Geopolitical Filter',
-          badge: useRealMt5 ? 'MT5 · v3' : 'NEW · v3',
+          badge: liveData ? `${liveTag} · v3` : 'NEW · v3',
           titleColor: C.red,
           badgeColor: C.gold,
         }}
@@ -754,6 +764,8 @@ function TradeSignalCompact({
   onSkip,
 }) {
   const { colors: C, styles } = useBilshenzTheme();
+  const engCtx = useContext(BilshenzEngineCtx);
+  const brokerLinked = !!engCtx?.brokerConnected;
   const hasSide = trade?.side === 'BUY' || trade?.side === 'SELL';
   const sideBadgeBg = hasSide
     ? trade.side === 'BUY'
@@ -797,7 +809,7 @@ function TradeSignalCompact({
         </View>
       </Row>
 
-      <Text style={styles.tradeSigPair}>XAU / USD · SPOT GOLD</Text>
+      <Text style={styles.tradeSigPair}>{TRADING_PAIR_LABEL} · BINANCE FUTURES</Text>
       <Text style={[styles.sigPill, pillStyle, styles.tradeSigPill]}>{sigPill.text}</Text>
 
       <Row style={styles.tradeSigSetupRow}>
@@ -836,6 +848,11 @@ function TradeSignalCompact({
           <Text style={styles.skipBtnTxtCompact}>✕ SKIP</Text>
         </TouchableOpacity>
       </Row>
+      {!brokerLinked ? (
+        <Text style={[styles.tradeSigWick, { color: C.amber, marginTop: 6 }]}>
+          Profile → connect API keys for live Binance orders
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -919,9 +936,11 @@ function CenterColumn({
   atrModePill,
   engineTrade,
   histRows,
+  histRange,
+  onHistRangeChange,
   accountEquity,
-  mt5LiveAccount,
-  mt5Account,
+  brokerLiveAccount,
+  brokerAccount,
   variant = 'dashboard',
   compactSignal = false,
 }) {
@@ -929,6 +948,7 @@ function CenterColumn({
   const engCtx = useContext(BilshenzEngineCtx);
   const snap = engCtx?.snapshot;
   const cfg = engCtx?.cfg;
+  const brokerLinked = !!engCtx?.brokerConnected;
   const engineReady = engCtx?.hydrated === true;
   const pip = cfg?.pipSize ?? 0.1;
   const er = snap?.risk;
@@ -978,7 +998,7 @@ function CenterColumn({
   const lotStr = tradeSizing.lots > 0 ? tradeSizing.lots.toFixed(2) : '—';
   const slDist = entPx != null && slPx != null ? Math.abs(entPx - slPx) : 0;
   const approxQty = slDist > 0 ? (tradeSizing.riskUsd / slDist).toFixed(3) : lotStr;
-  const sizeStr = isBinanceBroker() ? approxQty : lotStr;
+  const sizeStr = approxQty;
   const rrDisp =
     sizingSlPips > 0 && tp1Px != null && Number.isFinite(tp1Px)
       ? `1 : ${(Math.abs(tp1Px - entPx) / pip / sizingSlPips).toFixed(1)}`
@@ -996,8 +1016,8 @@ function CenterColumn({
   const athHi = cfg?.athZoneHigh ?? 5602;
   const maxSpr = cfg?.maxSpreadPips ?? 3.5;
   const minRp = cfg?.minRangePips ?? 25;
-  const equityLbl = mt5LiveAccount
-    ? `$${Math.round(accountEquity).toLocaleString('en-US')} MT5`
+  const equityLbl = brokerLiveAccount
+    ? `$${Math.round(accountEquity).toLocaleString('en-US')} BINANCE`
     : `$${Math.round(SIM_DESK_EQUITY / 1000)}k sim`;
   const riskAtPct = Math.round(accountEquity * (effRiskPct / 100));
   const normPct = cfg?.riskPctAtrNormal ?? 1;
@@ -1012,7 +1032,7 @@ function CenterColumn({
       : 'Structure target';
   const slSub =
     trade?.side && (cfg?.journalSizingSlPips ?? 0) > 0 && slPipsE > sizingSlPips + 0.05
-      ? `Chart SL · ${isBinanceBroker() ? 'contracts' : 'lots'} on ${sizingSlPips}${u} risk`
+      ? `Chart SL · contracts on ${sizingSlPips}${u} risk`
       : trade?.side === 'SELL'
         ? 'Above entry + buffer'
         : trade?.side === 'BUY'
@@ -1053,7 +1073,7 @@ function CenterColumn({
             <Row style={styles.sigL}>
               <Text style={[styles.sigAction, { color: sideColor }]}>{sideLbl}</Text>
               <View style={styles.sigInfo}>
-                <Text style={styles.sigPair}>XAU / USD — SPOT GOLD</Text>
+                <Text style={styles.sigPair}>{TRADING_PAIR_LABEL} · BINANCE FUTURES</Text>
                 <Text style={[styles.sigPill, pillStyle]}>{sigPill.text}</Text>
                 <Text style={styles.sigConf}>
                   ⬡ ENGINE GATES · CONFIDENCE {engineTrade?.confidencePct?.toFixed(1) ?? '—'}%
@@ -1088,6 +1108,11 @@ function CenterColumn({
               <TouchableOpacity activeOpacity={0.85} style={styles.skipBtn} onPress={onSkip}>
                 <Text style={styles.skipBtnTxt}>✕ SKIP</Text>
               </TouchableOpacity>
+              {!brokerLinked ? (
+                <Text style={[styles.sigStrat, { marginTop: 6, color: C.amber }]}>
+                  Profile → connect API keys for live Binance orders
+                </Text>
+              ) : null}
             </View>
           </Row>
         )}
@@ -1183,14 +1208,14 @@ function CenterColumn({
           <View style={[styles.atrBarFill, { width: `${atrFillPct}%` }]} />
         </View>
         <Text style={[styles.modePill, modeCls]}>{atrModePill.text}</Text>
-        <DxyRow l="ATR <50p" v={pctOfBalanceLabel(normPct, accountEquity, mt5LiveAccount)} vc={C.green} />
-        <DxyRow l="ATR 50–100p" v={pctOfBalanceLabel(elevPct, accountEquity, mt5LiveAccount)} vc={C.amber} />
-        <DxyRow l="ATR >100p" v={pctOfBalanceLabel(crisisPct, accountEquity, mt5LiveAccount)} vc={C.red} />
+        <DxyRow l="ATR <50p" v={pctOfBalanceLabel(normPct, accountEquity, brokerLiveAccount)} vc={C.green} />
+        <DxyRow l="ATR 50–100p" v={pctOfBalanceLabel(elevPct, accountEquity, brokerLiveAccount)} vc={C.amber} />
+        <DxyRow l="ATR >100p" v={pctOfBalanceLabel(crisisPct, accountEquity, brokerLiveAccount)} vc={C.red} />
         <DxyRow l="Current Risk" v={currentRiskLbl} vc={C.amber} />
-        {mt5LiveAccount && mt5Account ? (
+        {brokerLiveAccount && brokerAccount ? (
           <DxyRow
-            l="MT5 Equity"
-            v={`$${Math.round(mt5Account.equity ?? accountEquity).toLocaleString('en-US')}`}
+            l="Binance Equity"
+            v={`$${Math.round(brokerAccount.equity ?? accountEquity).toLocaleString('en-US')}`}
             vc={C.text}
           />
         ) : null}
@@ -1271,14 +1296,7 @@ function CenterColumn({
       </Panel>
       ) : null}
 
-      <Panel shell={{}} head={{ title: 'Signal History', badge: 'JIMPLAS · TODAY' }}>
-        <View style={styles.histTableWrap}>
-          <HistHeader />
-          {(histRows ?? SIGNAL_HISTORY_SIM).map((row, i) => (
-            <HistRow key={i} row={row} />
-          ))}
-        </View>
-      </Panel>
+      <SignalHistoryPanel histRows={histRows} histRange={histRange} onHistRangeChange={onHistRangeChange} />
     </View>
   );
 }
@@ -1332,6 +1350,48 @@ function HistHeader() {
       <Text style={[styles.histTh, styles.histColPl]}>P&L</Text>
       <Text style={[styles.histTh, styles.histColRes]}>RES</Text>
     </Row>
+  );
+}
+
+function SignalHistoryPanel({ histRows, histRange, onHistRangeChange }) {
+  const { colors: C, styles } = useBilshenzTheme();
+  const rows = histRows ?? SIGNAL_HISTORY_SIM;
+  const activeOpt = HIST_RANGE_OPTIONS.find((o) => o.id === histRange) ?? HIST_RANGE_OPTIONS[0];
+
+  return (
+    <View style={styles.pnl}>
+      <Row style={styles.ph}>
+        <Text style={styles.phT}>Signal History</Text>
+        <Text style={[styles.phB, { color: C.goldL, borderColor: C.gold }]}>JIMPLAS · {activeOpt.badge}</Text>
+      </Row>
+      <Row style={styles.histRangeRow}>
+        {HIST_RANGE_OPTIONS.map((opt) => {
+          const on = opt.id === histRange;
+          return (
+            <Pressable
+              key={opt.id}
+              onPress={() => onHistRangeChange(opt.id)}
+              style={[styles.histRangeChip, on && styles.histRangeChipOn]}
+              accessibilityRole="button"
+              accessibilityState={{ selected: on }}>
+              <Text style={[styles.histRangeChipTxt, on && styles.histRangeChipTxtOn]}>
+                {opt.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </Row>
+      <View style={styles.pb}>
+        <View style={styles.histTableWrap}>
+          <HistHeader />
+          {rows.length ? (
+            rows.map((row, i) => <HistRow key={`${row[0]}-${row[2]}-${i}`} row={row} />)
+          ) : (
+            <Text style={styles.histEmpty}>No signals in this period.</Text>
+          )}
+        </View>
+      </View>
+    </View>
   );
 }
 
@@ -1408,9 +1468,10 @@ function RightColumn({
   spHigh,
   dayBits,
   accountEquity,
-  mt5LiveAccount,
-  mt5Account,
-  mt5Deals,
+  brokerLiveAccount,
+  brokerAccount,
+  brokerDeals,
+  brokerPositions,
 }) {
   const { colors: C, styles } = useBilshenzTheme();
   const pr = Math.round(pnl);
@@ -1449,9 +1510,9 @@ function RightColumn({
   const simUsd = cfg?.simUsdPerEnginePip ?? 12.5;
   const journalRows = eng?.journalRows ?? [];
   const jStat = journalClosedStats(journalRows, pipRm);
-  const closedUsd = mt5LiveAccount && mt5Deals?.length
-    ? Math.round(mt5DealsDailyPnl(mt5Deals) * 100) / 100
-    : mt5LiveAccount
+  const closedUsd = brokerLiveAccount && brokerDeals?.length
+    ? Math.round(brokerDealsDailyPnl(brokerDeals) * 100) / 100
+    : brokerLiveAccount
       ? Math.round(journalClosedUsd(journalRows, cfg, accountEquity, effPct))
       : Math.round(jStat.netP * simUsd);
   const closedTodayVal = fmtUsd(closedUsd);
@@ -1478,12 +1539,12 @@ function RightColumn({
 
   return (
     <View style={styles.rightCol}>
-      <Panel shell={{}} head={{ title: 'Live P&L', badge: mt5LiveAccount ? 'MT5' : sessTag }}>
+      <Panel shell={{}} head={{ title: 'Live P&L', badge: brokerLiveAccount ? 'BINANCE' : sessTag }}>
         <View style={styles.pnlHero}>
-          <Text style={styles.pnlTag}>{mt5LiveAccount ? 'FLOATING P&L (MT5)' : 'UNREALIZED P&L (USD)'}</Text>
+          <Text style={styles.pnlTag}>{brokerLiveAccount ? 'FLOATING P&L (BINANCE)' : 'UNREALIZED P&L (USD)'}</Text>
           <Text style={[styles.pnlNum, { color: pnlColor }]}>{fmtUsd(pr)}</Text>
           <Text style={styles.pnlPips}>
-            {mt5LiveAccount
+            {brokerLiveAccount
               ? `Account profit · risk ${effPct.toFixed(2)}% = ${fmtUsd(riskUsdNow)}`
               : `${pr >= 0 ? '+' : ''}${(Math.abs(pr) / 10).toFixed(1)} pips · sim`}
           </Text>
@@ -1497,11 +1558,24 @@ function RightColumn({
         </View>
       </Panel>
 
+      {brokerLiveAccount && brokerPositions?.length ? (
+        <Panel shell={{}} head={{ title: 'Open Positions', badge: String(brokerPositions.length) }}>
+          {brokerPositions.map((p, i) => (
+            <DxyRow
+              key={`${p.symbol}-${p.type}-${i}`}
+              l={`${p.type} · ${p.volume} ${p.symbol ?? 'XAUUSDT'}`}
+              v={`$${Number(p.profit ?? 0).toFixed(2)}`}
+              vc={(p.profit ?? 0) >= 0 ? C.green : C.red}
+            />
+          ))}
+        </Panel>
+      ) : null}
+
       {SHOW_STRATEGY_INTEL && g && r ? (
         <Panel
           shell={styles.gmPanelShell}
           headTint={styles.gmHeaderTint}
-          head={{ title: 'Engine gates', badge: mt5LiveAccount ? 'MT5 LIVE' : 'LIVE', titleColor: C.teal, badgeColor: C.gold }}
+          head={{ title: 'Engine gates', badge: brokerLiveAccount ? `${eng?.liveBrokerLabel ?? 'BINANCE'} LIVE` : 'LIVE', titleColor: C.teal, badgeColor: C.gold }}
         >
           <DxyRow l="Session gate" v={g.sessionGate ? 'OPEN' : 'CLOSED'} vc={g.sessionGate ? C.green : C.amber} />
           <DxyRow l="M30 structure" v={g.structureOk ? 'OK' : 'WAIT'} vc={g.structureOk ? C.green : C.amber} />
@@ -1528,7 +1602,7 @@ function RightColumn({
         shell={{}}
         head={{
           title: 'Risk Engine',
-          badge: mt5LiveAccount ? (mt5Account ? 'MT5 BALANCE' : 'MT5…') : 'SIM $50K',
+          badge: brokerLiveAccount ? (brokerAccount ? 'BINANCE BALANCE' : 'BINANCE…') : 'SIM $50K',
         }}
       >
         <Row style={styles.rmHdr}>
@@ -1541,29 +1615,29 @@ function RightColumn({
         <DxyRow
           l="Balance"
           v={
-            mt5LiveAccount
-              ? mt5Account?.balance != null
-                ? `$${Math.round(mt5Account.balance).toLocaleString('en-US')}`
+            brokerLiveAccount
+              ? brokerAccount?.balance != null
+                ? `$${Math.round(brokerAccount.balance).toLocaleString('en-US')}`
                 : 'Loading…'
               : `$${SIM_DESK_EQUITY.toLocaleString('en-US')} (sim)`
           }
           vc={C.text}
         />
-        {mt5LiveAccount ? (
+        {brokerLiveAccount ? (
           <DxyRow
             l="Equity"
             v={
-              mt5Account?.equity != null
-                ? `$${Math.round(mt5Account.equity).toLocaleString('en-US')}`
+              brokerAccount?.equity != null
+                ? `$${Math.round(brokerAccount.equity).toLocaleString('en-US')}`
                 : 'Loading…'
             }
             vc={C.text}
           />
         ) : null}
-        {mt5LiveAccount && mt5Account?.margin_free != null ? (
+        {brokerLiveAccount && brokerAccount?.margin_free != null ? (
           <DxyRow
             l="Free margin"
-            v={`$${Math.round(mt5Account.margin_free).toLocaleString('en-US')}`}
+            v={`$${Math.round(brokerAccount.margin_free).toLocaleString('en-US')}`}
             vc={C.dim}
           />
         ) : null}
@@ -1575,8 +1649,8 @@ function RightColumn({
         <DxyRow l="ATR Mode" v={atrShort} vc={C.amber} />
         <DxyRow l="Effective Risk" v={`${effRiskStr} · ${fmtUsd(riskUsdNow)}`} vc={geoVc} />
         <DxyRow
-          l={isBinanceBroker() ? 'Next trade qty' : 'Next trade lots'}
-          v={openTrade?.side ? (isBinanceBroker() && openSlPips > 0 ? (openSizing.riskUsd / (openSlPips * pipRm)).toFixed(3) : openLotsStr) : '—'}
+          l="Next trade qty"
+          v={openTrade?.side ? (openSlPips > 0 ? (openSizing.riskUsd / (openSlPips * pipRm)).toFixed(3) : openLotsStr) : '—'}
           vc={openTrade?.side ? C.goldL : C.dim}
         />
         <DxyRow
@@ -1737,16 +1811,17 @@ function ProfileTab({
   lastBrokerMsg,
   autoExecuteSignals,
   onAutoExecuteSignalsChange,
-  mt5Connected,
+  brokerConnected,
   paperBtAutoExec,
   onPaperBtAutoExecChange,
-  useMt5PaperBacktest,
+  usePaperBacktest,
 }) {
   const { colors: C, styles } = useBilshenzTheme();
+  const brokerLive = brokerConnected;
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [profileId, setProfileId] = useState('p1');
   const [showSwitchModal, setShowSwitchModal] = useState(false);
   const [nameEdit, setNameEdit] = useState(false);
-  const [defaultLot, setDefaultLot] = useState('0.25');
   const [atrManual, setAtrManual] = useState(false);
   const [notificationsOn, setNotificationsOn] = useState(true);
   const [photoByProfile, setPhotoByProfile] = useState({});
@@ -1850,7 +1925,7 @@ function ProfileTab({
 
   const tierColor = active.tier === 'PRO' ? C.goldL : C.blue;
   const engPr = useContext(BilshenzEngineCtx);
-  const useRealMt5Pr = !!engPr?.useRealMt5;
+  const useBrokerSessionPr = !!engPr?.useBrokerSession;
   const jStatPr = journalClosedStats(engPr?.journalRows ?? [], engPr?.cfg?.pipSize ?? 0.1);
   const effPctPr = effectiveRiskPctFromEngine(
     engPr?.cfg?.geoRisk ?? 'LOW',
@@ -1858,9 +1933,9 @@ function ProfileTab({
     engPr?.cfg
   );
   const eqPr = engPr?.accountEquity ?? SIM_DESK_EQUITY;
-  const totalPlUsd = useRealMt5Pr && engPr?.mt5Deals?.length
-    ? Math.round(mt5DealsTotalPnl(engPr.mt5Deals) * 100) / 100
-    : useRealMt5Pr
+  const totalPlUsd = useBrokerSessionPr && engPr?.brokerDeals?.length
+    ? Math.round(brokerDealsTotalPnl(engPr.brokerDeals) * 100) / 100
+    : useBrokerSessionPr
       ? Math.round(journalClosedUsd(engPr?.journalRows ?? [], engPr?.cfg, eqPr, effPctPr))
       : Math.round(jStatPr.netP * (engPr?.cfg?.simUsdPerEnginePip ?? 12.5));
   const totalPlStr = fmtUsd(totalPlUsd);
@@ -1880,7 +1955,6 @@ function ProfileTab({
     onTelegramRelaySecretChange?.('');
     onTelegramNotifyEnabledChange?.(false);
     onAutoExecuteSignalsChange(false);
-    setDefaultLot('0.25');
     setAtrManual(false);
     setNotificationsOn(true);
     setNameEdit(false);
@@ -1903,6 +1977,73 @@ function ProfileTab({
       contentContainerStyle={[styles.psScroll, { paddingHorizontal: pad, paddingBottom: 8 }]}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}>
+      <Suspense
+        fallback={
+          <View style={{ paddingVertical: 12, paddingHorizontal: pad }}>
+            <Text style={{ color: C.dim, fontSize: 11 }}>Loading broker…</Text>
+          </View>
+        }>
+        <BinanceBridgePanelLazy />
+      </Suspense>
+
+      <View style={[styles.psSettingsCard, { marginTop: 14 }]}>
+        <Text style={styles.psRowLabel}>TRADING</Text>
+        <Text style={[styles.psToggleHint, { marginBottom: 8 }]}>Risk & daily limits</Text>
+        <Text style={styles.psRowLabel}>RISK MODE</Text>
+        <Row style={styles.psSegRow}>
+          {['GEO', 'NORMAL', 'AGGRESSIVE'].map((opt) => (
+            <Pressable
+              key={opt}
+              onPress={() => onRiskModeChange(opt)}
+              style={[styles.psSegChip, riskMode === opt && styles.psSegChipOn, { minHeight: 44, flex: 1 }]}>
+              <Text style={[styles.psSegChipTxt, riskMode === opt && styles.psSegChipTxtOn]} numberOfLines={1}>
+                {opt}
+              </Text>
+            </Pressable>
+          ))}
+        </Row>
+        <View style={styles.psRowDivider} />
+        <Text style={styles.psRowLabel}>MAX TRADES / DAY</Text>
+        <Row style={styles.psSegRow}>
+          {[3, 5, 8].map((n) => (
+            <Pressable
+              key={n}
+              onPress={() => onMaxDailyTradesChange(n)}
+              style={[styles.psSegChip, maxDailyTrades === n && styles.psSegChipOn, { minHeight: 44, flex: 1 }]}>
+              <Text style={[styles.psSegChipTxt, maxDailyTrades === n && styles.psSegChipTxtOn]}>{n}</Text>
+            </Pressable>
+          ))}
+        </Row>
+        <View style={styles.psRowDivider} />
+        <Row style={styles.psToggleRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.psToggleLbl}>AUTO-EXECUTE SIGNALS</Text>
+            <Text style={styles.psToggleHint}>
+              {autoExecuteSignals
+                ? 'ON — sends allowed signals to Binance Futures.'
+                : brokerLive
+                  ? 'OFF — tap EXEC manually on each signal.'
+                  : 'Connect Binance above first.'}
+            </Text>
+          </View>
+          <Switch
+            value={autoExecuteSignals}
+            onValueChange={onAutoExecuteSignalsChange}
+            disabled={!brokerLive || !engineHydrated || runMode !== 'live'}
+            trackColor={{ false: C.border, true: 'rgba(255,61,87,0.45)' }}
+            thumbColor={autoExecuteSignals ? C.red : C.dim2}
+          />
+        </Row>
+      </View>
+
+      <Pressable
+        onPress={() => setShowAdvanced((v) => !v)}
+        style={({ pressed }) => [styles.psResetBtn, { marginTop: 12, marginBottom: 4 }, pressed && { opacity: 0.88 }]}>
+        <Text style={styles.psResetTxt}>{showAdvanced ? '▾ HIDE ADVANCED' : '▸ ADVANCED SETTINGS'}</Text>
+      </Pressable>
+
+      {showAdvanced ? (
+        <>
       <View style={styles.psProfileCard}>
         {Platform.OS === 'ios' ? (
           <BlurView intensity={22} tint="dark" style={[StyleSheet.absoluteFillObject, { borderRadius: 14 }]} />
@@ -1998,47 +2139,10 @@ function ProfileTab({
       <Text style={styles.psSettingsTitle}>APP SETTINGS</Text>
 
       <View style={styles.psSettingsCard}>
-        <Text style={styles.psRowLabel}>RISK MODE</Text>
-        <Row style={styles.psSegRow}>
-          {['GEO', 'NORMAL', 'AGGRESSIVE'].map((opt) => (
-            <Pressable
-              key={opt}
-              onPress={() => onRiskModeChange(opt)}
-              style={[styles.psSegChip, riskMode === opt && styles.psSegChipOn, { minHeight: 44, flex: 1 }]}>
-              <Text style={[styles.psSegChipTxt, riskMode === opt && styles.psSegChipTxtOn]} numberOfLines={1}>
-                {opt}
-              </Text>
-            </Pressable>
-          ))}
-        </Row>
-
-        <View style={styles.psRowDivider} />
-        <Text style={styles.psRowLabel}>MAX TRADES / DAY</Text>
-        <Row style={styles.psSegRow}>
-          {[3, 5, 8].map((n) => (
-            <Pressable
-              key={n}
-              onPress={() => onMaxDailyTradesChange(n)}
-              style={[styles.psSegChip, maxDailyTrades === n && styles.psSegChipOn, { minHeight: 44, flex: 1 }]}>
-              <Text style={[styles.psSegChipTxt, maxDailyTrades === n && styles.psSegChipTxtOn]}>{n}</Text>
-            </Pressable>
-          ))}
-        </Row>
-
-        <View style={styles.psRowDivider} />
-        <Text style={styles.psRowLabel}>DEFAULT LOT</Text>
-        <Row style={styles.psSegRow}>
-          {['0.10', '0.25', '0.50', '1.00'].map((lot) => (
-            <Pressable
-              key={lot}
-              onPress={() => setDefaultLot(lot)}
-              style={[styles.psSegChip, defaultLot === lot && styles.psSegChipOn, { minHeight: 44, flex: 1, paddingHorizontal: 2 }]}>
-              <Text style={[styles.psSegChipTxt, defaultLot === lot && styles.psSegChipTxtOn]} numberOfLines={1} adjustsFontSizeToFit>
-                {lot}
-              </Text>
-            </Pressable>
-          ))}
-        </Row>
+        <Text style={styles.psRowLabel}>POSITION SIZING</Text>
+        <Text style={[styles.psToggleHint, { marginBottom: 8 }]}>
+          Contracts are calculated from your risk % and stop distance on each signal — no manual lot size.
+        </Text>
 
         <View style={styles.psRowDivider} />
         <Row style={styles.psToggleRow}>
@@ -2111,10 +2215,10 @@ function ProfileTab({
         <Text style={styles.psRowLabel}>RUN MODE</Text>
         <Row style={styles.psSegRow}>
           {[
-            { id: 'live', lab: 'LIVE SIM' },
+            { id: 'live', lab: 'LIVE' },
             {
               id: 'backtest',
-              lab: useMt5PaperBacktest ? 'MT5 PAPER BT' : 'BACKTEST',
+              lab: usePaperBacktest ? 'BINANCE PAPER BT' : 'BACKTEST',
             },
           ].map((m) => (
             <Pressable
@@ -2137,9 +2241,9 @@ function ProfileTab({
           <Text style={[styles.psToggleHint, { marginTop: 6 }]}>Wait for engine sync before backtest.</Text>
         )}
         <Text style={[styles.psToggleHint, { marginTop: 8, lineHeight: 16 }]}>
-          {useMt5PaperBacktest
-            ? 'MT5 paper backtest: replays real M30 bars from your terminal. Journal fills on signals — no orders sent to MT5.'
-            : 'Backtest replays M30 history (synthetic unless MT5 is connected in Profile). Live journal is frozen during backtest and restored when you return to LIVE SIM.'}
+          {usePaperBacktest
+            ? 'Paper backtest: replays real XAUUSDT M30 bars from Binance. Journal fills on signals — no orders sent.'
+            : 'Backtest replays M30 history from Binance when the bridge is running. Live journal is frozen during backtest.'}
         </Text>
 
         {runMode === 'backtest' ? (
@@ -2150,9 +2254,9 @@ function ProfileTab({
                 <Text style={styles.psToggleLbl}>PAPER AUTO-EXEC (BACKTEST)</Text>
                 <Text style={styles.psToggleHint}>
                   {paperBtAutoExec
-                    ? 'ON — adds journal rows when signals fire on each replay bar (no MT5 orders).'
+                    ? 'ON — adds journal rows when signals fire on each replay bar (no Binance orders).'
                     : 'OFF — manual EXEC only during backtest.'}
-                  {!mt5Connected ? ' Connect MT5 for real historical bars.' : ''}
+                  {!brokerConnected ? ' Start Binance bridge for real historical bars.' : ''}
                 </Text>
               </View>
               <Switch
@@ -2183,29 +2287,6 @@ function ProfileTab({
         </Row>
 
         <View style={styles.psRowDivider} />
-        <Row style={styles.psToggleRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.psToggleLbl}>AUTO-EXECUTE SIGNALS</Text>
-            <Text style={styles.psToggleHint}>
-              {autoExecuteSignals
-                ? 'ON — auto-sends allowed signals to MT5 when connected.'
-                : mt5Connected
-                  ? 'OFF — manual EXEC only. Turn on to resume auto orders.'
-                  : 'Default ON when MT5 connects (LIVE SIM).'}
-              {!mt5Connected && !brokerWebhookUrl.trim() ? ' Connect MT5 in Profile first.' : ''}
-            </Text>
-          </View>
-          <Switch
-            value={autoExecuteSignals}
-            onValueChange={onAutoExecuteSignalsChange}
-            disabled={(!brokerWebhookUrl.trim() && !mt5Connected) || !engineHydrated || runMode !== 'live'}
-            trackColor={{ false: C.border, true: 'rgba(255,61,87,0.45)' }}
-            thumbColor={autoExecuteSignals ? C.red : C.dim2}
-            style={{ transform: [{ scaleX: 1.05 }, { scaleY: 1.05 }] }}
-          />
-        </Row>
-
-        <View style={styles.psRowDivider} />
         <Text style={styles.psRowLabel}>BROKER WEBHOOK URL</Text>
         <TextInput
           value={brokerWebhookUrl}
@@ -2217,8 +2298,8 @@ function ProfileTab({
           style={styles.psBrokerInput}
         />
         <Text style={[styles.psToggleHint, { marginTop: 6, lineHeight: 15 }]}>
-          Auto/manual EXEC sends webhook (if URL set) and Python MT5 order (if CONNECT MT5). Webhook bridge:
-          myapp/mt5/bridge-server.mjs + PollBridgeEA.mq5 — see myapp/mt5/README.txt.
+          Auto/manual EXEC sends webhook (optional) and Binance Futures market order when connected.
+          Python bridge: binance_trading_system/python — port 8766.
         </Text>
         {lastBrokerMsg ? (
           <Text style={[styles.psToggleHint, { marginTop: 8, color: C.amber }]} numberOfLines={3}>
@@ -2231,8 +2312,7 @@ function ProfileTab({
           <View style={{ flex: 1 }}>
             <Text style={styles.psToggleLbl}>TELEGRAM — ELIGIBLE SIGNALS</Text>
             <Text style={[styles.psToggleHint, { lineHeight: 15 }]}>
-              POST same moment as gated EXEC/auto: relay HTTPS URL hosts your BOT_TOKEN · never paste token in-app
-              (Worker/VPS template in myapp/mt5/README.txt).
+              POST on gated EXEC/auto. Host relay on Cloudflare Worker — never paste bot token here.
             </Text>
           </View>
           <Switch
@@ -2265,15 +2345,8 @@ function ProfileTab({
           style={styles.psBrokerInput}
         />
       </View>
-
-      <Suspense
-        fallback={
-          <View style={{ paddingVertical: 12, paddingHorizontal: pad }}>
-            <Text style={{ color: C.dim, fontSize: 11 }}>Loading broker panel…</Text>
-          </View>
-        }>
-        {isBinanceBroker() ? <BinanceBridgePanelLazy /> : <Mt5BridgePanelLazy />}
-      </Suspense>
+        </>
+      ) : null}
 
       <Pressable onPress={resetDefaults} style={({ pressed }) => [styles.psResetBtn, pressed && { opacity: 0.88 }]}>
         <Text style={styles.psResetTxt}>RESET TO DEFAULTS</Text>
@@ -2332,15 +2405,25 @@ function GodmodeHome({
   sr,
   utcStr,
   histRows,
+  histRange,
+  onHistRangeChange,
   winRatePct,
+  brokerConnected,
+  feedReady,
+  feedError,
+  autoExecuteSignals,
+  onOpenProfile,
 }) {
   const { colors: C, styles } = useBilshenzTheme();
   const eng = useContext(BilshenzEngineCtx);
-  const useRealMt5 = !!eng?.useRealMt5;
-  const mt5Account = eng?.mt5Account;
+  const useBrokerSession = !!eng?.useBrokerSession;
+  const useLiveQuotesCtx = !!eng?.useLiveQuotes;
+  const liveData = useBrokerSession || useLiveQuotesCtx;
+  const liveTag = eng?.liveBrokerLabel ?? (liveData ? 'BINANCE' : null);
+  const brokerAccount = eng?.brokerAccount;
   const tradeCap = eng?.cfg?.maxDailyTrades ?? 5;
   const tradeCountDisp = eng?.hydrated === true ? tradeCount : '—';
-  const livePnl = useRealMt5 && mt5Account?.profit != null ? mt5Account.profit : pnl;
+  const livePnl = useBrokerSession && brokerAccount?.profit != null ? brokerAccount.profit : pnl;
   const pnlRounded = Math.round(livePnl);
   const pnlColor = pnlRounded >= 0 ? C.green : C.red;
   const sessShort = sessionBits.act
@@ -2356,6 +2439,49 @@ function GodmodeHome({
 
   return (
     <View style={styles.ghWrap}>
+      <View style={{ paddingHorizontal: pad, marginTop: 6, marginBottom: 8 }}>
+        <BinanceStatusStrip
+          feedReady={feedReady}
+          feedError={feedError}
+          connected={brokerConnected}
+          autoExecute={autoExecuteSignals}
+          onPressConnect={onOpenProfile}
+        />
+      </View>
+
+      {!brokerConnected ? (
+        <Pressable
+          onPress={onOpenProfile}
+          style={[
+            styles.ghVerdictCard,
+            { marginHorizontal: pad, marginBottom: 8, borderColor: useLiveQuotesCtx ? 'rgba(0,230,118,0.35)' : 'rgba(255,179,0,0.35)' },
+          ]}>
+          <Text style={[styles.ghVerdictLbl, { color: C.goldL }]}>
+            {useLiveQuotesCtx ? 'Market live — connect to trade' : 'Connect Binance Futures'}
+          </Text>
+          <Text style={styles.ghVerdictSub}>
+            {useLiveQuotesCtx
+              ? 'Tap here · Profile → API key + secret → Connect Live'
+              : 'Start bridge on PC (port 8766), then add API keys in Profile'}
+          </Text>
+        </Pressable>
+      ) : brokerConnected && brokerAccount ? (
+        <View style={[styles.ghGrid2, { paddingHorizontal: pad, marginBottom: 8 }]}>
+          <View style={styles.ghStatTile}>
+            <Text style={styles.ghStatLbl}>BALANCE</Text>
+            <Text style={[styles.ghStatVal, { color: C.goldL }]}>
+              ${Math.round(brokerAccount.balance ?? 0).toLocaleString()}
+            </Text>
+          </View>
+          <View style={styles.ghStatTile}>
+            <Text style={styles.ghStatLbl}>FLOATING</Text>
+            <Text style={[styles.ghStatVal, { color: (brokerAccount.profit ?? 0) >= 0 ? C.green : C.red }]}>
+              ${Math.round(brokerAccount.profit ?? 0).toLocaleString()}
+            </Text>
+          </View>
+        </View>
+      ) : null}
+
       <View style={[styles.ghPriceCard, { marginHorizontal: pad, marginTop: 4 }]}>
         {Platform.OS === 'ios' ? (
           <BlurView intensity={28} tint="dark" style={StyleSheet.absoluteFill} />
@@ -2399,7 +2525,7 @@ function GodmodeHome({
         <View style={styles.ghStatTile}>
           <Text style={styles.ghStatLbl}>DAY P&L</Text>
           <Text style={[styles.ghStatVal, { color: pnlColor }]}>{fmtUsd(pnlRounded)}</Text>
-          <Text style={styles.ghStatSub}>{useRealMt5 ? 'Floating P&L · MT5' : 'Unrealized · sim'}</Text>
+          <Text style={styles.ghStatSub}>{liveData ? `Floating P&L · ${liveTag}` : 'Unrealized · sim'}</Text>
         </View>
         <View style={styles.ghStatTile}>
           <Text style={styles.ghStatLbl}>TRADES</Text>
@@ -2419,14 +2545,7 @@ function GodmodeHome({
       ) : null}
 
       <View style={[styles.ghHistWrap, { marginHorizontal: pad }]}>
-        <Panel shell={{}} head={{ title: 'Signal History', badge: 'JIMPLAS · TODAY' }}>
-          <View style={styles.histTableWrap}>
-            <HistHeader />
-            {(histRows ?? SIGNAL_HISTORY_SIM).map((row, i) => (
-              <HistRow key={i} row={row} />
-            ))}
-          </View>
-        </Panel>
+        <SignalHistoryPanel histRows={histRows} histRange={histRange} onHistRangeChange={onHistRangeChange} />
       </View>
 
       <View style={[styles.ghQuote, { marginHorizontal: pad }]}>
@@ -2449,7 +2568,7 @@ function MobileCompactStrip({ price, spread, pad, utcStr, est, tickerItems, tape
     <View style={[styles.header, styles.mobileCompactHdr, { paddingHorizontal: pad }]}>
       <Row style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
         <Row style={styles.xauRow}>
-          <Text style={styles.xauPair}>XAU/USD</Text>
+          <Text style={styles.xauPair}>{TRADING_PAIR_LABEL}</Text>
           <Text style={styles.xauPrice}>{fmtNum(price)}</Text>
           <Text style={[styles.xauChg, { color: xauUp ? C.green : C.red }]}>
             {(xauUp ? '▲ +' : '▼ ') + Math.abs(xauDiff).toFixed(2)}
@@ -2529,17 +2648,17 @@ function MobileBottomNav({ tab, onChange, bottomInset }) {
 
 function AppContent({ onEngineReady }) {
   const { colors: C, styles } = useBilshenzTheme();
-  const { baseUrl: mt5BaseUrl, connected: mt5Connected } = useMt5Bridge();
   const { baseUrl: binanceBaseUrl, connected: binanceConnected } = useBinanceBridge();
-  const binanceMode = isBinanceBroker();
   const mockApi = useMockApi();
-  const brokerConnected = binanceMode ? binanceConnected : mt5Connected;
-  const brokerBaseUrl = binanceMode ? binanceBaseUrl : mt5BaseUrl;
+  const liveBrokerLabel = 'BINANCE';
+  const brokerConnected = binanceConnected;
+  const brokerBaseUrl = binanceBaseUrl;
   const { width } = useWindowDimensions();
   const isWide = width >= 880;
   const pad = Math.max(12, Math.min(24, width * 0.06));
   const insets = useSafeAreaInsets();
 
+  const [histRange, setHistRange] = useState('today');
   const [now, setNow] = useState(() => new Date());
   const [price, setPrice] = useState(4721.5);
   const [pnl, setPnl] = useState(840);
@@ -2577,26 +2696,29 @@ function AppContent({ onEngineReady }) {
     setPaperBtAutoExec(!!enabled);
   }, []);
 
-  const useMt5PaperBacktest = brokerConnected && runMode === 'backtest';
-  const useMt5ForEngine = !mockApi && brokerConnected && (runMode === 'live' || runMode === 'backtest');
-  const useRealMt5 = !mockApi && brokerConnected && runMode === 'live';
+  const usePaperBacktest = brokerConnected && runMode === 'backtest';
+  const brokerFeedEnabled =
+    !mockApi && (runMode === 'live' || runMode === 'backtest') && !!binanceBaseUrl?.trim();
+  const useBrokerForEngine = brokerFeedEnabled;
+  const useBrokerSession = !mockApi && brokerConnected && runMode === 'live';
 
-  const brokerLive = useBrokerLiveFeed({
-    mt5BaseUrl,
-    mt5Connected,
-    binanceBaseUrl,
-    binanceConnected,
-    enabled: useMt5ForEngine,
+  const brokerFeed = useBrokerLiveFeed({
+    baseUrl: binanceBaseUrl,
+    connected: binanceConnected,
+    enabled: brokerFeedEnabled,
     symbol: defaultSymbolForBroker(),
     pollTicks: runMode === 'live',
   });
-  const mt5Live = brokerLive;
+
+  const useLiveQuotes =
+    !mockApi && runMode === 'live' && (useBrokerSession || brokerFeed.feedReady);
+  const brokerBarsReady = brokerFeed.feedReady;
 
   const accountEquity = useMemo(() => {
-    if (!useRealMt5) return SIM_DESK_EQUITY;
-    if (mt5Live.account) return resolveAccountEquity(mt5Live.account, SIM_DESK_EQUITY);
+    if (!useBrokerSession) return SIM_DESK_EQUITY;
+    if (brokerFeed.account) return resolveAccountEquity(brokerFeed.account, SIM_DESK_EQUITY);
     return null;
-  }, [useRealMt5, mt5Live.account?.balance, mt5Live.account?.equity]);
+  }, [useBrokerSession, brokerFeed.account?.balance, brokerFeed.account?.equity]);
 
   const sizingEquity = accountEquity ?? SIM_DESK_EQUITY;
 
@@ -2627,7 +2749,7 @@ function AppContent({ onEngineReady }) {
           userDisabledAutoExecRef.current = false;
           setAutoExecuteSignals(true);
         }
-        /* unset storage → default ON when MT5 connects (see effect below) */
+        /* unset storage → default ON when Binance connects (see effect below) */
         if (m[STORAGE_PAPER_BT_AUTO] === '0') setPaperBtAutoExec(false);
         else if (m[STORAGE_PAPER_BT_AUTO] === '1') setPaperBtAutoExec(true);
       } catch {
@@ -2639,7 +2761,7 @@ function AppContent({ onEngineReady }) {
     };
   }, []);
 
-  /** Default ON in LIVE SIM while broker is connected unless user turned it off (stored or this session). */
+  /** Default ON in live mode while Binance is connected unless user turned it off (stored or this session). */
   useEffect(() => {
     if (runMode !== 'live') return;
     if (brokerConnected && !userDisabledAutoExecRef.current) {
@@ -2693,9 +2815,10 @@ function AppContent({ onEngineReady }) {
     initialTradeCount: 0,
     runMode,
     backtestEndIndex,
-    mt5MarketBundle: useMt5ForEngine ? mt5Live.marketBundle : null,
-    useMt5Data: useMt5ForEngine,
-    mt5Connected: useMt5ForEngine,
+    brokerMarketBundle: useBrokerForEngine ? brokerFeed.marketBundle : null,
+    useBrokerData: useBrokerForEngine,
+    brokerFeedReady: brokerBarsReady,
+    noSyntheticFallback: true,
     countSignalTowardCap: runMode === 'backtest' ? paperBtAutoExec : !autoExecuteSignals,
     accountEquity: sizingEquity,
   });
@@ -2703,15 +2826,35 @@ function AppContent({ onEngineReady }) {
   const engineCtxValue = useMemo(
     () => ({
       ...bilshenzEngine,
-      useRealMt5,
-      useMt5PaperBacktest,
-      useMt5ForEngine,
-      mt5Connected,
-      mt5Account: useRealMt5 ? mt5Live.account : null,
-      mt5Deals: useRealMt5 ? mt5Live.mt5Deals : [],
+      useBrokerSession,
+      useLiveQuotes,
+      usePaperBacktest,
+      useBrokerForEngine,
+      brokerConnected,
+      brokerFeedReady: brokerBarsReady,
+      autoExecuteSignals,
+      liveBrokerLabel,
+      isBinanceLive: useBrokerSession,
+      brokerAccount: useBrokerSession ? brokerFeed.account : null,
+      brokerDeals: useBrokerSession ? brokerFeed.brokerDeals : [],
+      brokerPositions: useBrokerSession ? brokerFeed.positions : [],
       accountEquity: sizingEquity,
     }),
-    [bilshenzEngine, useRealMt5, useMt5PaperBacktest, useMt5ForEngine, mt5Connected, mt5Live.account, mt5Live.mt5Deals, sizingEquity]
+    [
+      bilshenzEngine,
+      useBrokerSession,
+      useLiveQuotes,
+      usePaperBacktest,
+      useBrokerForEngine,
+      brokerConnected,
+      brokerBarsReady,
+      autoExecuteSignals,
+      liveBrokerLabel,
+      brokerFeed.account,
+      brokerFeed.brokerDeals,
+      brokerFeed.positions,
+      sizingEquity,
+    ],
   );
   const bzSnapshot = bilshenzEngine.snapshot;
   const tradeCount = bilshenzEngine.tradeCount;
@@ -2762,11 +2905,11 @@ function AppContent({ onEngineReady }) {
     (tradeSnap) => {
       const cfg = displayCfg(bilshenzEngine.cfg);
       const riskPct = effectiveRiskPctFromEngine(cfg.geoRisk, bzSnapshot.risk?.atrPips ?? null, cfg);
-      const spec = brokerLive.symbolSpec ?? { stepSize: 0.001, minQty: 0.001 };
+      const spec = brokerFeed.symbolSpec ?? { stepSize: 0.001, minQty: 0.001 };
       const s = quantityForTrade(tradeSnap, cfg, sizingEquity, riskPct, spec);
       return s.quantity > 0 ? s.quantity : 0.001;
     },
-    [sizingEquity, bilshenzEngine.cfg, bzSnapshot.risk?.atrPips, brokerLive.symbolSpec]
+    [sizingEquity, bilshenzEngine.cfg, bzSnapshot.risk?.atrPips, brokerFeed.symbolSpec]
   );
 
   const sendTelegramEligibleIfNeeded = useCallback(
@@ -2802,7 +2945,7 @@ function AppContent({ onEngineReady }) {
     if (!autoExecuteSignals || !engineHydrated) return;
     if (runMode !== 'live') return;
     const hookUrl = brokerWebhookUrl.trim();
-    if (!hookUrl && !mt5Connected) return;
+    if (!hookUrl && !brokerConnected) return;
 
     const lastSig = bilshenzEngine.lastBarSig;
     const m30 = bilshenzEngine.bundle?.m30;
@@ -2834,7 +2977,7 @@ function AppContent({ onEngineReady }) {
           barTimeMs: bar.t,
           runMode: 'live',
           trigger: 'auto',
-          symbol: mt5Live.resolvedSymbol || 'XAUUSD',
+          symbol: brokerFeed.resolvedSymbol || TRADING_SYMBOL,
         });
         if (!intent) {
           autoHookDoneBarRef.current = bar.t;
@@ -2858,13 +3001,10 @@ function AppContent({ onEngineReady }) {
           intent,
           webhookUrl: hookUrl,
           useWebhook: !!hookUrl && !brokerConnected,
-          mt5BaseUrl,
-          useMt5: !binanceMode && mt5Connected,
-          mt5Volume: lots,
           binanceBaseUrl,
-          useBinance: binanceMode && binanceConnected,
+          useBinance: binanceConnected,
           binanceQuantity: qty,
-          symbol: mt5Live.resolvedSymbol || defaultSymbolForBroker(),
+          symbol: brokerFeed.resolvedSymbol || defaultSymbolForBroker(),
         });
         if (r.anyOk) {
           bumpAutoTradeCount();
@@ -2894,21 +3034,23 @@ function AppContent({ onEngineReady }) {
     tradeCount,
     dailyTradeCap,
     bumpAutoTradeCount,
-    mt5BaseUrl,
-    mt5Connected,
-    mt5Live.resolvedSymbol,
+    binanceBaseUrl,
+    binanceConnected,
+    brokerFeed.resolvedSymbol,
     execLotsForTrade,
     sendTelegramEligibleIfNeeded,
   ]);
 
   useEffect(() => {
-    if (mt5Connected && mt5Live.feedReady) {
-      setLastBrokerMsg((prev) =>
-        prev.startsWith('Auto:') || prev.startsWith('MT5') ? prev : 'MT5 live feed · M30 bars from terminal'
-      );
-    }
-    if (mt5Live.feedError) setLastBrokerMsg(`MT5 feed: ${mt5Live.feedError}`);
-  }, [mt5Connected, mt5Live.feedReady, mt5Live.feedError]);
+    if (!brokerConnected || !brokerFeed.feedReady) return;
+    const tag = liveBrokerLabel;
+    setLastBrokerMsg((prev) =>
+      prev.startsWith('Auto:') || prev.startsWith(tag) || prev.startsWith('BINANCE')
+        ? prev
+        : `${tag} live feed · M30 bars from bridge`,
+    );
+    if (brokerFeed.feedError) setLastBrokerMsg(`${tag} feed: ${brokerFeed.feedError}`);
+  }, [brokerConnected, brokerFeed.feedReady, brokerFeed.feedError, liveBrokerLabel]);
 
   useEffect(() => {
     if (!autoExecuteSignals) autoHookDoneBarRef.current = null;
@@ -2919,14 +3061,28 @@ function AppContent({ onEngineReady }) {
   }, [runMode]);
 
   const histRows = useMemo(() => {
-    if (useRealMt5 && mt5Live.mt5Deals?.length) {
-      return mapMt5DealsToHistRows(mt5Live.mt5Deals);
+    const m30 = bilshenzEngine.bundle?.m30 ?? brokerFeed.marketBundle?.m30 ?? [];
+    const nowMs = now.getTime();
+
+    if (useBrokerSession && brokerFeed.brokerDeals?.length) {
+      const filtered = filterBinanceDealsByRange(brokerFeed.brokerDeals, histRange, nowMs);
+      return mapBinanceDealsToHistRows(filtered);
     }
-    const mapped = mapJournalToHistRows(bilshenzEngine.journalRows);
+
+    const journal = filterJournalRowsByRange(bilshenzEngine.journalRows, m30, histRange, nowMs);
+    const mapped = mapJournalToHistRows(journal);
     if (mapped.length) return mapped;
-    if (useRealMt5) return [];
-    return SIGNAL_HISTORY_SIM;
-  }, [bilshenzEngine.journalRows, useRealMt5, mt5Live.mt5Deals]);
+    if (useBrokerSession) return [];
+    return histRange === 'today' ? SIGNAL_HISTORY_SIM : [];
+  }, [
+    bilshenzEngine.journalRows,
+    bilshenzEngine.bundle,
+    histRange,
+    useBrokerSession,
+    brokerFeed.brokerDeals,
+    brokerFeed.marketBundle,
+    now,
+  ]);
 
   const engineWinRatePctStr =
     (bzSnapshot.winRate?.totalWins ?? 0) + (bzSnapshot.winRate?.totalLosses ?? 0) > 0
@@ -2988,34 +3144,35 @@ function AppContent({ onEngineReady }) {
   }, []);
 
   useEffect(() => {
-    if (!useRealMt5) return;
-    if (mt5Live.price != null) setPrice(mt5Live.price);
-    if (mt5Live.spreadPips != null) setSpread(mt5Live.spreadPips);
-    if (mt5Live.account?.profit != null) setPnl(mt5Live.account.profit);
-    if (mt5Live.dxy != null) setDxy(mt5Live.dxy);
-    if (mt5Live.us10y != null) setUs10y(mt5Live.us10y);
+    if (!useLiveQuotes) return;
+    if (brokerFeed.price != null) setPrice(brokerFeed.price);
+    if (brokerFeed.spreadPips != null) setSpread(brokerFeed.spreadPips);
+    if (useBrokerSession && brokerFeed.account?.profit != null) setPnl(brokerFeed.account.profit);
+    if (brokerFeed.dxy != null) setDxy(brokerFeed.dxy);
+    if (brokerFeed.us10y != null) setUs10y(brokerFeed.us10y);
   }, [
-    useRealMt5,
-    mt5Live.price,
-    mt5Live.spreadPips,
-    mt5Live.account?.profit,
-    mt5Live.dxy,
-    mt5Live.us10y,
+    useLiveQuotes,
+    useBrokerSession,
+    brokerFeed.price,
+    brokerFeed.spreadPips,
+    brokerFeed.account?.profit,
+    brokerFeed.dxy,
+    brokerFeed.us10y,
   ]);
 
   useEffect(() => {
-    if (!useRealMt5) return;
+    if (!useLiveQuotes) return;
     const ap = bzSnapshot.risk?.atrPips;
     if (ap == null || !Number.isFinite(ap)) return;
     setAtr(ap);
     setAtrFillPct(Math.min(100, ((ap - 30) / 120) * 100));
-  }, [useRealMt5, bzSnapshot.risk?.atrPips]);
+  }, [useLiveQuotes, bzSnapshot.risk?.atrPips]);
 
   useEffect(() => {
-    if (runMode !== 'live' || useRealMt5) return undefined;
+    if (runMode !== 'live' || useLiveQuotes) return undefined;
     const id = setInterval(tick, 1400);
     return () => clearInterval(id);
-  }, [tick, runMode, useRealMt5]);
+  }, [tick, runMode, useLiveQuotes]);
 
   const spHigh = spread > (bilshenzEngine.cfg?.maxSpreadPips ?? 3.5);
   const spreadOkColor = spHigh ? C.red : C.green;
@@ -3026,15 +3183,15 @@ function AppContent({ onEngineReady }) {
       const ref = m30[Math.max(0, m30.length - 48)];
       return ref?.o ?? ref?.c ?? chartPrice;
     }
-    return useRealMt5 ? chartPrice : 4698.2;
-  }, [useRealMt5, bilshenzEngine.bundle?.m30, chartPrice]);
+    return useLiveQuotes ? chartPrice : 4698.2;
+  }, [useLiveQuotes, bilshenzEngine.bundle?.m30, chartPrice]);
 
   const xauDiff = parseFloat((chartPrice - xauDayOpen).toFixed(2));
   const xauUp = xauDiff >= 0;
 
   const pipSz = DISPLAY_PIP_SIZE;
-  const displayBid = useRealMt5 && mt5Live.bid != null ? mt5Live.bid : price - spread * pipSz;
-  const displayAsk = useRealMt5 && mt5Live.ask != null ? mt5Live.ask : price + spread * pipSz;
+  const displayBid = useLiveQuotes && brokerFeed.bid != null ? brokerFeed.bid : price - spread * pipSz;
+  const displayAsk = useLiveQuotes && brokerFeed.ask != null ? brokerFeed.ask : price + spread * pipSz;
 
   const btMaxIdx = Math.max(0, bilshenzEngine.m30BaseLength - 1);
   const btMinIdx = Math.min(80, btMaxIdx);
@@ -3067,7 +3224,7 @@ function AppContent({ onEngineReady }) {
 
   const chartPts = useMemo(() => {
     const m30 = bilshenzEngine.bundle?.m30;
-    if (m30?.length && (useRealMt5 || runMode === 'backtest')) {
+    if (m30?.length && (useBrokerSession || runMode === 'backtest')) {
       const slice = m30.slice(-16);
       const w = 900;
       const lows = slice.map((b) => b.l);
@@ -3081,7 +3238,7 @@ function AppContent({ onEngineReady }) {
         return [x, y];
       });
     }
-    if (useRealMt5) return [];
+    if (useBrokerSession) return [];
     return [
       [0, 105],
       [80, 100],
@@ -3099,7 +3256,7 @@ function AppContent({ onEngineReady }) {
       [820, 16],
       [900, 10],
     ];
-  }, [useRealMt5, bilshenzEngine.bundle?.m30]);
+  }, [useBrokerSession, bilshenzEngine.bundle?.m30]);
 
   const sigPill = useMemo(() => {
     const t = bzSnapshot.trade;
@@ -3138,7 +3295,7 @@ function AppContent({ onEngineReady }) {
       }
       incrementExecuteTrade();
       if (runModeRef.current === 'backtest') {
-        setLastBrokerMsg('Paper BT: journal entry recorded (no MT5 order)');
+        setLastBrokerMsg('Paper BT: journal entry recorded (no Binance order)');
         setExecBusy(false);
         return;
       }
@@ -3147,7 +3304,7 @@ function AppContent({ onEngineReady }) {
         barTimeMs: barT,
         runMode: runModeRef.current,
         trigger: 'manual',
-        symbol: mt5Live.resolvedSymbol || defaultSymbolForBroker(),
+        symbol: brokerFeed.resolvedSymbol || defaultSymbolForBroker(),
       });
       if (!intent) {
         setLastBrokerMsg('EXEC skipped (no side)');
@@ -3162,19 +3319,12 @@ function AppContent({ onEngineReady }) {
           intent,
           webhookUrl: hookUrl,
           useWebhook: !!(brokerHookEnabled && hookUrl && !brokerConnected),
-          mt5BaseUrl,
-          useMt5: !binanceMode && mt5Connected,
-          mt5Volume: lots,
           binanceBaseUrl,
-          useBinance: binanceMode && binanceConnected,
+          useBinance: binanceConnected,
           binanceQuantity: qty,
-          symbol: mt5Live.resolvedSymbol || defaultSymbolForBroker(),
+          symbol: brokerFeed.resolvedSymbol || defaultSymbolForBroker(),
         });
-        setLastBrokerMsg(
-          r.summary
-            ? `${r.summary} · ${binanceMode ? `${qty} qty` : `${lots.toFixed(2)} lot`}`
-            : r.summary,
-        );
+        setLastBrokerMsg(r.summary ? `${r.summary} · ${qty} qty` : r.summary);
       } else {
         setLastBrokerMsg('');
       }
@@ -3187,9 +3337,9 @@ function AppContent({ onEngineReady }) {
     incrementExecuteTrade,
     brokerHookEnabled,
     brokerWebhookUrl,
-    mt5BaseUrl,
-    mt5Connected,
-    mt5Live.resolvedSymbol,
+    binanceBaseUrl,
+    binanceConnected,
+    brokerFeed.resolvedSymbol,
     execLotsForTrade,
     sendTelegramEligibleIfNeeded,
     resolveExecuteGate,
@@ -3282,14 +3432,14 @@ function AppContent({ onEngineReady }) {
     newsActive,
   ]);
 
-  if (!bundleReady || (useMt5ForEngine && !mt5Live.feedReady && !mockApi)) {
+  if (!bundleReady || (useBrokerForEngine && !brokerFeed.feedReady && !mockApi)) {
     return (
       <View style={[styles.safeRoot, { alignItems: 'center', justifyContent: 'center', padding: 24 }]}>
         <Text style={{ color: C.dim, fontSize: 12, textAlign: 'center' }}>
           {mockApi
             ? 'Loading dev preview…'
-            : useMt5ForEngine
-              ? mt5Live.feedError || 'Loading MT5 history…'
+            : useBrokerForEngine
+              ? brokerFeed.feedError || 'Loading XAUUSDT history from Binance…'
               : 'Loading market engine…'}
         </Text>
       </View>
@@ -3314,7 +3464,7 @@ function AppContent({ onEngineReady }) {
 
                   <View style={[styles.hdrCenter, !isWide && { alignItems: 'flex-start', marginTop: 8 }]}>
                     <Row style={styles.xauRow}>
-                      <Text style={styles.xauPair}>XAU/USD</Text>
+                      <Text style={styles.xauPair}>{TRADING_PAIR_LABEL}</Text>
                       <Text style={styles.xauPrice}>{fmtNum(chartPrice)}</Text>
                       <Text style={[styles.xauChg, { color: xauUp ? C.green : C.red }]}>
                         {(xauUp ? '▲ +' : '▼ ') + Math.abs(xauDiff).toFixed(2)}
@@ -3323,7 +3473,7 @@ function AppContent({ onEngineReady }) {
                     <Text style={styles.xauSub}>
                       BID {fmtNum(displayBid)} · ASK {fmtNum(displayAsk)} · SPREAD{' '}
                       <Text style={styles.xauSub}>{spread.toFixed(2)}</Text>p
-                      {useRealMt5 ? ' · MT5' : ''}
+                      {useLiveQuotes ? ` · ${liveBrokerLabel}` : ''}
                     </Text>
                     <TextInput
                       placeholder="Notes / tag (optional)"
@@ -3337,12 +3487,14 @@ function AppContent({ onEngineReady }) {
                       <BlinkDot color={C.green} />
                       <Text style={styles.livePillTxt}>
                         {runMode === 'backtest'
-                          ? useMt5PaperBacktest
-                            ? 'MT5 PAPER BT'
+                          ? usePaperBacktest
+                            ? 'BINANCE PAPER BT'
                             : 'BACKTEST'
-                          : useRealMt5
-                            ? 'MT5 LIVE'
-                            : 'LIVE SIM'}
+                          : useBrokerSession
+                            ? `${liveBrokerLabel} LIVE`
+                            : useLiveQuotes
+                              ? 'MARKET LIVE'
+                              : 'BRIDGE OFFLINE'}
                       </Text>
                     </Row>
                     <View style={styles.clockBox}>
@@ -3471,7 +3623,7 @@ function AppContent({ onEngineReady }) {
                   </TouchableOpacity>
                   <Text style={styles.btBarMeta}>
                     Bar {bilshenzEngine.backtestEndClamped + 1}/{bilshenzEngine.m30BaseLength} ·{' '}
-                    {useMt5PaperBacktest ? 'MT5 paper journal' : 'BT journal'} (not persisted)
+                    {usePaperBacktest ? 'Binance paper journal' : 'BT journal'} (not persisted)
                   </Text>
                 </Row>
                 <Slider
@@ -3489,6 +3641,16 @@ function AppContent({ onEngineReady }) {
             ) : null}
 
             {isWide ? (
+              <>
+              <View style={{ paddingHorizontal: pad, paddingBottom: 8 }}>
+                <BinanceStatusStrip
+                  feedReady={brokerFeed.feedReady}
+                  feedError={brokerFeed.feedError}
+                  connected={brokerConnected}
+                  autoExecute={autoExecuteSignals}
+                  onPressConnect={() => setMobileTab('profile')}
+                />
+              </View>
               <View style={[styles.grid, { paddingHorizontal: pad, flexDirection: 'row', alignItems: 'stretch' }]}>
                 <View style={[styles.col, { width: 250 }]}>
                   <LeftColumn sr={sr} dxy={dxy} />
@@ -3515,9 +3677,11 @@ function AppContent({ onEngineReady }) {
                     atrModePill={atrModePill}
                     engineTrade={bzSnapshot.trade}
                     histRows={histRows}
+                    histRange={histRange}
+                    onHistRangeChange={setHistRange}
                     accountEquity={sizingEquity}
-                    mt5LiveAccount={useRealMt5}
-                    mt5Account={useRealMt5 ? mt5Live.account : null}
+                    brokerLiveAccount={useBrokerSession}
+                    brokerAccount={useBrokerSession ? brokerFeed.account : null}
                   />
                 </View>
                 <View style={[styles.col, { width: 250 }]}>
@@ -3530,12 +3694,14 @@ function AppContent({ onEngineReady }) {
                     spHigh={spHigh}
                     dayBits={dayBits}
                     accountEquity={sizingEquity}
-                    mt5LiveAccount={useRealMt5}
-                    mt5Account={useRealMt5 ? mt5Live.account : null}
-                    mt5Deals={useRealMt5 ? mt5Live.mt5Deals : null}
+                    brokerLiveAccount={useBrokerSession}
+                    brokerAccount={useBrokerSession ? brokerFeed.account : null}
+                    brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : null}
+                    brokerPositions={useBrokerSession ? brokerFeed.positions : null}
                   />
                 </View>
               </View>
+              </>
             ) : mobileTab === 'home' ? (
               <View style={[styles.mobileTabBody, styles.ghBody, { paddingHorizontal: 0 }]}>
                 <GodmodeHome
@@ -3546,11 +3712,27 @@ function AppContent({ onEngineReady }) {
                   sr={sr}
                   utcStr={utcStr}
                   histRows={histRows}
+                  histRange={histRange}
+                  onHistRangeChange={setHistRange}
                   winRatePct={engineWinRatePctStr}
+                  brokerConnected={brokerConnected}
+                  feedReady={brokerFeed.feedReady}
+                  feedError={brokerFeed.feedError}
+                  autoExecuteSignals={autoExecuteSignals}
+                  onOpenProfile={() => setMobileTab('profile')}
                 />
               </View>
             ) : mobileTab === 'desk' ? (
               <View style={[styles.grid, { paddingHorizontal: pad, flexDirection: 'column', alignItems: 'stretch' }]}>
+                <View style={{ paddingBottom: 8 }}>
+                  <BinanceStatusStrip
+                    feedReady={brokerFeed.feedReady}
+                    feedError={brokerFeed.feedError}
+                    connected={brokerConnected}
+                    autoExecute={autoExecuteSignals}
+                    onPressConnect={() => setMobileTab('profile')}
+                  />
+                </View>
                 <View style={[styles.col, { width: '100%' }]}>
                   <LeftColumn sr={sr} dxy={dxy} />
                 </View>
@@ -3576,9 +3758,11 @@ function AppContent({ onEngineReady }) {
                     atrModePill={atrModePill}
                     engineTrade={bzSnapshot.trade}
                     histRows={histRows}
+                    histRange={histRange}
+                    onHistRangeChange={setHistRange}
                     accountEquity={sizingEquity}
-                    mt5LiveAccount={useRealMt5}
-                    mt5Account={useRealMt5 ? mt5Live.account : null}
+                    brokerLiveAccount={useBrokerSession}
+                    brokerAccount={useBrokerSession ? brokerFeed.account : null}
                     compactSignal
                   />
                 </View>
@@ -3592,14 +3776,40 @@ function AppContent({ onEngineReady }) {
                     spHigh={spHigh}
                     dayBits={dayBits}
                     accountEquity={sizingEquity}
-                    mt5LiveAccount={useRealMt5}
-                    mt5Account={useRealMt5 ? mt5Live.account : null}
-                    mt5Deals={useRealMt5 ? mt5Live.mt5Deals : null}
+                    brokerLiveAccount={useBrokerSession}
+                    brokerAccount={useBrokerSession ? brokerFeed.account : null}
+                    brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : null}
+                    brokerPositions={useBrokerSession ? brokerFeed.positions : null}
                   />
                 </View>
               </View>
             ) : mobileTab === 'trade' ? (
               <View style={[styles.mobileTabBody, { paddingHorizontal: pad }]}>
+                <View style={{ paddingBottom: 8 }}>
+                  <BinanceStatusStrip
+                    feedReady={brokerFeed.feedReady}
+                    feedError={brokerFeed.feedError}
+                    connected={brokerConnected}
+                    autoExecute={autoExecuteSignals}
+                    onPressConnect={() => setMobileTab('profile')}
+                  />
+                </View>
+                {lastBrokerMsg ? (
+                  <View
+                    style={{
+                      marginBottom: 10,
+                      paddingVertical: 8,
+                      paddingHorizontal: 10,
+                      borderRadius: 8,
+                      borderWidth: 1,
+                      borderColor: 'rgba(255,179,0,0.35)',
+                      backgroundColor: 'rgba(255,179,0,0.06)',
+                    }}>
+                    <Text style={{ color: C.amber, fontSize: 10, fontWeight: '700' }} numberOfLines={3}>
+                      Last: {lastBrokerMsg}
+                    </Text>
+                  </View>
+                ) : null}
                 <CenterColumn
                   price={chartPrice}
                   sr={sr}
@@ -3621,9 +3831,11 @@ function AppContent({ onEngineReady }) {
                   atrModePill={atrModePill}
                   engineTrade={bzSnapshot.trade}
                   histRows={histRows}
+                  histRange={histRange}
+                  onHistRangeChange={setHistRange}
                   accountEquity={sizingEquity}
-                  mt5LiveAccount={useRealMt5}
-                  mt5Account={useRealMt5 ? mt5Live.account : null}
+                  brokerLiveAccount={useBrokerSession}
+                  brokerAccount={useBrokerSession ? brokerFeed.account : null}
                   compactSignal
                 />
               </View>
@@ -3665,26 +3877,36 @@ function AppContent({ onEngineReady }) {
                   lastBrokerMsg={lastBrokerMsg}
                   autoExecuteSignals={autoExecuteSignals}
                   onAutoExecuteSignalsChange={onAutoExecuteSignalsChange}
-                  mt5Connected={mt5Connected}
+                  brokerConnected={brokerConnected}
                   paperBtAutoExec={paperBtAutoExec}
                   onPaperBtAutoExecChange={onPaperBtAutoExecChange}
-                  useMt5PaperBacktest={useMt5PaperBacktest}
+                  usePaperBacktest={usePaperBacktest}
                 />
               </View>
             ) : mobileTab === 'risk' ? (
               <View style={[styles.mobileTabBody, { paddingHorizontal: pad }]}>
+                <View style={{ paddingBottom: 8 }}>
+                  <BinanceStatusStrip
+                    feedReady={brokerFeed.feedReady}
+                    feedError={brokerFeed.feedError}
+                    connected={brokerConnected}
+                    autoExecute={autoExecuteSignals}
+                    onPressConnect={() => setMobileTab('profile')}
+                  />
+                </View>
                 <RightColumn
                   tradeCount={tradeCount}
-                  pnl={useRealMt5 && mt5Live.account?.profit != null ? mt5Live.account.profit : pnl}
+                  pnl={useBrokerSession && brokerFeed.account?.profit != null ? brokerFeed.account.profit : pnl}
                   sessTag={sessTag}
                   spread={spread}
                   spreadOkColor={spreadOkColor}
                   spHigh={spHigh}
                   dayBits={dayBits}
                   accountEquity={sizingEquity}
-                  mt5LiveAccount={useRealMt5}
-                  mt5Account={useRealMt5 ? mt5Live.account : null}
-                  mt5Deals={useRealMt5 ? mt5Live.mt5Deals : null}
+                  brokerLiveAccount={useBrokerSession}
+                  brokerAccount={useBrokerSession ? brokerFeed.account : null}
+                  brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : null}
+                  brokerPositions={useBrokerSession ? brokerFeed.positions : null}
                 />
               </View>
             ) : mobileTab === 'showcase' ? (
@@ -3698,8 +3920,8 @@ function AppContent({ onEngineReady }) {
                 </Text>
                 <Text style={styles.footerTxt}>{utcStr} UTC</Text>
                 <Text style={styles.footerTxt}>
-                  <Text style={styles.footerGold}>Bilshenz Desk · MT5 Bridge</Text>
-                  {useRealMt5 ? ' · MT5 live data' : ' · Simulated'} · Not financial advice
+                  <Text style={styles.footerGold}>Bilshenz Desk · Binance Futures</Text>
+                  {useLiveQuotes ? ` · ${liveBrokerLabel} live data` : ' · Simulated'} · Not financial advice
                 </Text>
               </View>
             ) : (
@@ -3709,7 +3931,7 @@ function AppContent({ onEngineReady }) {
                   <Text style={styles.footerGold}>
                     {mobileTab === 'desk' ? 'INTEL' : mobileTab === 'profile' ? 'PROFILE' : mobileTab.toUpperCase()}
                   </Text>{' '}
-                  · {useRealMt5 ? 'MT5 live data' : 'Simulated'} · Not financial advice
+                  · {useLiveQuotes ? `${liveBrokerLabel} live data` : 'Simulated'} · Not financial advice
                 </Text>
               </View>
             )}
@@ -3785,11 +4007,9 @@ export default function App() {
     <SafeAreaProvider>
       <ThemeProvider>
         <DevPreviewProvider>
-          <Mt5BridgeProvider>
-            <BinanceBridgeProvider>
-              <AppRoot />
-            </BinanceBridgeProvider>
-          </Mt5BridgeProvider>
+          <BinanceBridgeProvider>
+            <AppRoot />
+          </BinanceBridgeProvider>
         </DevPreviewProvider>
       </ThemeProvider>
     </SafeAreaProvider>

@@ -27,13 +27,17 @@ npm start
 
 Do **not** set `EXPO_PUBLIC_DESK_REMOTE=0` in Windows user env — it forces Metro to bundle `../backend/engine` on the phone and causes `@babel/runtime` / 500 errors in Expo Go. Default `npm start` uses the remote engine stub; run `desk-api` on your PC.
 
-## MT5 paper backtest
+## Binance Futures live trading
 
-1. Start MT5 + `mt5_trading_system/python/start-api.ps1` and connect in Profile.
-2. Profile → run mode **MT5 PAPER BT** (when MT5 is connected).
-3. Turn **PAPER AUTO-EXEC (BACKTEST)** ON to journal signals on each replay bar.
-4. No orders are sent to MT5 — journal only. Use **LIVE SIM** + auto-exec for real/demo execution.
+1. On PC: `cd binance_trading_system\python` → `python main.py` (port **8766**).
+2. App env: `EXPO_PUBLIC_BROKER_MODE=binance` and `EXPO_PUBLIC_BINANCE_API_URL=http://YOUR_PC_IP:8766`.
+3. Profile → API key + secret → **Connect Live** (or Testnet).
+4. **AUTO-EXECUTE SIGNALS** sends gated orders when connected; otherwise tap **EXEC** on the Trade tab.
 
-## MT5 live feed
+Public **XAUUSDT** quotes load without login. Orders require API keys with Futures + Read enabled (withdrawals off).
 
-Start Python MT5 API from repo root: `cd ..\mt5_trading_system\python` (see that folder’s README), then connect in the app Profile tab.
+## Binance paper backtest
+
+1. Start the Binance bridge and connect in Profile (for real M30 history).
+2. Profile → run mode **BINANCE PAPER BT**.
+3. Turn **PAPER AUTO-EXEC (BACKTEST)** ON to journal signals on each replay bar — no orders sent.

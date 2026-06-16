@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { buildBundleFromM30Bars } from '../lib/marketBundle';
+import { TRADING_SYMBOL } from '../lib/tradingSymbol';
 import { DISPLAY_PIP_SIZE } from '../security/deskConstants';
 import {
   fetchBinanceBarsM30,
+  fetchBinanceDeals,
+  fetchBinancePositions,
   fetchBinanceSymbolSpec,
   fetchBinanceTick,
   binanceFetch,
@@ -46,8 +49,10 @@ export function useBinanceLiveFeed({
   baseUrl,
   connected,
   enabled = true,
-  symbol = 'XAUUSDT',
+  symbol = TRADING_SYMBOL,
   pollTicks = true,
+  /** When true, load public quotes/bars even if API session is not logged in. */
+  publicQuotes = true,
 }) {
   const [price, setPrice] = useState(null);
   const [bid, setBid] = useState(null);
@@ -56,17 +61,21 @@ export function useBinanceLiveFeed({
   const [account, setAccount] = useState(null);
   const [marketBundle, setMarketBundle] = useState(null);
   const [resolvedSymbol, setResolvedSymbol] = useState(symbol);
-  const [mt5Deals, setMt5Deals] = useState([]);
+  const [brokerDeals, setBrokerDeals] = useState([]);
+  const [positions, setPositions] = useState([]);
   const [symbolSpec, setSymbolSpec] = useState(null);
   const [feedError, setFeedError] = useState('');
   const [feedReady, setFeedReady] = useState(false);
   const symRef = useRef(symbol);
   const inflightRef = useRef(false);
 
+  const sessionActive = !!connected;
+  const quotesActive = enabled && !!baseUrl?.trim() && (publicQuotes || sessionActive);
+
   const loadBars = useCallback(
     async (count) => {
       const b = baseUrl?.trim();
-      if (!b || !connected) return false;
+      if (!b || !quotesActive) return false;
       if (inflightRef.current) return false;
       inflightRef.current = true;
       try {
@@ -81,8 +90,10 @@ export function useBinanceLiveFeed({
         if (last?.c != null) setPrice(parseFloat(Number(last.c).toFixed(2)));
         setFeedReady(true);
         setFeedError('');
-        const st = await fetchStatusAccount(b);
-        if (st.account) setAccount(st.account);
+        if (sessionActive) {
+          const st = await fetchStatusAccount(b);
+          if (st.account) setAccount(st.account);
+        }
         return true;
       } catch (e) {
         setFeedError(e instanceof Error ? e.message : String(e));
@@ -91,12 +102,16 @@ export function useBinanceLiveFeed({
         inflightRef.current = false;
       }
     },
-    [baseUrl, connected],
+    [baseUrl, quotesActive, sessionActive],
   );
 
   useEffect(() => {
-    if (!enabled || !connected || !baseUrl?.trim()) {
+    if (!quotesActive) {
       setFeedReady(false);
+      if (!sessionActive) {
+        setBrokerDeals([]);
+        setPositions([]);
+      }
       return;
     }
     let cancelled = false;
@@ -113,10 +128,47 @@ export function useBinanceLiveFeed({
     return () => {
       cancelled = true;
     };
-  }, [enabled, connected, baseUrl, symbol, loadBars]);
+  }, [quotesActive, sessionActive, baseUrl, symbol, loadBars]);
 
   useEffect(() => {
-    if (!enabled || !connected || !pollTicks || !baseUrl?.trim()) return;
+    if (!sessionActive || !enabled || !baseUrl?.trim()) return undefined;
+    const b = baseUrl.trim();
+    const sym = symRef.current;
+    let cancelled = false;
+
+    const refreshAccount = async () => {
+      const st = await fetchStatusAccount(b);
+      if (!cancelled && st.account) setAccount(st.account);
+    };
+
+    const refreshDeals = async () => {
+      const d = await fetchBinanceDeals(b, 100);
+      if (!cancelled && d.length) setBrokerDeals(d);
+    };
+
+    const refreshPositions = async () => {
+      const p = await fetchBinancePositions(b, sym);
+      if (!cancelled) setPositions(p);
+    };
+
+    void refreshAccount();
+    void refreshDeals();
+    void refreshPositions();
+
+    const acctId = setInterval(refreshAccount, 5000);
+    const dealsId = setInterval(refreshDeals, 20000);
+    const posId = setInterval(refreshPositions, 8000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(acctId);
+      clearInterval(dealsId);
+      clearInterval(posId);
+    };
+  }, [sessionActive, enabled, baseUrl]);
+
+  useEffect(() => {
+    if (!quotesActive || !pollTicks) return;
     let cancelled = false;
     const poll = async () => {
       const tk = await fetchBinanceTick(baseUrl, symRef.current);
@@ -130,7 +182,7 @@ export function useBinanceLiveFeed({
       cancelled = true;
       clearInterval(id);
     };
-  }, [enabled, connected, pollTicks, baseUrl]);
+  }, [quotesActive, pollTicks, baseUrl]);
 
   return {
     price,
@@ -142,7 +194,8 @@ export function useBinanceLiveFeed({
     account,
     marketBundle,
     resolvedSymbol,
-    mt5Deals,
+    brokerDeals,
+    positions,
     feedError,
     feedReady,
     symbolSpec,

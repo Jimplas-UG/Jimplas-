@@ -8,7 +8,7 @@ param(
 
   [string]$DeskApiKey = '',
 
-  [string]$Mt5ApiUrl = '',
+  [string]$BinanceApiUrl = '',
 
   [switch]$UseEasCloud
 
@@ -26,10 +26,10 @@ if ($DeskApiUrl) { $env:EXPO_PUBLIC_DESK_API_URL = $DeskApiUrl }
 
 if ($DeskApiKey) { $env:EXPO_PUBLIC_DESK_API_KEY = $DeskApiKey }
 
-if ($Mt5ApiUrl) {
-  $env:EXPO_PUBLIC_MT5_API_URL = $Mt5ApiUrl
+if ($BinanceApiUrl) {
+  $env:EXPO_PUBLIC_BINANCE_API_URL = $BinanceApiUrl
 } elseif ($DeskApiUrl -and $DeskApiUrl -notmatch '127\.0\.0\.1|localhost') {
-  $env:EXPO_PUBLIC_MT5_API_URL = ($DeskApiUrl.TrimEnd('/') + '/v1/mt5')
+  $env:EXPO_PUBLIC_BINANCE_API_URL = ($DeskApiUrl.TrimEnd('/') + '/v1/binance')
 }
 
 

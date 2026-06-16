@@ -211,7 +211,12 @@ class BinanceConnector:
 
     def status_snapshot(self) -> dict[str, Any]:
         if self.cfg.paper:
-            return {"connected": True, "mode": "paper", "testnet": self.cfg.testnet}
+            return {
+                "connected": True,
+                "mode": "paper",
+                "testnet": self.cfg.testnet,
+                "account": self.account_info(),
+            }
         if not self.cfg.api_key or not self.cfg.api_secret:
             return {"connected": False, "mode": "unconfigured"}
         try:

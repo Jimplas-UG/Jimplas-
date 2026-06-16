@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from binance_connector import BinanceConnector, config_from_env
+from binance_connector import BinanceConnector, config_from_env, _truthy
 from position_manager import PositionManager
 
 logging.basicConfig(level=logging.INFO)
@@ -76,16 +76,20 @@ def health():
 
 @app.post("/api/login")
 def api_login(body: LoginBody):
+    # Explicit app login must validate real Futures credentials (not paper bypass).
+    connector.cfg.paper = False
     connector.configure(body.api_key, body.api_secret, body.testnet)
     snap = connector.status_snapshot()
     if not snap.get("connected"):
-        raise HTTPException(status_code=401, detail="Binance login failed — check API key/secret and IP whitelist")
+        err = snap.get("error") or "Binance login failed — check API key/secret, testnet toggle, and IP whitelist"
+        raise HTTPException(status_code=401, detail=err)
     return {"ok": True, "account": snap.get("account"), "mode": snap.get("mode")}
 
 
 @app.post("/api/attach")
 def api_attach():
-    """Use env-configured credentials (no body)."""
+    """Use env-configured credentials (no body). Paper mode uses simulated account when BINANCE_PAPER=1."""
+    connector.cfg.paper = _truthy(os.environ.get("BINANCE_PAPER", "0"))
     connector.configure(
         os.environ.get("BINANCE_API_KEY", ""),
         os.environ.get("BINANCE_API_SECRET", ""),
@@ -102,6 +106,7 @@ def api_attach():
 
 @app.post("/api/logout")
 def api_logout():
+    connector.cfg.paper = _truthy(os.environ.get("BINANCE_PAPER", "0"))
     connector.configure("", "")
     return {"ok": True}
 

@@ -1,4 +1,4 @@
-/** Lightweight M30 → HTF bundle builder for MT5 feed (no strategy logic). */
+/** Lightweight M30 → HTF bundle builder for live broker feed (no strategy logic). */
 
 function compressBars(m30, factor) {
   if (!m30.length) return [];

@@ -123,8 +123,8 @@ export function fmtRiskUsd(amount) {
   return `$${Math.round(amount).toLocaleString('en-US')}`;
 }
 
-export function pctOfBalanceLabel(pct, equity, mt5Live) {
+export function pctOfBalanceLabel(pct, equity, brokerLive) {
   const riskUsd = equity * (pct / 100);
   const bal = `$${Math.round(equity).toLocaleString('en-US')}`;
-  return mt5Live ? `${pct.toFixed(2)}% (${fmtRiskUsd(riskUsd)} of ${bal})` : `${pct.toFixed(2)}% (${fmtRiskUsd(riskUsd)} of $50k sim)`;
+  return brokerLive ? `${pct.toFixed(2)}% (${fmtRiskUsd(riskUsd)} of ${bal})` : `${pct.toFixed(2)}% (${fmtRiskUsd(riskUsd)} of $50k sim)`;
 }

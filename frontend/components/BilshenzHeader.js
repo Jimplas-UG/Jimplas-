@@ -178,7 +178,7 @@ export default function BilshenzHeader() {
       <AnimatedSvgLogo />
       <View style={styles.textStack}>
         <Text style={[styles.h1, { fontFamily: serifHeading }]}>BILSHENZ</Text>
-        <Text style={styles.sub}>Jimplas Capital Management · XAUUSD Spot Intelligence</Text>
+        <Text style={styles.sub}>Jimplas Capital Management · XAUUSDT Perpetual Intelligence</Text>
         <Text style={styles.vtag}>JIMPLAS FLUIDITY · P1/P2/P3 · M30 ENGINE</Text>
       </View>
     </View>

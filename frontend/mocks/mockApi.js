@@ -1,5 +1,5 @@
 /**
- * Mock API responses for offline dev preview — desk, MT5, Binance bridges.
+ * Mock API responses for offline dev preview — desk and Binance bridges.
  */
 import { buildSyntheticMarketBundle } from '../lib/syntheticMarket';
 import { ensureDeskSnapshot } from '../lib/snapshotDefaults';
@@ -122,18 +122,6 @@ export function mockBinanceStatus() {
   };
 }
 
-export function mockMt5Status() {
-  return {
-    connected: true,
-    account: {
-      balance: 50000,
-      equity: 50120,
-      currency: 'USD',
-      server: 'MockExness-Demo',
-      trade_allowed: true,
-    },
-  };
-}
 
 export function mockBars(symbol = 'XAUUSDT', count = 320) {
   const bars = buildSyntheticMarketBundle({ count, anchorClose: symbol.includes('DXY') ? 99.4 : 2654.2 }).m30;
@@ -202,8 +190,7 @@ export function tryMockFetch(url, init = {}) {
     return jsonResponse({ ok: true, service: 'mock-dev-bridge', mode: 'paper' });
   }
   if (u.includes('/api/status')) {
-    const binance = u.includes('binance') || u.includes('8766') || u.includes('/v1/binance');
-    return jsonResponse(binance ? mockBinanceStatus() : mockMt5Status());
+    return jsonResponse(mockBinanceStatus());
   }
   if (u.includes('/api/bars/')) {
     const sym = decodeURIComponent(u.split('/api/bars/')[1]?.split('?')[0] || 'XAUUSDT');

@@ -1,4 +1,6 @@
 import { getDeskApiUrl } from '../lib/envConfig';
+import { TRADING_SYMBOL } from '../lib/tradingSymbol';
+import { getDefaultBinanceBridgeUrl } from '../utils/binanceApiUrl';
 
 function trimSnippet(s, max = 400) {
   const t = s.replace(/\s+/g, ' ').trim();
@@ -36,14 +38,38 @@ export async function binanceFetch(baseUrl, path, options = {}, timeoutMs = 1500
 }
 
 export async function fetchBinanceConnected(apiBaseUrl, timeoutMs = 12000) {
+  const session = await fetchBinanceSession(apiBaseUrl, timeoutMs);
+  return session.ok;
+}
+
+/** Full bridge session — connected only when account payload is present. */
+export async function fetchBinanceSession(apiBaseUrl, timeoutMs = 12000) {
   const b = base(apiBaseUrl);
   try {
     const res = await binanceFetch(b, '/api/status', {}, timeoutMs);
-    if (!res.ok) return false;
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      return { ok: false, connected: false, account: null, mode: null, error: txt.slice(0, 200) || `HTTP ${res.status}` };
+    }
     const j = await res.json();
-    return !!j.connected;
-  } catch {
-    return false;
+    const account = j.account && typeof j.account === 'object' ? j.account : null;
+    const connected = !!j.connected && !!account;
+    return {
+      ok: connected,
+      connected: !!j.connected,
+      account,
+      mode: j.mode ?? null,
+      testnet: j.testnet,
+      error: connected ? null : j.error ?? (j.connected ? 'No account in status' : 'Bridge not connected'),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      connected: false,
+      account: null,
+      mode: null,
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
 }
 
@@ -92,7 +118,7 @@ export async function postBinanceLogin(apiBaseUrl, body, timeoutMs = 20000) {
   }
 }
 
-export async function fetchBinanceSymbolSpec(apiBaseUrl, symbol = 'XAUUSDT', pipSize = 0.1) {
+export async function fetchBinanceSymbolSpec(apiBaseUrl, symbol = TRADING_SYMBOL, pipSize = 0.1) {
   const b = base(apiBaseUrl);
   try {
     const res = await binanceFetch(b, `/api/symbol/${encodeURIComponent(symbol)}?pip_size=${pipSize}`);
@@ -111,7 +137,7 @@ export async function fetchBinanceSymbolSpec(apiBaseUrl, symbol = 'XAUUSDT', pip
   }
 }
 
-export async function fetchBinanceTick(apiBaseUrl, symbol = 'XAUUSDT') {
+export async function fetchBinanceTick(apiBaseUrl, symbol = TRADING_SYMBOL) {
   const b = base(apiBaseUrl);
   try {
     const res = await binanceFetch(b, `/api/tick/${encodeURIComponent(symbol)}`);
@@ -122,7 +148,32 @@ export async function fetchBinanceTick(apiBaseUrl, symbol = 'XAUUSDT') {
   }
 }
 
-export async function fetchBinanceBarsM30(apiBaseUrl, symbol = 'XAUUSDT', count = 320) {
+export async function fetchBinanceDeals(apiBaseUrl, limit = 100) {
+  const b = base(apiBaseUrl);
+  try {
+    const res = await binanceFetch(b, `/api/logs?limit=${limit}`, {}, 15000);
+    if (!res.ok) return [];
+    const j = await res.json();
+    return Array.isArray(j.deals) ? j.deals : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchBinancePositions(apiBaseUrl, symbol) {
+  const b = base(apiBaseUrl);
+  const qs = symbol ? `?symbol=${encodeURIComponent(symbol)}` : '';
+  try {
+    const res = await binanceFetch(b, `/api/positions${qs}`, {}, 12000);
+    if (!res.ok) return [];
+    const j = await res.json();
+    return Array.isArray(j.positions) ? j.positions : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchBinanceBarsM30(apiBaseUrl, symbol = TRADING_SYMBOL, count = 320) {
   const b = base(apiBaseUrl);
   try {
     const res = await binanceFetch(b, `/api/bars/${encodeURIComponent(symbol)}?count=${count}`);
@@ -144,7 +195,7 @@ export async function postBinanceOrderFromIntent(intent, opts) {
   if (!connected) {
     return { ok: false, status: 0, bodySnippet: 'Binance API not connected', connected: false };
   }
-  const sym = opts.symbol ?? intent.symbol ?? 'XAUUSDT';
+  const sym = opts.symbol ?? intent.symbol ?? TRADING_SYMBOL;
   const body = {
     symbol: sym,
     side,
@@ -197,5 +248,5 @@ export function getDefaultBinanceApiUrl(port = 8766) {
   if (desk && !/^https?:\/\/(localhost|127\.0\.0\.1)/i.test(desk)) {
     return `${desk.replace(/\/$/, '')}/v1/binance`;
   }
-  return `http://127.0.0.1:${port}`;
+  return getDefaultBinanceBridgeUrl(port);
 }

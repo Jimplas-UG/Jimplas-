@@ -1,3 +1,5 @@
+import { TRADING_SYMBOL } from '../lib/tradingSymbol';
+
 function trimSnippet(s, max = 400) {
   const t = s.replace(/\s+/g, ' ').trim();
   return t.length <= max ? t : `${t.slice(0, max)}…`;
@@ -57,7 +59,7 @@ export function buildBrokerOrderIntent(trade, opts) {
   return {
     source: 'bilshenz_v3',
     intentAtIso,
-    symbol: opts.symbol?.trim() || 'XAUUSD',
+    symbol: opts.symbol?.trim() || TRADING_SYMBOL,
     side: trade.side,
     setup,
     entry: trade.entry,
@@ -66,7 +68,7 @@ export function buildBrokerOrderIntent(trade, opts) {
     tp2: null,
     confidencePct: Number.isFinite(trade.confidencePct) ? trade.confidencePct : null,
     barTimeIso,
-    runMode: opts.runMode,
-    trigger: opts.trigger ?? 'manual',
+    lots: opts.lots ?? null,
+    quantity: opts.quantity ?? null,
   };
 }

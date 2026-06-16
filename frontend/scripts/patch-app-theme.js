@@ -55,11 +55,11 @@ for (const name of componentsNeedingHook) {
 // Remove styles block and DR before it (keep DR only in createAppStyles)
 src = src.replace(/\n\/\*\* Corner radii[\s\S]*?^const styles = StyleSheet\.create\(\{[\s\S]*?\n\}\);\n/m, '\n');
 
-// Add imports after Mt5BridgeContext import if missing
+// Add imports after BinanceBridgeContext import if missing
 if (!src.includes('useBilshenzTheme')) {
   src = src.replace(
-    "import { Mt5BridgeProvider, useMt5Bridge } from './contexts/Mt5BridgeContext';",
-    "import { Mt5BridgeProvider, useMt5Bridge } from './contexts/Mt5BridgeContext';\nimport { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';"
+    "import { BinanceBridgeProvider, useBinanceBridge } from './contexts/BinanceBridgeContext';",
+    "import { BinanceBridgeProvider, useBinanceBridge } from './contexts/BinanceBridgeContext';\nimport { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';"
   );
 }
 
@@ -71,12 +71,12 @@ src = src.replace(
 
 // App export wrap ThemeProvider
 src = src.replace(
-  '<Mt5BridgeProvider>\n        <AppRoot />',
-  '<ThemeProvider>\n      <Mt5BridgeProvider>\n        <AppRoot />\n      </Mt5BridgeProvider>\n    </ThemeProvider>'
+  '<BinanceBridgeProvider>\n        <AppRoot />',
+  '<ThemeProvider>\n      <BinanceBridgeProvider>\n        <AppRoot />\n      </BinanceBridgeProvider>\n    </ThemeProvider>'
 );
-if (src.includes('</Mt5BridgeProvider>\n    </SafeAreaProvider>')) {
+if (src.includes('</BinanceBridgeProvider>\n    </SafeAreaProvider>')) {
   src = src.replace(
-    '      </Mt5BridgeProvider>\n    </ThemeProvider>\n    </SafeAreaProvider>',
+    '      </BinanceBridgeProvider>\n    </ThemeProvider>\n    </SafeAreaProvider>',
     '    </ThemeProvider>\n    </SafeAreaProvider>'
   );
 }

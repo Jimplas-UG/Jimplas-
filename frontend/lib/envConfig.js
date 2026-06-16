@@ -25,25 +25,6 @@ export function getDeskApiUrl() {
 }
 
 /**
- * MT5 bridge URL — production uses desk-api proxy on :8791/v1/mt5
- * (avoids carrier blocks on direct :8765).
- */
-export function getMt5ApiUrl() {
-  const fromEnv = process.env.EXPO_PUBLIC_MT5_API_URL?.trim();
-  if (fromEnv) return stripTrailingSlash(fromEnv);
-
-  const fromExtra = extra('mt5ApiUrl');
-  if (fromExtra) return stripTrailingSlash(fromExtra);
-
-  const desk = getDeskApiUrl();
-  if (desk && !isLocalhostUrl(desk)) {
-    return `${stripTrailingSlash(desk)}/v1/mt5`;
-  }
-
-  return 'http://127.0.0.1:8765';
-}
-
-/**
  * Binance Futures bridge URL — production uses desk-api proxy on :8791/v1/binance
  */
 export function getBinanceApiUrl() {
@@ -72,15 +53,15 @@ export function isDeskRemote() {
 }
 
 export function isVpsDeployed() {
-  const mt5 = getMt5ApiUrl();
+  const binance = getBinanceApiUrl();
   const desk = getDeskApiUrl();
-  return !isLocalhostUrl(mt5) || !isLocalhostUrl(desk);
+  return !isLocalhostUrl(binance) || !isLocalhostUrl(desk);
 }
 
 export function envDiagnostics() {
   return {
     deskApiUrl: getDeskApiUrl(),
-    mt5ApiUrl: getMt5ApiUrl(),
+    binanceApiUrl: getBinanceApiUrl(),
     hasDeskKey: !!getDeskApiKey(),
     deskRemote: isDeskRemote(),
     vpsDeployed: isVpsDeployed(),

@@ -2,8 +2,6 @@
  * Binance Futures tick units — execution/risk boundary.
  * Engine snapshots may still use *Pips field names (frozen strategy).
  */
-import { isBinanceBroker } from './brokerMode';
-
 export const DEFAULT_STRATEGY_TICK_SIZE = 0.1;
 
 export function engineTickSize(cfg) {
@@ -61,11 +59,11 @@ export function verifyRiskPct(equity, targetRiskPct, entry, sl, quantity, tolera
 }
 
 export function positionSizeLabel() {
-  return isBinanceBroker() ? 'Contract Qty' : 'Lot Size';
+  return 'Contract Qty';
 }
 
 export function distanceUnit() {
-  return isBinanceBroker() ? 'tick' : 'pip';
+  return 'tick';
 }
 
 export function fmtDistance(n, decimals = 1) {

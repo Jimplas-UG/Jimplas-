@@ -12,17 +12,17 @@ function stripSlash(u) {
 module.exports = ({ config }) => {
   const deskApiUrl = stripSlash(process.env.EXPO_PUBLIC_DESK_API_URL || `http://${lanIp}:8791`);
   const deskApiKey = process.env.EXPO_PUBLIC_DESK_API_KEY || '';
-  const mt5ApiUrl = stripSlash(
-    process.env.EXPO_PUBLIC_MT5_API_URL ||
+  const binanceApiUrl = stripSlash(
+    process.env.EXPO_PUBLIC_BINANCE_API_URL ||
       (deskApiUrl.includes('127.0.0.1') || deskApiUrl.includes('localhost')
-        ? `http://${lanIp}:8765`
-        : `${deskApiUrl.replace(/\/$/, '')}/v1/mt5`),
+        ? `http://${lanIp}:8766`
+        : `${deskApiUrl.replace(/\/$/, '')}/v1/binance`),
   );
   const extra = {
     ...config.extra,
     deskApiUrl,
     deskApiKey,
-    mt5ApiUrl,
+    binanceApiUrl,
     deskRemote: isProd ? '1' : process.env.EXPO_PUBLIC_DESK_REMOTE ?? '1',
   };
   const projectId = process.env.EAS_PROJECT_ID ?? config.extra?.eas?.projectId;

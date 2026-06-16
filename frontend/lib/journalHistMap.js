@@ -16,68 +16,102 @@ export function mapJournalToHistRows(rows) {
   return (rows ?? []).map(mapJournalRowToHist);
 }
 
-/**
- * Map raw MT5 deals (from /api/logs) into the HistRow tuple format.
- * Filters to actual trades (type 0=BUY / 1=SELL with a symbol),
- * pairs entry+exit by position_id/order, and shows closed P&L.
- */
-export function mapMt5DealsToHistRows(deals) {
-  if (!Array.isArray(deals) || !deals.length) return [];
-  const tradeDealsSorted = deals
-    .filter((d) => (d.type === 0 || d.type === 1) && d.symbol)
-    .sort((a, b) => b.time - a.time);
+export const HIST_RANGE_OPTIONS = [
+  { id: 'today', badge: 'TODAY', label: 'Today' },
+  { id: 'week', badge: 'WEEKLY', label: 'Weekly' },
+  { id: '30d', badge: '30 DAYS', label: '30 Days' },
+];
 
-  return tradeDealsSorted.map((d) => {
-    const dt = new Date(d.time * 1000);
-    const hh = String(dt.getHours()).padStart(2, '0');
-    const mm = String(dt.getMinutes()).padStart(2, '0');
-    const timeStr = `${hh}:${mm}`;
-    const isBuy = d.type === 0;
-    const dir = isBuy ? '▲' : '▼';
-    const side = isBuy ? 'buy' : 'sell';
-    const priceStr = d.price > 0 ? d.price.toFixed(2) : '—';
-    const volStr = `${d.volume} lot`;
-    const profit = d.profit;
-    const isEntry = profit === 0;
-    let resultStr, outcome, kind;
-    if (isEntry) {
-      resultStr = 'Pending';
-      outcome = 'OPEN';
-      kind = 'open';
-    } else if (profit > 0) {
-      resultStr = `+$${profit.toFixed(2)}`;
-      outcome = 'WIN';
-      kind = 'win';
-    } else {
-      resultStr = `-$${Math.abs(profit).toFixed(2)}`;
-      outcome = 'SL HIT';
-      kind = 'loss';
-    }
-    return [timeStr, dir, 'MT5', priceStr, volStr, d.symbol, resultStr, outcome, side, kind];
+/** UTC start of calendar day, or rolling window for week / 30d. */
+export function histRangeCutoffMs(rangeKey, nowMs = Date.now()) {
+  const d = new Date(nowMs);
+  if (rangeKey === 'week') return nowMs - 7 * 24 * 3600 * 1000;
+  if (rangeKey === '30d') return nowMs - 30 * 24 * 3600 * 1000;
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+export function filterJournalRowsByRange(rows, m30, rangeKey, nowMs = Date.now()) {
+  const cutoff = histRangeCutoffMs(rangeKey, nowMs);
+  return (rows ?? []).filter((row) => {
+    const bi = row.barIndex;
+    const barT = m30?.[bi]?.t;
+    if (barT != null && Number.isFinite(barT)) return barT >= cutoff;
+    return rangeKey === 'today';
   });
 }
 
-/** Sum daily P&L from MT5 deals (type 0/1 only, today's date). */
-export function mt5DealsDailyPnl(deals) {
+export function filterBinanceDealsByRange(deals, rangeKey, nowMs = Date.now()) {
+  const cutoffMs = histRangeCutoffMs(rangeKey, nowMs);
+  return (deals ?? []).filter((d) => (d.time ?? 0) >= cutoffMs);
+}
+
+export function isBinanceDealRow(d) {
+  return d && (d.type === 'BUY' || d.type === 'SELL');
+}
+
+/** Map Binance userTrades (/api/logs) into HistRow tuples. */
+export function mapBinanceDealsToHistRows(deals) {
+  if (!Array.isArray(deals) || !deals.length) return [];
+  const sorted = [...deals].sort((a, b) => (b.time ?? 0) - (a.time ?? 0));
+  return sorted.map((d) => {
+    const t = d.time ?? 0;
+    const dt = new Date(t);
+    const hh = String(dt.getHours()).padStart(2, '0');
+    const mm = String(dt.getMinutes()).padStart(2, '0');
+    const timeStr = `${hh}:${mm}`;
+    const isBuy = d.type === 'BUY';
+    const dir = isBuy ? '▲' : '▼';
+    const side = isBuy ? 'buy' : 'sell';
+    const priceStr = d.price > 0 ? Number(d.price).toFixed(2) : '—';
+    const volStr = `${d.volume ?? '—'} qty`;
+    const profit = Number(d.profit ?? 0);
+    let resultStr;
+    let outcome;
+    let kind;
+    if (profit > 0) {
+      resultStr = `+$${profit.toFixed(2)}`;
+      outcome = 'WIN';
+      kind = 'win';
+    } else if (profit < 0) {
+      resultStr = `-$${Math.abs(profit).toFixed(2)}`;
+      outcome = 'SL HIT';
+      kind = 'loss';
+    } else {
+      resultStr = 'Fill';
+      outcome = 'OPEN';
+      kind = 'open';
+    }
+    return [timeStr, dir, 'BZX', priceStr, volStr, d.symbol ?? 'XAUUSDT', resultStr, outcome, side, kind];
+  });
+}
+
+export function binanceDealsDailyPnl(deals) {
   if (!Array.isArray(deals) || !deals.length) return 0;
   const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000;
+  const todayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   let total = 0;
   for (const d of deals) {
-    if ((d.type !== 0 && d.type !== 1) || !d.symbol) continue;
-    if (d.time < todayStart) continue;
-    total += d.profit;
+    if (!isBinanceDealRow(d)) continue;
+    if ((d.time ?? 0) < todayStart) continue;
+    total += Number(d.profit ?? 0);
   }
   return total;
 }
 
-/** Total P&L from all MT5 deals (type 0/1 with symbol). */
-export function mt5DealsTotalPnl(deals) {
+export function binanceDealsTotalPnl(deals) {
   if (!Array.isArray(deals) || !deals.length) return 0;
   let total = 0;
   for (const d of deals) {
-    if ((d.type !== 0 && d.type !== 1) || !d.symbol) continue;
-    total += d.profit;
+    if (!isBinanceDealRow(d)) continue;
+    total += Number(d.profit ?? 0);
   }
   return total;
+}
+
+export function brokerDealsDailyPnl(deals) {
+  return binanceDealsDailyPnl(deals);
+}
+
+export function brokerDealsTotalPnl(deals) {
+  return binanceDealsTotalPnl(deals);
 }
