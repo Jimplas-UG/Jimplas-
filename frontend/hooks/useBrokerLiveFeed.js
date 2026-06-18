@@ -1,4 +1,5 @@
 import { getBrokerMode, defaultSymbolForBroker } from '../lib/brokerMode';
+import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
 import { useBinanceLiveFeed } from './useBinanceLiveFeed';
 
 /**
@@ -11,6 +12,7 @@ export function useBrokerLiveFeed({
   symbol,
   pollTicks = true,
 }) {
+  const { setBaseUrl } = useBinanceBridge();
   const sym = symbol ?? defaultSymbolForBroker();
   const feed = useBinanceLiveFeed({
     baseUrl,
@@ -19,6 +21,7 @@ export function useBrokerLiveFeed({
     symbol: sym,
     pollTicks,
     publicQuotes: true,
+    onBridgeUrlResolved: setBaseUrl,
   });
   return { ...feed, brokerMode: getBrokerMode(), isBinance: true };
 }

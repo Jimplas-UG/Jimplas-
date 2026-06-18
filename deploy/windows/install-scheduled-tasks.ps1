@@ -27,6 +27,7 @@ function Register-BilshenzTask {
 }
 
 $WinDeploy = $PSScriptRoot
+Register-BilshenzTask -Name 'Binance-API' -Script (Join-Path $WinDeploy 'run-binance-api.ps1')
 Register-BilshenzTask -Name 'MT5-API' -Script (Join-Path $WinDeploy 'run-mt5-api.ps1')
 Register-BilshenzTask -Name 'DeskAPI' -Script (Join-Path $WinDeploy 'run-desk-api.ps1')
 Register-BilshenzTask -Name 'ForwardBot' -Script (Join-Path $WinDeploy 'run-forward-bot.ps1')

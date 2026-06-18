@@ -5,6 +5,8 @@
 #
 # Optional env before running:
 #   $env:DESK_API_KEY = "your-secret"
+#   $env:AUTH_JWT_SECRET = "your-auth-jwt-secret"
+#   $env:AUTH_DEV_OTP = "1"
 #   $env:BINANCE_API_KEY / BINANCE_API_SECRET / BINANCE_TESTNET=1
 
 $ErrorActionPreference = 'Stop'

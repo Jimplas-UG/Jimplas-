@@ -1,4 +1,4 @@
-# Start MT5 API + desk-api + forward bot + watchdog (no scheduled tasks). VPS Administrator.
+# Start Binance API + desk-api + forward bot + watchdog (no scheduled tasks). VPS Administrator.
 param([string]$AppDir = 'C:\opt\bilshenz')
 Set-ExecutionPolicy Bypass -Scope Process -Force
 $Win = Join-Path $AppDir 'deploy\windows'
@@ -19,36 +19,49 @@ function Test-PortListen([int]$Port) {
   $null -ne (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 }
 
-Write-Host '=== Ports before ===' -ForegroundColor Cyan
+$brokerMode = if ($env:BROKER_MODE) { $env:BROKER_MODE } else { 'binance' }
+Write-Host "=== Ports before (BROKER_MODE=$brokerMode) ===" -ForegroundColor Cyan
+Write-Host ('8766: ' + (Test-PortListen 8766))
 Write-Host ('8765: ' + (Test-PortListen 8765))
 Write-Host ('8791: ' + (Test-PortListen 8791))
 
-# Stop stale
 Get-Process python, node -EA SilentlyContinue | Where-Object {
-  $_.Path -match 'bilshenz|mt5_trading_system'
+  $_.Path -match 'bilshenz|binance_trading_system|mt5_trading_system'
 } | Stop-Process -Force -EA SilentlyContinue
 Start-Sleep 2
 
-$Py = Join-Path $AppDir 'mt5_trading_system\python'
-$pyexe = Join-Path $Py '.venv\Scripts\python.exe'
-if (-not (Test-Path $pyexe)) {
-  Write-Host 'FAIL: missing ' $pyexe -ForegroundColor Red
-  exit 1
-}
-
-$mt5 = $env:MT5_TERMINAL_PATH
-if (-not $mt5) { $mt5 = 'C:\Program Files\MetaTrader 5 Exness' }
-if (Test-Path (Join-Path $mt5 'terminal64.exe')) {
-  if (-not (Get-Process terminal64 -EA SilentlyContinue)) {
-    Start-Process (Join-Path $mt5 'terminal64.exe')
-    Start-Sleep 15
+if ($brokerMode -eq 'mt5') {
+  $Py = Join-Path $AppDir 'mt5_trading_system\python'
+  $pyexe = Join-Path $Py '.venv\Scripts\python.exe'
+  if (-not (Test-Path $pyexe)) { Write-Host "FAIL: missing $pyexe" -ForegroundColor Red; exit 1 }
+  $mt5 = $env:MT5_TERMINAL_PATH
+  if (-not $mt5) { $mt5 = 'C:\Program Files\MetaTrader 5 Exness' }
+  if (Test-Path (Join-Path $mt5 'terminal64.exe')) {
+    if (-not (Get-Process terminal64 -EA SilentlyContinue)) {
+      Start-Process (Join-Path $mt5 'terminal64.exe')
+      Start-Sleep 15
+    }
   }
-}
-
-if (-not (Test-PortListen 8765)) {
-  Write-Host 'Starting MT5 API...' -ForegroundColor Cyan
-  $c1 = "cd '$Py'; `$env:PORT='8765'; `$env:MT5_TERMINAL_PATH='$mt5'; & '$pyexe' main.py"
-  Start-Process powershell -WindowStyle Normal -ArgumentList '-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $c1
+  if (-not (Test-PortListen 8765)) {
+    Write-Host 'Starting MT5 API...' -ForegroundColor Cyan
+    $c1 = "cd '$Py'; `$env:PORT='8765'; `$env:MT5_TERMINAL_PATH='$mt5'; & '$pyexe' main.py"
+    Start-Process powershell -WindowStyle Normal -ArgumentList '-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $c1
+  }
+} else {
+  $BnPy = Join-Path $AppDir 'binance_trading_system\python'
+  $bnexe = Join-Path $BnPy '.venv\Scripts\python.exe'
+  if (-not (Test-Path $bnexe)) {
+    Write-Host 'Creating Binance venv...' -ForegroundColor Cyan
+    python -m venv (Join-Path $BnPy '.venv')
+    & (Join-Path $BnPy '.venv\Scripts\pip.exe') install -r (Join-Path $BnPy 'requirements.txt')
+    $bnexe = Join-Path $BnPy '.venv\Scripts\python.exe'
+  }
+  if (-not (Test-PortListen 8766)) {
+    Write-Host 'Starting Binance API...' -ForegroundColor Cyan
+    $hostBind = if ($env:BINANCE_API_HOST) { $env:BINANCE_API_HOST } else { '0.0.0.0' }
+    $c1 = "cd '$BnPy'; `$env:PORT='8766'; `$env:HOST='$hostBind'; & '$bnexe' main.py"
+    Start-Process powershell -WindowStyle Normal -ArgumentList '-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $c1
+  }
 }
 
 $backend = Join-Path $AppDir 'backend'

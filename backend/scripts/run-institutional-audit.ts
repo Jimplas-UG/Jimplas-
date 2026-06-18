@@ -235,7 +235,7 @@ async function main() {
   const sessPnl = { LONDON: 0, NY: 0, PRE: 0, DEAD: 0 };
   const sessN = { LONDON: 0, NY: 0, PRE: 0, DEAD: 0 };
   for (const t of trades) {
-    const ts = Date.parse((t as { time?: string; timeStr?: string }).time ?? t.timeStr ?? '');
+    const ts = Date.parse(t.time ?? '');
     if (!Number.isFinite(ts)) continue;
     const h = new Date(ts).getUTCHours();
     let bucket: keyof typeof sessPnl = 'DEAD';

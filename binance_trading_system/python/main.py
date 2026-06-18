@@ -7,21 +7,107 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import time
+from collections import defaultdict
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from binance_connector import BinanceConnector, config_from_env, _truthy
 from position_manager import PositionManager
+from tick_stream import BinanceTickStream
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("binance_api")
 
-app = FastAPI(title="Bilshenz Binance Bridge", version="1.0.0", docs_url=None, redoc_url=None, openapi_url=None)
+BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN", "").strip()
+_PUBLIC_PATHS = frozenset({"/health", "/ping", "/docs", "/openapi.json"})
+_SENSITIVE_PATHS = frozenset({"/api/login", "/api/order", "/api/attach", "/api/logout"})
+_rate_buckets: dict[str, list[float]] = defaultdict(list)
+_DEFAULT_SYMBOL = os.environ.get("BINANCE_SYMBOL", "XAUUSDT").upper()
+
+
+def _rate_ok(client_key: str, max_per_min: int = 20) -> bool:
+    now = time.time()
+    window = [t for t in _rate_buckets[client_key] if now - t < 60]
+    if len(window) >= max_per_min:
+        _rate_buckets[client_key] = window
+        return False
+    window.append(now)
+    _rate_buckets[client_key] = window
+    return True
+
+
+def _client_key(request: Request) -> str:
+    fwd = request.headers.get("X-Forwarded-For")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _token_from_request(request: Request) -> str:
+    token = request.headers.get("X-Bridge-Token", "").strip()
+    auth = request.headers.get("Authorization", "").strip()
+    if auth.lower().startswith("bearer "):
+        token = token or auth[7:].strip()
+    if not token:
+        token = request.query_params.get("token", "").strip()
+    return token
+
+
+def _bridge_token_ok(request: Request) -> bool:
+    if not BRIDGE_TOKEN:
+        return True
+    return _token_from_request(request) == BRIDGE_TOKEN
+
+
+def _ws_token_ok(websocket: WebSocket) -> bool:
+    if not BRIDGE_TOKEN:
+        return True
+    token = websocket.headers.get("X-Bridge-Token", "").strip()
+    auth = websocket.headers.get("Authorization", "").strip()
+    if auth.lower().startswith("bearer "):
+        token = token or auth[7:].strip()
+    if not token:
+        token = websocket.query_params.get("token", "").strip()
+    return token == BRIDGE_TOKEN
+
+
+connector = BinanceConnector(config_from_env())
+pos_mgr = PositionManager(connector)
+pos_mgr.start()
+
+tick_stream = BinanceTickStream(
+    get_testnet=lambda: connector.cfg.testnet,
+    default_symbol=_DEFAULT_SYMBOL,
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await tick_stream.start()
+    log.info("Binance tick WebSocket stream started")
+    yield
+    await tick_stream.stop()
+    log.info("Binance tick WebSocket stream stopped")
+
+
+app = FastAPI(
+    title="Bilshenz Binance Bridge",
+    version="1.2.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    lifespan=lifespan,
+)
 
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -33,24 +119,57 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class BridgeAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/ws/"):
+            return await call_next(request)
+        if BRIDGE_TOKEN and path not in _PUBLIC_PATHS and not _bridge_token_ok(request):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        if path in _SENSITIVE_PATHS:
+            key = _client_key(request)
+            limit = 8 if path == "/api/order" else 12
+            if not _rate_ok(key, limit):
+                return JSONResponse({"detail": "rate limit exceeded"}, status_code=429)
+        return await call_next(request)
+
+
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(BridgeAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.environ.get("CORS_ORIGINS", "http://127.0.0.1:8791").split(","),
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-Bridge-Token"],
 )
 
-connector = BinanceConnector(config_from_env())
-pos_mgr = PositionManager(connector)
-pos_mgr.start()
+_PUBLIC_CACHE_TTL_SEC = float(os.environ.get("BINANCE_PUBLIC_CACHE_TTL", "45"))
+_bars_cache: dict[tuple, tuple[float, list]] = {}
 
 
 class LoginBody(BaseModel):
     api_key: str = Field(..., min_length=1, max_length=128)
     api_secret: str = Field(..., min_length=1, max_length=128)
     testnet: bool = True
+
+
+def _login_error_detail(err: str, testnet: bool) -> str:
+    msg = err or "Binance login failed"
+    if testnet:
+        if re.search(r"invalid api-key|api-key format|signature|permissions", msg, re.I):
+            msg = (
+                f"{msg} — create Futures API keys at testnet.binancefuture.com "
+                "(enable Futures + Read; mainnet keys will not work on testnet)"
+            )
+        else:
+            msg = f"{msg} (testnet mode — keys must be from testnet.binancefuture.com)"
+    else:
+        if re.search(r"invalid api-key|api-key format|signature|permissions", msg, re.I):
+            msg = f"{msg} — use mainnet Futures keys from binance.com (testnet keys will not work on mainnet)"
+        else:
+            msg = f"{msg} (mainnet mode — ensure key is from binance.com, not testnet)"
+    return msg
 
 
 class OrderBody(BaseModel):
@@ -71,7 +190,12 @@ def ping():
 @app.get("/health")
 def health():
     mode = "paper" if connector.cfg.paper else ("testnet" if connector.cfg.testnet else "live")
-    return {"ok": True, "service": "bilshenz-binance-bridge", "mode": mode}
+    return {
+        "ok": True,
+        "service": "bilshenz-binance-bridge",
+        "mode": mode,
+        "tick_stream": tick_stream.status(),
+    }
 
 
 @app.post("/api/login")
@@ -81,9 +205,14 @@ def api_login(body: LoginBody):
     connector.configure(body.api_key, body.api_secret, body.testnet)
     snap = connector.status_snapshot()
     if not snap.get("connected"):
-        err = snap.get("error") or "Binance login failed — check API key/secret, testnet toggle, and IP whitelist"
+        err = _login_error_detail(snap.get("error") or "Binance login failed", body.testnet)
         raise HTTPException(status_code=401, detail=err)
-    return {"ok": True, "account": snap.get("account"), "mode": snap.get("mode")}
+    return {
+        "ok": True,
+        "account": snap.get("account"),
+        "mode": snap.get("mode"),
+        "testnet": bool(body.testnet),
+    }
 
 
 @app.post("/api/attach")
@@ -127,10 +256,19 @@ def api_resolve_symbol(symbol: str, pip_size: float = 0.1):
 
 @app.get("/api/bars/{symbol}")
 def api_bars(symbol: str, count: int = 320, from_ms: int | None = None, to_ms: int | None = None):
-    if from_ms is not None and to_ms is not None:
-        bars = connector.bars_m30_range(symbol, from_ms, to_ms)
+    sym = symbol.upper()
+    cache_key = (sym, int(count), from_ms, to_ms)
+    now = time.time()
+    cached = _bars_cache.get(cache_key)
+    if cached and now - cached[0] < _PUBLIC_CACHE_TTL_SEC:
+        bars = cached[1]
     else:
-        bars = connector.bars_m30(symbol, count)
+        if from_ms is not None and to_ms is not None:
+            bars = connector.bars_m30_range(symbol, from_ms, to_ms)
+        else:
+            bars = connector.bars_m30(symbol, count)
+        if bars:
+            _bars_cache[cache_key] = (now, bars)
     if not bars:
         raise HTTPException(status_code=503, detail="No bars — check symbol or API")
     if connector.cfg.paper and bars:
@@ -143,6 +281,15 @@ def api_bars(symbol: str, count: int = 320, from_ms: int | None = None, to_ms: i
 
 @app.get("/api/tick/{symbol}")
 def api_tick(symbol: str):
+    sym = symbol.upper()
+    tick_stream.subscribe_symbol(sym)
+    ws_tick = tick_stream.get_tick(sym, max_age_sec=30.0)
+    if ws_tick:
+        if connector.cfg.paper:
+            from paper_simulator import paper_store
+
+            paper_store.set_tick(symbol, ws_tick["bid"], ws_tick["ask"])
+        return ws_tick
     t = connector.tick(symbol)
     if t is None:
         raise HTTPException(status_code=503, detail="No tick")
@@ -151,6 +298,17 @@ def api_tick(symbol: str):
 
         paper_store.set_tick(symbol, t["bid"], t["ask"])
     return t
+
+
+@app.websocket("/ws/tick/{symbol}")
+async def ws_tick(websocket: WebSocket, symbol: str):
+    if not _ws_token_ok(websocket):
+        await websocket.close(code=4401, reason="unauthorized")
+        return
+    try:
+        await tick_stream.serve_client(websocket, symbol)
+    except WebSocketDisconnect:
+        pass
 
 
 @app.get("/api/positions")
@@ -166,6 +324,23 @@ def api_order(body: OrderBody):
     if not r.get("ok"):
         raise HTTPException(status_code=400, detail=r)
     return r
+
+
+@app.get("/api/order/{order_id}")
+def api_order_status(order_id: int, symbol: str = "XAUUSDT"):
+    """Poll order fill status for reconciliation."""
+    if not connector.cfg.api_key:
+        raise HTTPException(status_code=401, detail="not connected")
+    try:
+        row = connector._request(
+            "GET",
+            "/fapi/v1/order",
+            {"symbol": symbol.upper(), "orderId": int(order_id)},
+            signed=True,
+        )
+        return {"ok": True, "order": row}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.get("/api/logs")

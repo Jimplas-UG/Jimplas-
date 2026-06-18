@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "baseUrl": "."
   },
-  "include": ["engine/**/*.ts", "broker/**/*.ts", "src/**/*.ts", "scripts/**/*.ts", "security/**/*.js"]
+  "include": ["engine/**/*.ts", "broker/**/*.ts", "src/**/*.ts", "security/**/*.js"]
 }

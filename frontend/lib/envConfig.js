@@ -46,6 +46,11 @@ export function getDeskApiKey() {
   return process.env.EXPO_PUBLIC_DESK_API_KEY?.trim() || extra('deskApiKey') || '';
 }
 
+/** Optional direct-bridge token when BRIDGE_TOKEN is set on Python API (LAN dev). */
+export function getBridgeToken() {
+  return process.env.EXPO_PUBLIC_BRIDGE_TOKEN?.trim() || extra('bridgeToken') || '';
+}
+
 export function isDeskRemote() {
   if (process.env.EXPO_PUBLIC_DESK_LOCAL === '1') return false;
   if (process.env.EXPO_PUBLIC_DESK_REMOTE === '1') return true;

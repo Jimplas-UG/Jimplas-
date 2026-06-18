@@ -1,6 +1,6 @@
 import { getDeskApiUrl } from '../lib/envConfig';
 import { TRADING_SYMBOL } from '../lib/tradingSymbol';
-import { getDefaultBinanceBridgeUrl } from '../utils/binanceApiUrl';
+import { getDefaultBinanceBridgeUrl, binanceBridgeUrlCandidates } from '../utils/binanceApiUrl';
 
 function trimSnippet(s, max = 400) {
   const t = s.replace(/\s+/g, ' ').trim();
@@ -17,6 +17,10 @@ export function binanceHeaders(baseUrl, extraHeaders = {}) {
     const { getDeskApiKey } = require('../lib/envConfig');
     const key = getDeskApiKey();
     if (key) headers.Authorization = `Bearer ${key}`;
+  } else {
+    const { getBridgeToken } = require('../lib/envConfig');
+    const bridgeToken = getBridgeToken();
+    if (bridgeToken) headers['X-Bridge-Token'] = bridgeToken;
   }
   return headers;
 }
@@ -42,35 +46,69 @@ export async function fetchBinanceConnected(apiBaseUrl, timeoutMs = 12000) {
   return session.ok;
 }
 
-/** Full bridge session — connected only when account payload is present. */
-export async function fetchBinanceSession(apiBaseUrl, timeoutMs = 12000) {
-  const b = base(apiBaseUrl);
-  try {
-    const res = await binanceFetch(b, '/api/status', {}, timeoutMs);
-    if (!res.ok) {
-      const txt = await res.text().catch(() => '');
-      return { ok: false, connected: false, account: null, mode: null, error: txt.slice(0, 200) || `HTTP ${res.status}` };
-    }
-    const j = await res.json();
-    const account = j.account && typeof j.account === 'object' ? j.account : null;
-    const connected = !!j.connected && !!account;
-    return {
-      ok: connected,
-      connected: !!j.connected,
-      account,
-      mode: j.mode ?? null,
-      testnet: j.testnet,
-      error: connected ? null : j.error ?? (j.connected ? 'No account in status' : 'Bridge not connected'),
-    };
-  } catch (e) {
-    return {
-      ok: false,
-      connected: false,
-      account: null,
-      mode: null,
-      error: e instanceof Error ? e.message : String(e),
-    };
+function parseApiDetail(j, fallback = 'Request failed') {
+  if (typeof j?.detail === 'string') return j.detail;
+  if (Array.isArray(j?.detail)) {
+    return j.detail.map((d) => d?.msg || d?.message || JSON.stringify(d)).join('; ');
   }
+  if (j?.detail && typeof j.detail === 'object') {
+    return JSON.stringify(j.detail);
+  }
+  return fallback;
+}
+
+export async function fetchBinanceSession(apiBaseUrl, timeoutMs = 12000, retries = 1) {
+  const b = base(apiBaseUrl);
+  let last = null;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await binanceFetch(b, '/api/status', {}, timeoutMs);
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        let detail = txt.slice(0, 200) || `HTTP ${res.status}`;
+        try {
+          const j = JSON.parse(txt);
+          detail = parseApiDetail(j, detail);
+        } catch {
+          /* keep txt */
+        }
+        if (res.status === 401 && /unauthorized/i.test(detail)) {
+          detail = 'Bridge auth failed — set EXPO_PUBLIC_BRIDGE_TOKEN to match BRIDGE_TOKEN on the PC bridge.';
+        }
+        last = { ok: false, connected: false, account: null, mode: null, error: detail };
+        if (i < retries) {
+          await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+          continue;
+        }
+        return last;
+      }
+      const j = await res.json();
+      const account = j.account && typeof j.account === 'object' ? j.account : null;
+      const connected = !!j.connected && !!account;
+      return {
+        ok: connected,
+        connected: !!j.connected,
+        account,
+        mode: j.mode ?? null,
+        testnet: j.testnet,
+        error: connected ? null : j.error ?? (j.connected ? 'No account in status' : 'Bridge not connected'),
+      };
+    } catch (e) {
+      last = {
+        ok: false,
+        connected: false,
+        account: null,
+        mode: null,
+        error: e instanceof Error ? e.message : String(e),
+      };
+      if (i < retries) {
+        await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+        continue;
+      }
+      return last;
+    }
+  }
+  return last ?? { ok: false, connected: false, account: null, mode: null, error: 'Unknown error' };
 }
 
 export async function probeBinanceBridge(apiBaseUrl, attempts = 3) {
@@ -110,9 +148,15 @@ export async function postBinanceLogin(apiBaseUrl, body, timeoutMs = 20000) {
     );
     const j = await res.json().catch(() => ({}));
     if (!res.ok) {
-      return { ok: false, detail: typeof j.detail === 'string' ? j.detail : JSON.stringify(j) };
+      let detail = parseApiDetail(j, `HTTP ${res.status}`);
+      if (res.status === 401 && /unauthorized/i.test(detail)) {
+        detail = 'Bridge auth failed — add EXPO_PUBLIC_BRIDGE_TOKEN in .env.local (must match PC bridge BRIDGE_TOKEN).';
+      } else if (res.status === 401 && /invalid|api-key|permission|ip/i.test(detail)) {
+        detail = `${detail} — check Testnet vs Mainnet toggle matches where you created the key, and enable Futures + Read permissions.`;
+      }
+      return { ok: false, detail, status: res.status };
     }
-    return { ok: true, account: j.account || null };
+    return { ok: true, account: j.account || null, mode: j.mode ?? null };
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) };
   }
@@ -173,16 +217,34 @@ export async function fetchBinancePositions(apiBaseUrl, symbol) {
   }
 }
 
-export async function fetchBinanceBarsM30(apiBaseUrl, symbol = TRADING_SYMBOL, count = 320) {
+export async function fetchBinanceBarsM30(apiBaseUrl, symbol = TRADING_SYMBOL, count = 320, timeoutMs) {
   const b = base(apiBaseUrl);
+  const ms = timeoutMs ?? Math.min(45000, 10000 + Math.max(50, count) * 12);
   try {
-    const res = await binanceFetch(b, `/api/bars/${encodeURIComponent(symbol)}?count=${count}`);
+    const res = await binanceFetch(b, `/api/bars/${encodeURIComponent(symbol)}?count=${count}`, {}, ms);
     if (!res.ok) return [];
     const j = await res.json();
     return Array.isArray(j.bars) ? j.bars : [];
   } catch {
     return [];
   }
+}
+
+/** Pick first bridge URL that responds — prefers one with M30 bars, falls back to health-only. */
+export async function pickReachableBinanceBridgeUrl(preferred = '', symbol = TRADING_SYMBOL) {
+  let healthOnly = null;
+  for (const url of binanceBridgeUrlCandidates(preferred)) {
+    try {
+      const health = await binanceFetch(url, '/health', {}, 8000);
+      if (!health.ok) continue;
+      if (!healthOnly) healthOnly = url.replace(/\/$/, '');
+      const bars = await fetchBinanceBarsM30(url, symbol, 10, 20000);
+      if (bars.length > 0) return url.replace(/\/$/, '');
+    } catch {
+      /* try next */
+    }
+  }
+  return healthOnly;
 }
 
 export async function postBinanceOrderFromIntent(intent, opts) {
@@ -238,6 +300,26 @@ export async function postBinanceOrderFromIntent(intent, opts) {
     };
   } catch (e) {
     return { ok: false, status: 0, bodySnippet: trimSnippet(e instanceof Error ? e.message : String(e)), connected };
+  }
+}
+
+/** Poll order fill status after market order (reconciliation). */
+export async function fetchBinanceOrderStatus(apiBaseUrl, orderId, symbol = TRADING_SYMBOL, timeoutMs = 15000) {
+  const b = base(apiBaseUrl);
+  try {
+    const res = await binanceFetch(
+      b,
+      `/api/order/${encodeURIComponent(String(orderId))}?symbol=${encodeURIComponent(symbol)}`,
+      {},
+      timeoutMs,
+    );
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { ok: false, error: typeof j.detail === 'string' ? j.detail : `HTTP ${res.status}` };
+    }
+    return { ok: true, order: j.order ?? null };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 

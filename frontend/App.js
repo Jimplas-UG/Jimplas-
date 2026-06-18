@@ -27,6 +27,7 @@ import BinanceStatusStrip from './components/BinanceStatusStrip';
 import GeoPoliticalTicker from './components/GeoPoliticalTicker';
 
 const BinanceBridgePanelLazy = lazy(() => import('./components/BinanceBridgePanel'));
+const AccountProfileCardLazy = lazy(() => import('./components/auth/AccountProfileCard'));
 import {
   buildBrokerOrderIntent,
   canExecuteTrade,
@@ -37,6 +38,9 @@ import { BinanceBridgeProvider, useBinanceBridge } from './contexts/BinanceBridg
 import { defaultSymbolForBroker } from './lib/brokerMode';
 import { TRADING_PAIR_LABEL, TRADING_SYMBOL } from './lib/tradingSymbol';
 import { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';
+import { AuthProvider } from './contexts/AuthContext';
+import AuthGate from './components/auth/AuthGate';
+import EmailVerificationBanner from './components/auth/EmailVerificationBanner';
 import { mapJournalToHistRows, mapSessionBitsFromEngine, mapSrFromEngine } from './hooks/deskComputeLocal';
 import {
   filterJournalRowsByRange,
@@ -48,6 +52,9 @@ import {
 } from './lib/journalHistMap';
 import { useBilshenzMarketEngine } from './hooks/useBilshenzMarketEngine';
 import BootFallback from './components/BootFallback';
+import OnboardingGate, { useOnboardingDone } from './components/OnboardingGate';
+import SkeletonLoader from './components/ui/SkeletonLoader';
+import ErrorState from './components/ui/ErrorState';
 import { useBrokerLiveFeed } from './hooks/useBrokerLiveFeed';
 import { isDevPreview, skipSplash, useMockApi } from './lib/devPreview';
 import { DevPreviewProvider } from './contexts/DevPreviewContext';
@@ -1980,6 +1987,15 @@ function ProfileTab({
       <Suspense
         fallback={
           <View style={{ paddingVertical: 12, paddingHorizontal: pad }}>
+            <Text style={{ color: C.dim, fontSize: 11 }}>Loading account…</Text>
+          </View>
+        }>
+        <AccountProfileCardLazy />
+      </Suspense>
+
+      <Suspense
+        fallback={
+          <View style={{ paddingVertical: 12, paddingHorizontal: pad }}>
             <Text style={{ color: C.dim, fontSize: 11 }}>Loading broker…</Text>
           </View>
         }>
@@ -2559,6 +2575,232 @@ function GodmodeHome({
   );
 }
 
+/** Mobile INTEL tab — godmode essentials only (full desk stays on TRADE / wide layout). */
+function GodmodeIntel({
+  pad,
+  price,
+  sr,
+  spread,
+  spHigh,
+  sessionBits,
+  sigPill,
+  pillStyle,
+  sigMuted,
+  engineTrade,
+  execBusy,
+  tradeCount,
+  onExecute,
+  onSkip,
+  flowNodes,
+  feedReady,
+  feedError,
+  brokerConnected,
+  autoExecuteSignals,
+  onOpenProfile,
+  onOpenTrade,
+}) {
+  const { colors: C, styles } = useBilshenzTheme();
+  const eng = useContext(BilshenzEngineCtx);
+  const snap = eng?.snapshot;
+  const cfg = eng?.cfg;
+  const bias = snap?.bias;
+  const risk = snap?.risk;
+  const engineReady = eng?.hydrated === true;
+  const tradeCap = cfg?.maxDailyTrades ?? 5;
+  const pip = cfg?.pipSize ?? 0.1;
+  const jLive = deskChannelStates(snap?.signals);
+  const wickLines = snap?.wick ? wickStoryLines(snap.wick, pip) : { main: 'M30 wick scan — engine idle', sub: '—' };
+  const sideLbl = SHOW_STRATEGY_INTEL
+    ? engineTrade?.side === 'SELL'
+      ? 'SELL'
+      : engineTrade?.side === 'BUY'
+        ? 'BUY'
+        : 'SCAN'
+    : publicSignalSide(engineTrade);
+  const biasWord = bias?.isBullish ? 'BULLISH' : bias?.isBearish ? 'BEARISH' : 'NEUTRAL';
+  const biasCol = bias?.isBullish ? C.green : bias?.isBearish ? C.red : C.amber;
+  const spreadCol = spHigh ? C.red : C.green;
+  const scanCol = sr.bullClean || sr.bearClean ? C.green : C.amber;
+  const blockers = (flowNodes ?? []).filter((n) => n.state === 'fail' || n.state === 'warn').slice(0, 6);
+  const passCount = (flowNodes ?? []).filter((n) => n.state === 'pass').length;
+  const sessShort = sessionBits.act
+    ? sessionBits.s3
+      ? 'NY'
+      : sessionBits.s2
+        ? 'LONDON'
+        : 'PRE-LDN'
+    : 'OFF';
+
+  return (
+    <ScrollView
+      style={{ flex: 1 }}
+      contentContainerStyle={[styles.ghWrap, { paddingBottom: 24 }]}
+      showsVerticalScrollIndicator={false}>
+      <View style={{ paddingHorizontal: pad, marginTop: 6, marginBottom: 8 }}>
+        <BinanceStatusStrip
+          feedReady={feedReady}
+          feedError={feedError}
+          connected={brokerConnected}
+          autoExecute={autoExecuteSignals}
+          onPressConnect={onOpenProfile}
+        />
+      </View>
+
+      <View style={[styles.sigCard, styles.sigCardCompact, { marginHorizontal: pad, marginBottom: 10 }, sigMuted && { opacity: 0.35 }]}>
+        <View style={styles.sigGlow} />
+        <TradeSignalCompact
+          sideLbl={sideLbl}
+          sideColor={
+            engineTrade?.side === 'SELL' ? C.red : engineTrade?.side === 'BUY' ? C.green : C.dim
+          }
+          trade={engineTrade}
+          sessionBits={sessionBits}
+          sigPill={sigPill}
+          pillStyle={pillStyle}
+          engineTrade={engineTrade}
+          jLive={jLive}
+          wickLines={wickLines}
+          engineReady={engineReady}
+          execBusy={execBusy}
+          tradeCount={tradeCount}
+          tradeCap={tradeCap}
+          onExecute={onExecute}
+          onSkip={onSkip}
+        />
+      </View>
+
+      <View style={[styles.ghVerdictCard, { marginHorizontal: pad, marginBottom: 10 }]}>
+        <Text style={styles.ghVerdictLbl}>SCANNER VERDICT</Text>
+        <Text style={[styles.ghVerdictMain, { color: sr.verdictValColor }]}>{sr.verdictVal}</Text>
+        <Text style={styles.ghVerdictSub} numberOfLines={2}>
+          {sr.verdictSub}
+        </Text>
+      </View>
+
+      <View style={{ paddingHorizontal: pad, marginBottom: 10 }}>
+        <View style={[styles.ghGrid2, { marginTop: 0 }]}>
+          <View style={styles.ghStatTile}>
+            <Text style={styles.ghStatLbl}>HTF BIAS</Text>
+            <Text style={[styles.ghStatVal, { color: biasCol, fontSize: 14 }]}>{biasWord}</Text>
+          </View>
+          <View style={styles.ghStatTile}>
+            <Text style={styles.ghStatLbl}>SESSION</Text>
+            <Text style={[styles.ghStatVal, { color: sessionBits.act ? C.green : C.amber, fontSize: 14 }]}>
+              {sessShort}
+            </Text>
+          </View>
+        </View>
+        <View style={[styles.ghGrid2, { marginTop: 10 }]}>
+          <View style={styles.ghStatTile}>
+            <Text style={styles.ghStatLbl}>SPREAD</Text>
+            <Text style={[styles.ghStatVal, { color: spreadCol, fontSize: 14 }]}>{spread.toFixed(2)}p</Text>
+          </View>
+          <View style={styles.ghStatTile}>
+            <Text style={styles.ghStatLbl}>LEFT SIDE</Text>
+            <Text style={[styles.ghStatVal, { color: scanCol, fontSize: 13 }]}>
+              {sr.bullClean ? 'BULL ✓' : sr.bearClean ? 'BEAR ✓' : 'WAIT'}
+            </Text>
+          </View>
+        </View>
+      </View>
+
+      <View style={[styles.ghVerdictCard, { marginHorizontal: pad, marginBottom: 10, paddingVertical: 12 }]}>
+        <Text style={styles.ghVerdictLbl}>M30 LEVELS</Text>
+        <Row style={{ justifyContent: 'space-between', alignItems: 'flex-end', marginTop: 4 }}>
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: C.red, fontSize: 8, fontWeight: '700', letterSpacing: 0.8 }}>RES</Text>
+            <Text style={{ color: C.red, fontSize: 15, fontWeight: '800' }}>{sr.immRes ? fmtNum(sr.immRes) : '—'}</Text>
+            <Text style={{ color: C.dim, fontSize: 9 }}>+{sr.distRes}p</Text>
+          </View>
+          <View style={{ flex: 1, alignItems: 'center' }}>
+            <Text style={{ color: C.goldL, fontSize: 8, fontWeight: '700', letterSpacing: 0.8 }}>PRICE</Text>
+            <Text style={{ color: C.goldL, fontSize: 17, fontWeight: '900' }}>{fmtNum(price ?? sr.currentPrice)}</Text>
+          </View>
+          <View style={{ flex: 1, alignItems: 'flex-end' }}>
+            <Text style={{ color: C.green, fontSize: 8, fontWeight: '700', letterSpacing: 0.8 }}>SUP</Text>
+            <Text style={{ color: C.green, fontSize: 15, fontWeight: '800' }}>{sr.immSup ? fmtNum(sr.immSup) : '—'}</Text>
+            <Text style={{ color: C.dim, fontSize: 9 }}>-{sr.distSup}p</Text>
+          </View>
+        </Row>
+      </View>
+
+      {SHOW_STRATEGY_INTEL && blockers.length ? (
+        <View style={{ marginHorizontal: pad, marginBottom: 10 }}>
+          <Text style={[styles.ghVerdictLbl, { marginBottom: 8 }]}>
+            BLOCKERS · {passCount}/{(flowNodes ?? []).length} gates clear
+          </Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            <Row style={{ gap: 8 }}>
+              {blockers.map((n) => (
+                <View
+                  key={n.id}
+                  style={[
+                    styles.fnode,
+                    n.state === 'fail' ? styles.fnodeFail : styles.fnodeWarn,
+                    { minWidth: 72, paddingVertical: 8, paddingHorizontal: 6 },
+                  ]}>
+                  <Text style={styles.fi}>{n.icon}</Text>
+                  <Text style={styles.fn}>{n.sn}</Text>
+                </View>
+              ))}
+            </Row>
+          </ScrollView>
+        </View>
+      ) : SHOW_STRATEGY_INTEL ? (
+        <View style={[styles.ghVerdictCard, { marginHorizontal: pad, marginBottom: 10, borderColor: 'rgba(0,230,118,0.35)' }]}>
+          <Text style={[styles.ghVerdictLbl, { color: C.green }]}>GATES</Text>
+          <Text style={[styles.ghVerdictMain, { color: C.green, fontSize: 14 }]}>
+            {passCount}/{(flowNodes ?? []).length} CLEAR
+          </Text>
+        </View>
+      ) : null}
+
+      {risk ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={{ marginBottom: 10 }}
+          contentContainerStyle={{ paddingHorizontal: pad, gap: 8, flexDirection: 'row' }}>
+          {buildGmAlertRows(risk, false, false, C)
+            .slice(0, 4)
+            .map((row, i) => (
+              <View
+                key={i}
+                style={{
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                  borderRadius: 8,
+                  borderWidth: 1,
+                  borderColor: row.color + '55',
+                  backgroundColor: row.color + '12',
+                }}>
+                <Text style={{ color: row.color, fontSize: 9, fontWeight: '700', letterSpacing: 0.5 }}>{row.text}</Text>
+              </View>
+            ))}
+        </ScrollView>
+      ) : null}
+
+      <Pressable
+        onPress={onOpenTrade}
+        style={({ pressed }) => [
+          styles.ghVerdictCard,
+          {
+            marginHorizontal: pad,
+            borderColor: 'rgba(212,180,90,0.45)',
+            backgroundColor: pressed ? 'rgba(212,180,90,0.12)' : 'rgba(212,180,90,0.06)',
+            alignItems: 'center',
+            paddingVertical: 14,
+          },
+        ]}>
+        <Text style={{ color: C.goldL, fontSize: 12, fontWeight: '800', letterSpacing: 1 }}>
+          OPEN TRADE DESK →
+        </Text>
+        <Text style={{ color: C.dim, fontSize: 9, marginTop: 4 }}>Levels · sizing · full chart</Text>
+      </Pressable>
+    </ScrollView>
+  );
+}
+
 function MobileCompactStrip({ price, spread, pad, utcStr, est, tickerItems, tapeTheme, dayOpen }) {
   const { colors: C, styles } = useBilshenzTheme();
   const ref = dayOpen != null && Number.isFinite(dayOpen) ? dayOpen : 4698.2;
@@ -2686,6 +2928,7 @@ function AppContent({ onEngineReady }) {
   const [autoExecuteSignals, setAutoExecuteSignals] = useState(false);
   const [paperBtAutoExec, setPaperBtAutoExec] = useState(true);
   const userDisabledAutoExecRef = useRef(false);
+  const { done: onboardingDone, markDone: markOnboardingDone } = useOnboardingDone();
 
   const onAutoExecuteSignalsChange = useCallback((enabled) => {
     userDisabledAutoExecRef.current = !enabled;
@@ -3435,19 +3678,47 @@ function AppContent({ onEngineReady }) {
   if (!bundleReady || (useBrokerForEngine && !brokerFeed.feedReady && !mockApi)) {
     return (
       <View style={[styles.safeRoot, { alignItems: 'center', justifyContent: 'center', padding: 24 }]}>
-        <Text style={{ color: C.dim, fontSize: 12, textAlign: 'center' }}>
-          {mockApi
-            ? 'Loading dev preview…'
-            : useBrokerForEngine
-              ? brokerFeed.feedError || 'Loading XAUUSDT history from Binance…'
-              : 'Loading market engine…'}
-        </Text>
+        {mockApi ? (
+          <Text style={{ color: C.dim, fontSize: 12, textAlign: 'center' }}>Loading dev preview…</Text>
+        ) : (
+          <>
+            <Text style={{ color: C.goldL, fontSize: 13, fontWeight: '700', letterSpacing: 1, marginBottom: 16 }}>
+              SYNCING XAUUSDT
+            </Text>
+            <View style={{ width: Math.min(width - 48, 320) }}>
+              {brokerFeed.feedError ? (
+                <ErrorState
+                  title="Feed unavailable"
+                  message={brokerFeed.feedError}
+                  onRetry={brokerFeed.refreshFeed}
+                  retryLabel="Retry bridge"
+                />
+              ) : (
+                <SkeletonLoader rows={4} height={16} />
+              )}
+            </View>
+            {!brokerFeed.feedError ? (
+              <Text style={{ color: C.dim, fontSize: 11, textAlign: 'center', marginTop: 16 }}>
+                Loading M30 bars from Binance bridge…
+              </Text>
+            ) : null}
+          </>
+        )}
       </View>
     );
   }
 
   return (
     <BilshenzEngineCtx.Provider value={engineCtxValue}>
+      <OnboardingGate
+        visible={onboardingDone === false && !mockApi}
+        onComplete={markOnboardingDone}
+        onOpenProfile={() => {
+          markOnboardingDone();
+          setMobileTab('profile');
+        }}
+      />
+      <EmailVerificationBanner />
       <SafeAreaView style={styles.safeRoot} edges={['top']}>
         <View style={styles.root}>
           <ScrollView
@@ -3723,65 +3994,30 @@ function AppContent({ onEngineReady }) {
                 />
               </View>
             ) : mobileTab === 'desk' ? (
-              <View style={[styles.grid, { paddingHorizontal: pad, flexDirection: 'column', alignItems: 'stretch' }]}>
-                <View style={{ paddingBottom: 8 }}>
-                  <BinanceStatusStrip
-                    feedReady={brokerFeed.feedReady}
-                    feedError={brokerFeed.feedError}
-                    connected={brokerConnected}
-                    autoExecute={autoExecuteSignals}
-                    onPressConnect={() => setMobileTab('profile')}
-                  />
-                </View>
-                <View style={[styles.col, { width: '100%' }]}>
-                  <LeftColumn sr={sr} dxy={dxy} />
-                </View>
-                <View style={[styles.col, { width: '100%' }]}>
-                  <CenterColumn
-                    price={chartPrice}
-                    sr={sr}
-                    spread={spread}
-                    spreadOkColor={spreadOkColor}
-                    spHigh={spHigh}
-                    sessionBits={sessionBits}
-                    dayBits={dayBits}
-                    sigMuted={sigMuted}
-                    sigPill={sigPill}
-                    pillStyle={pillStyle}
-                    chartPts={chartPts}
-                    execBusy={execBusy}
-                    tradeCount={tradeCount}
-                    onExecute={onExecute}
-                    onSkip={onSkip}
-                    atr={atr}
-                    atrFillPct={atrFillPct}
-                    atrModePill={atrModePill}
-                    engineTrade={bzSnapshot.trade}
-                    histRows={histRows}
-                    histRange={histRange}
-                    onHistRangeChange={setHistRange}
-                    accountEquity={sizingEquity}
-                    brokerLiveAccount={useBrokerSession}
-                    brokerAccount={useBrokerSession ? brokerFeed.account : null}
-                    compactSignal
-                  />
-                </View>
-                <View style={[styles.col, { width: '100%' }]}>
-                  <RightColumn
-                    tradeCount={tradeCount}
-                    pnl={pnl}
-                    sessTag={sessTag}
-                    spread={spread}
-                    spreadOkColor={spreadOkColor}
-                    spHigh={spHigh}
-                    dayBits={dayBits}
-                    accountEquity={sizingEquity}
-                    brokerLiveAccount={useBrokerSession}
-                    brokerAccount={useBrokerSession ? brokerFeed.account : null}
-                    brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : null}
-                    brokerPositions={useBrokerSession ? brokerFeed.positions : null}
-                  />
-                </View>
+              <View style={[styles.mobileTabBody, styles.ghBody, { paddingHorizontal: 0 }]}>
+                <GodmodeIntel
+                  pad={pad}
+                  price={chartPrice}
+                  sr={sr}
+                  spread={spread}
+                  spHigh={spHigh}
+                  sessionBits={sessionBits}
+                  sigPill={sigPill}
+                  pillStyle={pillStyle}
+                  sigMuted={sigMuted}
+                  engineTrade={bzSnapshot.trade}
+                  execBusy={execBusy}
+                  tradeCount={tradeCount}
+                  onExecute={onExecute}
+                  onSkip={onSkip}
+                  flowNodes={flowNodes}
+                  feedReady={brokerFeed.feedReady}
+                  feedError={brokerFeed.feedError}
+                  brokerConnected={brokerConnected}
+                  autoExecuteSignals={autoExecuteSignals}
+                  onOpenProfile={() => setMobileTab('profile')}
+                  onOpenTrade={() => setMobileTab('trade')}
+                />
               </View>
             ) : mobileTab === 'trade' ? (
               <View style={[styles.mobileTabBody, { paddingHorizontal: pad }]}>
@@ -4006,11 +4242,15 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <ThemeProvider>
-        <DevPreviewProvider>
-          <BinanceBridgeProvider>
-            <AppRoot />
-          </BinanceBridgeProvider>
-        </DevPreviewProvider>
+        <AuthProvider>
+          <DevPreviewProvider>
+            <BinanceBridgeProvider>
+              <AuthGate>
+                <AppRoot />
+              </AuthGate>
+            </BinanceBridgeProvider>
+          </DevPreviewProvider>
+        </AuthProvider>
       </ThemeProvider>
     </SafeAreaProvider>
   );

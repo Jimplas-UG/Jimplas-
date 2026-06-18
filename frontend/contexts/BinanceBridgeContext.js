@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getBinanceApiUrl } from '../lib/envConfig';
-import { fetchBinanceSession } from '../broker/binanceFuturesApi';
+import { fetchBinanceSession, pickReachableBinanceBridgeUrl } from '../broker/binanceFuturesApi';
 import { getDefaultBinanceBridgeUrl } from '../utils/binanceApiUrl';
 import { isLocalhostApiUrl } from '../utils/bridgeLanUrl';
 import { getBrokerMode } from '../lib/brokerMode';
@@ -12,7 +12,7 @@ const BinanceBridgeContext = createContext(null);
 const STORAGE_BINANCE_BASE = '@bilshenz_v1/binanceApiBaseUrl';
 const STORAGE_BINANCE_CONNECTED = '@bilshenz_v1/binanceApiConnected';
 const STORAGE_BINANCE_URL_REV = '@bilshenz_v1/binanceApiUrlRev';
-const BINANCE_URL_REV = '2';
+const BINANCE_URL_REV = '3';
 
 function canonicalBinanceUrl() {
   const u = getBinanceApiUrl();
@@ -42,6 +42,9 @@ export function BinanceBridgeProvider({ children }) {
         } else if (storedUrl && isLocalhostApiUrl(storedUrl)) {
           resolved = canonicalBinanceUrl();
         }
+
+        const reachable = await pickReachableBinanceBridgeUrl(resolved);
+        if (reachable) resolved = reachable;
 
         setBaseUrlState(resolved);
         await AsyncStorage.multiSet([
@@ -97,12 +100,19 @@ export function BinanceBridgeProvider({ children }) {
   useEffect(() => {
     if (!hydrated || !connected || !baseUrl) return;
     let cancelled = false;
+    let failStreak = 0;
     const tick = async () => {
-      const session = await fetchBinanceSession(baseUrl, 8000);
-      if (!cancelled && !session.ok) markConnected(false);
+      const session = await fetchBinanceSession(baseUrl, 8000, 1);
+      if (cancelled) return;
+      if (session.ok) {
+        failStreak = 0;
+        return;
+      }
+      failStreak += 1;
+      if (failStreak >= 3) markConnected(false);
     };
-    const boot = setTimeout(tick, 15000);
-    const id = setInterval(tick, 45000);
+    const boot = setTimeout(tick, 30000);
+    const id = setInterval(tick, 60000);
     return () => {
       cancelled = true;
       clearTimeout(boot);

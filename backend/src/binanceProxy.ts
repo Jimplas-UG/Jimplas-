@@ -32,6 +32,8 @@ export async function handleBinanceProxy(
   const method = req.method ?? 'GET';
   const headers: Record<string, string> = {};
   if (req.headers['content-type']) headers['Content-Type'] = String(req.headers['content-type']);
+  const bridgeToken = process.env.BRIDGE_TOKEN?.trim();
+  if (bridgeToken) headers['X-Bridge-Token'] = bridgeToken;
 
   let body: Buffer | undefined;
   if (method !== 'GET' && method !== 'HEAD') {

@@ -7,6 +7,8 @@
     "mt5-bridge": "node ./mt5/bridge-server.mjs",
     "mt5-api": "powershell -ExecutionPolicy Bypass -File ../mt5_trading_system/python/start-api.ps1",
     "binance-api": "powershell -ExecutionPolicy Bypass -File ../binance_trading_system/python/start-api.ps1",
+    "smoke:binance": "npx tsx scripts/smoke-binance-bridge.ts",
+    "smoke:auth": "npx tsx scripts/smoke-auth.ts",
     "start:full": "powershell -ExecutionPolicy Bypass -File ./scripts/start-full-stack.ps1",
     "start:full:paper": "powershell -NoProfile -Command \"$env:BINANCE_PAPER='1'; $env:BROKER_MODE='paper'; npm run start:full\"",
     "audit:migration-parity": "npx tsx scripts/run-migration-parity-audit.ts",
@@ -34,11 +36,14 @@
     "security:audit": "node scripts/security-duplication-audit.mjs"
   },
   "dependencies": {
-    "luxon": "^3.7.2"
+    "jose": "^5.10.0",
+    "luxon": "^3.7.2",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/luxon": "^3.7.1",
     "@types/node": "^20.11.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.19.0",
     "typescript": "^5.3.3"
   }

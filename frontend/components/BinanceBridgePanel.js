@@ -12,6 +12,7 @@ import {
 import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import StaticHexLogo from './logo/StaticHexLogo';
+import ErrorState from './ui/ErrorState';
 import { TRADING_SYMBOL } from '../lib/tradingSymbol';
 import {
   binanceFetch,
@@ -19,11 +20,13 @@ import {
   fetchBinanceSession,
   postBinanceAttach,
   postBinanceLogin,
+  pickReachableBinanceBridgeUrl,
 } from '../broker/binanceFuturesApi';
 import { getBrokerMode } from '../lib/brokerMode';
 import {
   loadStoredBinanceCredentials,
   saveStoredBinanceCredentials,
+  saveStoredBinanceTestnetPref,
   tryBinanceSessionConnect,
 } from '../lib/binanceSession';
 import {
@@ -52,6 +55,21 @@ function sessionLabel(account, mode) {
   return `${srv} · ${bal} ${account.currency ?? 'USDT'}`;
 }
 
+function accountIsTestnet(account) {
+  const srv = String(account?.server ?? '').toLowerCase();
+  return srv.includes('testnet') || srv.includes('test');
+}
+
+function formatLoginEnvError(detail, testnet) {
+  const msg = String(detail || 'Login failed');
+  if (/invalid api-key|api-key format|signature|permissions/i.test(msg)) {
+    return testnet
+      ? `${msg}\n\nUse separate Futures keys from testnet.binancefuture.com — mainnet keys only work on Mainnet.`
+      : `${msg}\n\nUse mainnet Futures keys from binance.com — testnet keys only work on Testnet.`;
+  }
+  return msg;
+}
+
 export default function BinanceBridgePanel() {
   const { colors: C } = useBilshenzTheme();
   const mode = getBrokerMode();
@@ -61,7 +79,7 @@ export default function BinanceBridgePanel() {
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
   const [showSecret, setShowSecret] = useState(false);
-  const [testnet, setTestnet] = useState(false);
+  const [testnet, setTestnet] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -74,6 +92,37 @@ export default function BinanceBridgePanel() {
   const pollRef = useRef(null);
 
   const sessionLive = connected && !!account;
+  const sessionTestnet = account ? accountIsTestnet(account) : null;
+  const envMismatch = sessionLive && sessionTestnet != null && sessionTestnet !== testnet;
+
+  const clearBridgeSession = useCallback(async () => {
+    try {
+      if (baseUrl) await binanceFetch(baseUrl, '/api/logout', { method: 'POST' }, 8000);
+    } catch {
+      /* ignore */
+    }
+    graceUntilRef.current = 0;
+    setConnected(false);
+    setAccount(null);
+    setBridgeMode(null);
+    setPositions([]);
+  }, [baseUrl, setConnected]);
+
+  const onTestnetChange = useCallback(
+    async (next) => {
+      setTestnet(next);
+      await saveStoredBinanceTestnetPref(next);
+      if (sessionLive && sessionTestnet != null && sessionTestnet !== next) {
+        await clearBridgeSession();
+        setErr(
+          next
+            ? 'Switched to Testnet — paste testnet.binancefuture.com keys and tap Connect Testnet.'
+            : 'Switched to Mainnet — paste binance.com Futures keys and tap Connect Live.',
+        );
+      }
+    },
+    [clearBridgeSession, sessionLive, sessionTestnet],
+  );
 
   const stopPoll = () => {
     if (pollRef.current) {
@@ -85,11 +134,12 @@ export default function BinanceBridgePanel() {
   const applySession = useCallback(
     (session, url) => {
       if (url) setBaseUrl(url);
-      if (session?.ok && session.account) {
-        graceUntilRef.current = Date.now() + 12000;
+      const acct = session?.account;
+      if (acct && typeof acct === 'object') {
+        graceUntilRef.current = Date.now() + 45000;
         setConnected(true);
-        setAccount(session.account);
-        setBridgeMode(session.mode);
+        setAccount(acct);
+        setBridgeMode(session.mode ?? null);
         setErr('');
         return true;
       }
@@ -213,13 +263,19 @@ export default function BinanceBridgePanel() {
     setBusy(true);
     setErr('');
     try {
-      if (mode !== 'paper' && (!apiKey.trim() || !apiSecret.trim())) {
-        setErr('Enter your Binance Futures API key and secret.');
+      const key = apiKey.trim();
+      const secret = apiSecret.trim();
+
+      if (mode !== 'paper' && (!key || !secret)) {
+        setErr(
+          testnet
+            ? 'Enter both API key and secret from testnet.binancefuture.com'
+            : 'Enter both API key and secret from binance.com (Futures API)',
+        );
         return;
       }
 
-      const candidates = binanceBridgeUrlCandidates(baseUrl);
-      const url = await pickReachableBridgeUrl(candidates);
+      const url = await pickReachableBinanceBridgeUrl(baseUrl, TRADING_SYMBOL);
       if (!url) {
         const msg = formatBinanceNetworkError('Cannot reach Binance bridge', baseUrl);
         setErr(msg);
@@ -228,44 +284,60 @@ export default function BinanceBridgePanel() {
       }
       setBaseUrl(url);
 
+      try {
+        await binanceFetch(url, '/api/logout', { method: 'POST' }, 8000);
+      } catch {
+        /* clear stale mainnet/testnet session before new login */
+      }
+
       let login;
       if (mode === 'paper') {
         login = await postBinanceAttach(url);
       } else {
         login = await postBinanceLogin(url, {
-          api_key: apiKey.trim(),
-          api_secret: apiSecret.trim(),
+          api_key: key,
+          api_secret: secret,
           testnet,
         });
-        await saveStoredBinanceCredentials(apiKey.trim(), apiSecret.trim(), testnet);
+        await saveStoredBinanceCredentials(key, secret, testnet);
       }
 
       if (!login.ok) {
         setConnected(false);
         setAccount(null);
-        const msg = login.detail || 'Login failed';
+        const msg = formatLoginEnvError(login.detail, testnet);
         setErr(msg);
-        Alert.alert('Binance login', msg);
+        Alert.alert('Binance login failed', msg);
         return;
       }
 
-      const session = await fetchBinanceSession(url, 15000);
-      if (!applySession(session, url) && login.account) {
-        applySession({ ok: true, account: login.account, mode: login.mode ?? bridgeMode }, url);
+      let acct = login.account;
+      let modeLabel = login.mode ?? (testnet ? 'testnet' : 'live');
+      const verified = await fetchBinanceSession(url, 15000, 3);
+      if (verified.account) {
+        acct = verified.account;
+        modeLabel = verified.mode ?? modeLabel;
       }
 
-      const verified = await fetchBinanceSession(url, 12000);
-      if (!verified.ok) {
+      if (!acct) {
         setConnected(false);
         setAccount(null);
         const msg =
-          verified.error ||
-          'Login accepted but account not available — check API permissions (Futures + Read) and testnet toggle.';
+          formatLoginEnvError(
+            verified.error,
+            testnet,
+          ) ||
+          (testnet
+            ? 'Could not load testnet account — enable Futures + Read at testnet.binancefuture.com'
+            : 'Could not load mainnet account — enable USD-M Futures + Read on binance.com');
         setErr(msg);
         Alert.alert('Binance', msg);
         return;
       }
-      applySession(verified, url);
+
+      applySession({ ok: true, account: acct, mode: modeLabel }, url);
+      setConnected(true);
+      void refresh();
     } catch (e) {
       const msg = formatBinanceNetworkError(e instanceof Error ? e.message : String(e), baseUrl);
       setErr(msg);
@@ -274,7 +346,7 @@ export default function BinanceBridgePanel() {
     } finally {
       setBusy(false);
     }
-  }, [apiKey, apiSecret, applySession, baseUrl, bridgeMode, mode, setBaseUrl, setConnected, testnet]);
+  }, [apiKey, apiSecret, applySession, baseUrl, mode, refresh, setBaseUrl, setConnected, testnet]);
 
   const onDisconnect = useCallback(async () => {
     setBusy(true);
@@ -304,7 +376,7 @@ export default function BinanceBridgePanel() {
   const statusText = sessionLive
     ? `Connected · ${sessionLabel(account, bridgeMode)}`
     : feedLive
-      ? 'Market data live · add API keys to trade'
+      ? `Market data live · paste secret & tap ${testnet ? 'Connect Testnet' : 'Connect Live'}`
       : busy
         ? 'Connecting…'
         : err
@@ -350,8 +422,15 @@ export default function BinanceBridgePanel() {
         {mode !== 'paper' ? (
           <>
             <Text style={[st.hint, { color: C.dim, marginTop: 0 }]}>
-              Enable Futures + Read on your API key. Disable withdrawals. Match testnet/mainnet below.
+              Enable Futures + Read on your API key. Keys are not shared between Testnet and Mainnet.
             </Text>
+
+            {envMismatch ? (
+              <Text style={[st.hint, { color: C.amber, fontWeight: '700' }]}>
+                Active session is {sessionTestnet ? 'Testnet' : 'Mainnet'} but you selected{' '}
+                {testnet ? 'Testnet' : 'Mainnet'}. Disconnect or switch environment to match.
+              </Text>
+            ) : null}
 
             <Text style={[st.label, { color: C.dim }]}>Environment</Text>
             <View style={st.row}>
@@ -361,7 +440,7 @@ export default function BinanceBridgePanel() {
               ].map((opt) => (
                 <Pressable
                   key={String(opt.id)}
-                  onPress={() => setTestnet(opt.id)}
+                  onPress={() => void onTestnetChange(opt.id)}
                   style={[st.chip, testnet === opt.id && { borderColor: C.gold, backgroundColor: 'rgba(212,180,90,0.15)' }]}>
                   <Text style={{ color: testnet === opt.id ? C.goldL : C.dim, fontSize: 11, fontWeight: '700' }}>
                     {opt.label}
@@ -377,7 +456,7 @@ export default function BinanceBridgePanel() {
               onChangeText={setApiKey}
               autoCapitalize="none"
               autoCorrect={false}
-              placeholder="Futures API key"
+                placeholder={testnet ? 'Futures API key (testnet.binancefuture.com)' : 'Futures API key (binance.com)'}
               placeholderTextColor={C.dim2}
             />
 
@@ -390,13 +469,46 @@ export default function BinanceBridgePanel() {
                 secureTextEntry={!showSecret}
                 autoCapitalize="none"
                 autoCorrect={false}
-                placeholder="Secret"
+                placeholder={testnet ? 'Secret from testnet.binancefuture.com' : 'Secret from binance.com Futures API'}
                 placeholderTextColor={C.dim2}
+                returnKeyType="done"
+                onSubmitEditing={() => void onConnect()}
               />
               <Pressable onPress={() => setShowSecret((v) => !v)} style={[st.eye, { borderColor: C.border }]}>
                 <Text>{showSecret ? '🙈' : '👁'}</Text>
               </Pressable>
             </View>
+
+            {!sessionLive && apiKey.trim() && !apiSecret.trim() ? (
+              <Text style={[st.hint, { color: C.amber, fontWeight: '700' }]}>
+                Paste your API secret above, then tap {testnet ? 'Connect Testnet' : 'Connect Live'}.
+              </Text>
+            ) : null}
+
+            {err ? (
+              <ErrorState title="Connection failed" message={err} compact onRetry={onConnect} retryLabel="Retry connect" />
+            ) : null}
+
+            {sessionLive ? (
+              <Pressable onPress={onDisconnect} disabled={busy} style={[st.btn, st.btnOff]}>
+                <Text style={st.btnOffTxt}>Disconnect</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                onPress={onConnect}
+                disabled={busy || (mode !== 'paper' && (!apiKey.trim() || !apiSecret.trim()))}
+                style={[
+                  st.btn,
+                  st.btnOn,
+                  mode !== 'paper' && (!apiKey.trim() || !apiSecret.trim()) ? { opacity: 0.45 } : null,
+                ]}>
+                {busy ? <ActivityIndicator color="#F2E6C5" /> : (
+                  <Text style={st.btnOnTxt}>
+                    {mode === 'paper' ? 'Connect Paper' : testnet ? 'Connect Testnet' : 'Connect Live'}
+                  </Text>
+                )}
+              </Pressable>
+            )}
           </>
         ) : (
           <Text style={[st.hint, { color: C.dim }]}>
@@ -408,6 +520,22 @@ export default function BinanceBridgePanel() {
           <Text style={[st.hint, { color: C.amber }]}>
             127.0.0.1 won&apos;t work on a phone. Tap &quot;Use PC on Wi‑Fi&quot; below.
           </Text>
+        ) : null}
+
+        {err && mode === 'paper' ? (
+          <ErrorState title="Connection failed" message={err} compact onRetry={onConnect} retryLabel="Retry connect" />
+        ) : null}
+
+        {mode === 'paper' ? (
+          sessionLive ? (
+            <Pressable onPress={onDisconnect} disabled={busy} style={[st.btn, st.btnOff]}>
+              <Text style={st.btnOffTxt}>Disconnect</Text>
+            </Pressable>
+          ) : (
+            <Pressable onPress={onConnect} disabled={busy} style={[st.btn, st.btnOn]}>
+              {busy ? <ActivityIndicator color="#F2E6C5" /> : <Text style={st.btnOnTxt}>Connect Paper</Text>}
+            </Pressable>
+          )
         ) : null}
 
         <Pressable onPress={onAutoUrl} style={[st.secondaryBtn, { borderColor: C.border }]}>
@@ -435,26 +563,6 @@ export default function BinanceBridgePanel() {
             />
           </>
         ) : null}
-
-        {err ? (
-          <Text style={[st.hint, { color: C.red }]} selectable>
-            {err}
-          </Text>
-        ) : null}
-
-        {sessionLive ? (
-          <Pressable onPress={onDisconnect} disabled={busy} style={[st.btn, st.btnOff]}>
-            <Text style={st.btnOffTxt}>Disconnect</Text>
-          </Pressable>
-        ) : (
-          <Pressable onPress={onConnect} disabled={busy} style={[st.btn, st.btnOn]}>
-            {busy ? <ActivityIndicator color="#F2E6C5" /> : (
-              <Text style={st.btnOnTxt}>
-                {mode === 'paper' ? 'Connect Paper' : testnet ? 'Connect Testnet' : 'Connect Live'}
-              </Text>
-            )}
-          </Pressable>
-        )}
 
         {sessionLive && account ? (
           <View style={st.metrics}>

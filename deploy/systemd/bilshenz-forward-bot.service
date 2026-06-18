@@ -1,5 +1,5 @@
 [Unit]
-Description=Bilshenz forward trading bot (Exness via remote MT5 API)
+Description=Bilshenz forward trading bot (Binance Futures via bridge)
 After=network-online.target bilshenz-desk-api.service
 Wants=network-online.target
 

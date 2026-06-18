@@ -49,7 +49,7 @@ export async function handleMt5Proxy(
     const upstream = await fetch(target, {
       method,
       headers,
-      body: body?.length ? body : undefined,
+      body: body?.length ? new Uint8Array(body) : undefined,
       signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await upstream.text();

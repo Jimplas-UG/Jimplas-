@@ -207,7 +207,7 @@ export function runBacktestWindow(
           barHigh: bar.h,
           signals,
           cfg,
-          setupLevels: {},
+          setupLevels: null,
           m30,
         },
         { maxJournalRows: MAX_JOURNAL }

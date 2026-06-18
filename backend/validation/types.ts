@@ -39,7 +39,7 @@ export type ForwardDemoEvent = {
 };
 
 export type SimBaseline30d = {
-  windowDays: 30;
+  windowDays: number;
   generatedAt: string;
   startEquity: number;
   endEquity: number;

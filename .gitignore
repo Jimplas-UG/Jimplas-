@@ -36,8 +36,9 @@ yarn-error.*
 # local env files
 .env*.local
 
-# typescript
-*.tsbuildinfo
+# Auth user store (local dev / VPS — never commit real accounts)
+backend/auth/data/*.json
+
 
 # generated native folders
 /ios

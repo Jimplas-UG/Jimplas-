@@ -10,7 +10,9 @@ import { canExecuteTrade } from '../broker/tradeExecutionGates';
 import { publicBlockReason } from '../security/publicLabels';
 import { handleValidationRoute } from './validationRoutes';
 import { handleBinanceProxy, isBinanceProxyPath } from './binanceProxy';
+import { attachBinanceWebSocketProxy } from './binanceWsProxy';
 import { handleMt5Proxy, isMt5ProxyPath } from './mt5Proxy';
+import { handleAuthRoute, isAuthPath } from './auth/routes';
 import { isStrategyFreezeEnforced, mergeFrozenDeskCfg, verifyFrozenStrategy } from '../strategy/frozenProduction';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -158,8 +160,8 @@ function readJson<T>(req: http.IncomingMessage): Promise<T> {
 
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Bridge-Token');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-XSS-Protection', '1; mode=block');
@@ -178,6 +180,11 @@ const server = http.createServer(async (req, res) => {
 
   const urlEarly = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
 
+  // User auth — public routes (register/login/refresh); /me requires user JWT
+  if (isAuthPath(urlEarly.pathname)) {
+    if (await handleAuthRoute(req, res, urlEarly)) return;
+  }
+
   // MT5 proxy: allow all /v1/mt5/* without desk-api auth — MT5 bridge is internal-only
   if (isMt5ProxyPath(urlEarly.pathname)) {
     try {
@@ -189,8 +196,13 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // Binance proxy: allow all /v1/binance/* without desk-api auth
+  // Binance proxy — require desk-api auth when DESK_API_KEY is set (mobile sends Bearer via binanceHeaders).
   if (isBinanceProxyPath(urlEarly.pathname)) {
+    if (!authOk(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
     try {
       if (await handleBinanceProxy(req, res, urlEarly)) return;
     } catch {
@@ -274,10 +286,19 @@ const server = http.createServer(async (req, res) => {
 });
 
 // Bind 0.0.0.0 so mobile app can reach VPS; MT5 Python API stays on 127.0.0.1 only.
+attachBinanceWebSocketProxy(server, (socket) => {
+  socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+  socket.destroy();
+});
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[desk-api] listening on http://0.0.0.0:${PORT} (LAN/VPS + localhost)`);
   console.log(`[desk-api] POST /v1/desk/compute · POST /v1/desk/execute-gate · /v1/mt5/* · /v1/binance/*`);
+  console.log(`[desk-api] /v1/auth/* — user registration, login, JWT sessions`);
   console.log(`[desk-api] POST /v1/validation/event · GET /v1/validation/events · GET /v1/validation/freeze-status`);
   if (isStrategyFreezeEnforced()) console.log('[desk-api] STRATEGY_FREEZE=1 — locked production config');
   if (!API_KEY) console.warn('[desk-api] WARNING: DESK_API_KEY not set — open to LAN');
+  if (!process.env.AUTH_JWT_SECRET?.trim()) {
+    console.warn('[desk-api] WARNING: AUTH_JWT_SECRET not set — using fallback (set in production)');
+  }
 });

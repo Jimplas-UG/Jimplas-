@@ -1,4 +1,5 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+const fs = require('fs');
 const path = require('path');
 const { getDefaultConfig } = require('expo/metro-config');
 
@@ -45,10 +46,32 @@ function isEngineModule(moduleName) {
   );
 }
 
+function resolveAliasModule(moduleName) {
+  if (!moduleName.startsWith('@/')) return null;
+  const rel = moduleName.slice(2);
+  const absBase = path.join(projectRoot, rel);
+  const extensions = ['.js', '.jsx', '.ts', '.tsx', '.json'];
+  for (const ext of extensions) {
+    const candidate = absBase + ext;
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  if (fs.existsSync(absBase) && fs.statSync(absBase).isDirectory()) {
+    for (const ext of extensions) {
+      const idx = path.join(absBase, `index${ext}`);
+      if (fs.existsSync(idx)) return idx;
+    }
+  }
+  return null;
+}
+
 const prevResolve = config.resolver.resolveRequest;
 config.resolver.resolveRequest = (context, moduleName, platform) => {
   if (isEngineModule(moduleName)) {
     return { type: 'sourceFile', filePath: engineClient };
+  }
+  const aliasPath = resolveAliasModule(moduleName);
+  if (aliasPath) {
+    return { type: 'sourceFile', filePath: aliasPath };
   }
   if (prevResolve) {
     return prevResolve(context, moduleName, platform);

@@ -3,11 +3,11 @@ import { getMetroLanHost, isLocalhostApiUrl } from './bridgeLanUrl';
 
 /** Best Binance bridge URL for this device (LAN :8766, desk proxy, or env). */
 export function getDefaultBinanceBridgeUrl(port = 8766) {
+  const env = process.env.EXPO_PUBLIC_BINANCE_API_URL?.trim();
+  if (env && !isLocalhostApiUrl(env)) return env.replace(/\/$/, '');
+
   const baked = getBinanceApiUrl();
   if (baked && !isLocalhostApiUrl(baked)) return baked.replace(/\/$/, '');
-
-  const env = process.env.EXPO_PUBLIC_BINANCE_API_URL?.trim();
-  if (env) return env.replace(/\/$/, '');
 
   const lan = getMetroLanHost();
   if (lan) return `http://${lan}:${port}`;
@@ -15,7 +15,7 @@ export function getDefaultBinanceBridgeUrl(port = 8766) {
   return `http://127.0.0.1:${port}`;
 }
 
-/** Candidate URLs to try when connecting (direct bridge, then desk proxy). */
+/** Candidate URLs to try when connecting — direct :8766 first (desk-api often offline in dev). */
 export function binanceBridgeUrlCandidates(preferred = '') {
   const out = [];
   const push = (u) => {
@@ -24,19 +24,17 @@ export function binanceBridgeUrlCandidates(preferred = '') {
   };
 
   push(preferred);
+  push(getDefaultBinanceBridgeUrl());
 
   const lan = getMetroLanHost();
-  if (lan) {
-    push(`http://${lan}:8766`);
-    push(`http://${lan}:8791/v1/binance`);
-  }
+  if (lan) push(`http://${lan}:8766`);
 
   const desk = getDeskApiUrl();
   if (desk && !isLocalhostApiUrl(desk)) {
     push(`${desk.replace(/\/$/, '')}/v1/binance`);
   }
+  if (lan) push(`http://${lan}:8791/v1/binance`);
 
-  push(getDefaultBinanceBridgeUrl());
   push('http://127.0.0.1:8766');
 
   return out;

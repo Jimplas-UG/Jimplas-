@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -111,16 +112,36 @@ class BinanceConnector:
             url = f"{root}{path}" + (f"?{qs}" if qs else "")
 
         req = urllib.request.Request(url, method=method, headers=self._headers(signed))
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")
+        last_err: Exception | None = None
+        for attempt in range(3):
             try:
-                detail = json.loads(body)
-            except json.JSONDecodeError:
-                detail = {"msg": body}
-            raise RuntimeError(detail.get("msg") or detail.get("detail") or body) from e
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                try:
+                    detail = json.loads(body)
+                except json.JSONDecodeError:
+                    detail = {"msg": body}
+                if e.code == 429 and attempt < 2:
+                    retry_after = 1.0
+                    try:
+                        retry_after = float(e.headers.get("Retry-After", "1"))
+                    except (TypeError, ValueError):
+                        pass
+                    time.sleep(min(max(retry_after, 0.5), 30.0))
+                    last_err = RuntimeError(detail.get("msg") or detail.get("detail") or body)
+                    continue
+                raise RuntimeError(detail.get("msg") or detail.get("detail") or body) from e
+            except urllib.error.URLError as e:
+                last_err = e
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise RuntimeError(str(e)) from e
+        if last_err:
+            raise RuntimeError(str(last_err))
+        raise RuntimeError("request failed")
 
     def ping(self) -> bool:
         try:
@@ -218,10 +239,16 @@ class BinanceConnector:
                 "account": self.account_info(),
             }
         if not self.cfg.api_key or not self.cfg.api_secret:
-            return {"connected": False, "mode": "unconfigured"}
+            return {"connected": False, "mode": "unconfigured", "testnet": self.cfg.testnet}
         try:
             if not self.ping():
-                return {"connected": False}
+                env = "testnet.binancefuture.com" if self.cfg.testnet else "fapi.binance.com"
+                return {
+                    "connected": False,
+                    "mode": "testnet" if self.cfg.testnet else "live",
+                    "testnet": self.cfg.testnet,
+                    "error": f"Cannot reach Binance {env} — check network or VPN",
+                }
             acct = self.account_info()
             self._connected = acct is not None
             return {
@@ -232,7 +259,20 @@ class BinanceConnector:
             }
         except Exception as e:
             log.error("status_snapshot: %s", e)
-            return {"connected": False, "error": str(e)}
+            msg = str(e)
+            if self.cfg.testnet and re.search(r"invalid api-key|api-key format|signature", msg, re.I):
+                msg = (
+                    f"{msg} — use Futures keys from testnet.binancefuture.com "
+                    "(not mainnet binance.com keys)"
+                )
+            elif not self.cfg.testnet and re.search(r"invalid api-key|api-key format|signature", msg, re.I):
+                msg = f"{msg} — use mainnet Futures keys from binance.com (not testnet keys)"
+            return {
+                "connected": False,
+                "mode": "testnet" if self.cfg.testnet else "live",
+                "testnet": self.cfg.testnet,
+                "error": msg,
+            }
 
     def account_info(self) -> dict[str, Any] | None:
         if self.cfg.paper:

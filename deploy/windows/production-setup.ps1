@@ -75,6 +75,18 @@ if (-not (Test-Path $Venv)) {
 $Req = Join-Path $PSScriptRoot 'requirements.txt'
 & (Join-Path $Venv 'Scripts\pip.exe') install -r $Req
 
+Write-Host '==> Python venv (Binance API)' -ForegroundColor Cyan
+$BnDir = Join-Path $AppDir 'binance_trading_system\python'
+$BnVenv = Join-Path $BnDir '.venv'
+if (-not (Test-Path $BnVenv)) {
+  python -m venv $BnVenv
+}
+& (Join-Path $BnVenv 'Scripts\pip.exe') install --upgrade pip wheel
+$BnReq = Join-Path $BnDir 'requirements.txt'
+if (Test-Path $BnReq) {
+  & (Join-Path $BnVenv 'Scripts\pip.exe') install -r $BnReq
+}
+
 Write-Host '==> Env file' -ForegroundColor Cyan
 if (-not (Test-Path $EnvFile)) {
   Copy-Item (Join-Path $PSScriptRoot 'tradingbot.env.example') $EnvFile
@@ -95,6 +107,10 @@ if (-not (Get-NetFirewallRule -DisplayName 'Bilshenz-Allow-8791-Public' -EA Sile
   New-NetFirewallRule -DisplayName 'Bilshenz-Allow-8791-Public' -Direction Inbound -Action Allow `
     -Protocol TCP -LocalPort 8791 2>$null
 }
+if (-not (Get-NetFirewallRule -DisplayName 'Bilshenz-Allow-8766-Local' -EA SilentlyContinue)) {
+  New-NetFirewallRule -DisplayName 'Bilshenz-Allow-8766-Local' -Direction Inbound -Action Allow `
+    -Protocol TCP -LocalPort 8766 -RemoteAddress LocalSubnet,127.0.0.1 2>$null
+}
 
 Write-Host '==> Scheduled tasks (24/7)' -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot 'install-scheduled-tasks.ps1') -AppDir $AppDir
@@ -102,10 +118,10 @@ Write-Host '==> Scheduled tasks (24/7)' -ForegroundColor Cyan
 Write-Host '==> Log rotation task' -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot 'install-log-rotation.ps1')
 
-Write-Host ''
 Write-Host 'SETUP_OK' -ForegroundColor Green
-Write-Host '1) Open MT5 Exness, log in, add XAUUSD'
-Write-Host ('2) Edit: notepad ' + $EnvFile)
-Write-Host '3) Start services: .\deploy\windows\start-bot.ps1'
+Write-Host '1) Set BROKER_MODE=binance in tradingbot.env (default)'
+Write-Host '2) Edit: notepad ' + $EnvFile
+Write-Host '3) Start services: .\deploy\windows\start-all-now.ps1'
 Write-Host '4) Health: .\deploy\windows\health-check.ps1'
-Write-Host 'Keep RDP session logged in - MT5 IPC needs interactive desktop.' -ForegroundColor Yellow
+Write-Host '5) Smoke: .\deploy\windows\smoke-binance-bridge.ps1'
+Write-Host 'For MT5 rollback set BROKER_MODE=mt5 and log into terminal64.' -ForegroundColor Yellow

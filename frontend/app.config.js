@@ -18,11 +18,17 @@ module.exports = ({ config }) => {
         ? `http://${lanIp}:8766`
         : `${deskApiUrl.replace(/\/$/, '')}/v1/binance`),
   );
+  const bridgeToken = process.env.EXPO_PUBLIC_BRIDGE_TOKEN || '';
+  const googleClientId = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID || '';
+  const appleClientId = process.env.EXPO_PUBLIC_APPLE_CLIENT_ID || '';
   const extra = {
     ...config.extra,
     deskApiUrl,
     deskApiKey,
     binanceApiUrl,
+    bridgeToken,
+    googleClientId,
+    appleClientId,
     deskRemote: isProd ? '1' : process.env.EXPO_PUBLIC_DESK_REMOTE ?? '1',
   };
   const projectId = process.env.EAS_PROJECT_ID ?? config.extra?.eas?.projectId;
@@ -31,6 +37,9 @@ module.exports = ({ config }) => {
   }
 
   const plugins = [...(config.plugins || [])];
+  if (!plugins.some((p) => (Array.isArray(p) ? p[0] : p) === 'expo-local-authentication')) {
+    plugins.push('expo-local-authentication');
+  }
   if (!plugins.some((p) => (Array.isArray(p) ? p[0] : p) === 'expo-build-properties')) {
     plugins.push([
       'expo-build-properties',
@@ -49,6 +58,7 @@ module.exports = ({ config }) => {
 
   return {
     ...config,
+    scheme: 'bilshenz',
     plugins,
     android: {
       ...config.android,

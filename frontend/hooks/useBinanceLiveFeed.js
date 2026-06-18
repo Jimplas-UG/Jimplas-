@@ -10,13 +10,19 @@ import {
   fetchBinanceSymbolSpec,
   fetchBinanceTick,
   binanceFetch,
+  pickReachableBinanceBridgeUrl,
 } from '../broker/binanceFuturesApi';
+import { subscribeBinanceTickStream } from '../broker/binanceTickStream';
+import { formatBinanceNetworkError } from '../utils/binanceApiUrl';
 
 const PIP = DISPLAY_PIP_SIZE;
-const STARTUP_BARS = 480;
-const FULL_BARS = 2000;
+/** Enough M30 bars for engine gates on first paint (~4.5 days). */
+const STARTUP_BARS = 220;
+/** Deeper history loaded in background after UI is interactive. */
+const FULL_BARS = 1200;
 const CACHE_KEY = '@bilshenz_v1/binanceFeedCache';
-const CACHE_TTL_MS = 8 * 60 * 1000;
+const CACHE_TTL_MS = 15 * 60 * 1000;
+const MIN_CACHE_BARS = 80;
 
 async function fetchStatusAccount(base) {
   try {
@@ -42,6 +48,31 @@ function applyTickState(tk, setters) {
   if (tk.symbol) setResolvedSymbol(tk.symbol);
 }
 
+async function readBarCache(sym) {
+  try {
+    const raw = await AsyncStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.bars?.length || parsed.sym !== sym) return null;
+    if (Date.now() - (parsed.ts ?? 0) > CACHE_TTL_MS) return null;
+    return parsed.bars;
+  } catch {
+    return null;
+  }
+}
+
+async function writeBarCache(sym, bars) {
+  if (!bars?.length) return;
+  try {
+    await AsyncStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({ ts: Date.now(), sym, bars: bars.slice(-FULL_BARS) }),
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
  * Live Binance Futures quotes, account, and M30 history.
  */
@@ -53,6 +84,7 @@ export function useBinanceLiveFeed({
   pollTicks = true,
   /** When true, load public quotes/bars even if API session is not logged in. */
   publicQuotes = true,
+  onBridgeUrlResolved,
 }) {
   const [price, setPrice] = useState(null);
   const [bid, setBid] = useState(null);
@@ -66,44 +98,57 @@ export function useBinanceLiveFeed({
   const [symbolSpec, setSymbolSpec] = useState(null);
   const [feedError, setFeedError] = useState('');
   const [feedReady, setFeedReady] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const symRef = useRef(symbol);
-  const inflightRef = useRef(false);
+  const bgLoadRef = useRef(false);
 
   const sessionActive = !!connected;
   const quotesActive = enabled && !!baseUrl?.trim() && (publicQuotes || sessionActive);
 
+  const applyBars = useCallback((gold) => {
+    if (!gold?.length) return false;
+    setMarketBundle(buildBundleFromM30Bars(gold));
+    const last = gold[gold.length - 1];
+    if (last?.c != null) setPrice(parseFloat(Number(last.c).toFixed(2)));
+    setFeedReady(true);
+    setFeedError('');
+    return true;
+  }, []);
+
   const loadBars = useCallback(
-    async (count) => {
+    async (count, { background = false } = {}) => {
       const b = baseUrl?.trim();
       if (!b || !quotesActive) return false;
-      if (inflightRef.current) return false;
-      inflightRef.current = true;
+      if (background && bgLoadRef.current) return false;
+      if (background) bgLoadRef.current = true;
       try {
         const sym = symRef.current;
         const gold = await fetchBinanceBarsM30(b, sym, count);
         if (!gold.length) {
-          setFeedError('No M30 bars from Binance');
+          if (!background) setFeedError('No M30 bars from Binance');
           return false;
         }
-        setMarketBundle(buildBundleFromM30Bars(gold));
-        const last = gold[gold.length - 1];
-        if (last?.c != null) setPrice(parseFloat(Number(last.c).toFixed(2)));
-        setFeedReady(true);
-        setFeedError('');
+        applyBars(gold);
+        void writeBarCache(sym, gold);
         if (sessionActive) {
           const st = await fetchStatusAccount(b);
           if (st.account) setAccount(st.account);
         }
         return true;
       } catch (e) {
-        setFeedError(e instanceof Error ? e.message : String(e));
+        if (!background) setFeedError(e instanceof Error ? e.message : String(e));
         return false;
       } finally {
-        inflightRef.current = false;
+        if (background) bgLoadRef.current = false;
       }
     },
-    [baseUrl, quotesActive, sessionActive],
+    [baseUrl, quotesActive, sessionActive, applyBars],
   );
+
+  useEffect(() => {
+    symRef.current = symbol;
+    setResolvedSymbol(symbol);
+  }, [symbol]);
 
   useEffect(() => {
     if (!quotesActive) {
@@ -115,20 +160,82 @@ export function useBinanceLiveFeed({
       return;
     }
     let cancelled = false;
+    const tickSetters = { setBid, setAsk, setPrice, setSpreadPips, setResolvedSymbol };
+
     (async () => {
-      const spec = await fetchBinanceSymbolSpec(baseUrl, symbol);
-      if (spec) setSymbolSpec(spec);
-      if (spec?.symbol) {
-        symRef.current = spec.symbol;
-        setResolvedSymbol(spec.symbol);
+      let b = baseUrl.trim();
+      const cached = await readBarCache(symbol);
+      if (!cancelled && cached?.length >= MIN_CACHE_BARS) {
+        applyBars(cached);
       }
-      await loadBars(STARTUP_BARS);
-      if (!cancelled) void loadBars(FULL_BARS);
+
+      const tryFetchStartup = async (bridgeUrl) => {
+        const [spec, tk, startupBars] = await Promise.all([
+          fetchBinanceSymbolSpec(bridgeUrl, symbol),
+          fetchBinanceTick(bridgeUrl, symbol),
+          fetchBinanceBarsM30(bridgeUrl, symbol, STARTUP_BARS),
+        ]);
+        return { spec, tk, startupBars, bridgeUrl };
+      };
+
+      let result = await tryFetchStartup(b);
+      if (!result.startupBars?.length) {
+        const picked = await pickReachableBinanceBridgeUrl(b);
+        if (picked && picked !== b) {
+          b = picked;
+          onBridgeUrlResolved?.(picked);
+          result = await tryFetchStartup(b);
+        }
+      }
+
+      if (cancelled) return;
+
+      if (result.spec) {
+        setSymbolSpec(result.spec);
+        if (result.spec?.symbol) {
+          symRef.current = result.spec.symbol;
+          setResolvedSymbol(result.spec.symbol);
+        }
+      }
+      applyTickState(result.tk, tickSetters);
+
+      if (result.startupBars?.length) {
+        applyBars(result.startupBars);
+        void writeBarCache(symRef.current, result.startupBars);
+      } else if (!cached?.length) {
+        let hint = 'No M30 bars — bridge may be offline or wrong URL.';
+        try {
+          const health = await binanceFetch(b, '/health', {}, 8000);
+          if (!health.ok) {
+            hint = `Bridge at ${b} not reachable. Use Profile → USE PC ON WI‑FI → :8766 (not :8791 unless desk-api is running).`;
+          }
+        } catch {
+          hint = formatBinanceNetworkError('Cannot reach Binance bridge', b);
+        }
+        setFeedError(hint);
+      }
+
+      if (!cancelled && sessionActive) {
+        const st = await fetchStatusAccount(b);
+        if (st.account) setAccount(st.account);
+      }
+
+      if (!cancelled && result.startupBars?.length) {
+        void loadBars(FULL_BARS, { background: true });
+      }
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [quotesActive, sessionActive, baseUrl, symbol, loadBars]);
+  }, [quotesActive, sessionActive, baseUrl, symbol, applyBars, loadBars, reloadNonce]);
+
+  const refreshFeed = useCallback(() => {
+    setFeedReady(false);
+    setFeedError('');
+    bgLoadRef.current = false;
+    setReloadNonce((n) => n + 1);
+  }, []);
 
   useEffect(() => {
     if (!sessionActive || !enabled || !baseUrl?.trim()) return undefined;
@@ -168,21 +275,47 @@ export function useBinanceLiveFeed({
   }, [sessionActive, enabled, baseUrl]);
 
   useEffect(() => {
-    if (!quotesActive || !pollTicks) return;
+    if (!quotesActive || !pollTicks) return undefined;
     let cancelled = false;
-    const poll = async () => {
+    let wsActive = false;
+    let lastWsAt = 0;
+    const tickSetters = { setBid, setAsk, setPrice, setSpreadPips, setResolvedSymbol };
+
+    const stopWs = subscribeBinanceTickStream(
+      baseUrl,
+      symRef.current,
+      (tk) => {
+        if (cancelled) return;
+        wsActive = true;
+        lastWsAt = Date.now();
+        applyTickState(tk, tickSetters);
+      },
+      {
+        onOpen: () => {
+          if (!cancelled) wsActive = true;
+        },
+        onError: () => {
+          wsActive = false;
+        },
+      },
+    );
+
+    const fallbackPoll = async () => {
+      if (cancelled) return;
+      if (wsActive && Date.now() - lastWsAt < 12000) return;
       const tk = await fetchBinanceTick(baseUrl, symRef.current);
-      if (!cancelled) {
-        applyTickState(tk, { setBid, setAsk, setPrice, setSpreadPips, setResolvedSymbol });
-      }
+      if (!cancelled) applyTickState(tk, tickSetters);
     };
-    poll();
-    const id = setInterval(poll, 3000);
+
+    void fallbackPoll();
+    const id = setInterval(fallbackPoll, 15000);
+
     return () => {
       cancelled = true;
+      stopWs();
       clearInterval(id);
     };
-  }, [quotesActive, pollTicks, baseUrl]);
+  }, [quotesActive, pollTicks, baseUrl, reloadNonce]);
 
   return {
     price,
@@ -199,5 +332,6 @@ export function useBinanceLiveFeed({
     feedError,
     feedReady,
     symbolSpec,
+    refreshFeed,
   };
 }
