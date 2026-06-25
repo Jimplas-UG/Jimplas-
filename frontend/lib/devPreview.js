@@ -1,5 +1,5 @@
 /**
- * Local dev preview — mock APIs, dev menu, skip splash.
+ * Local dev preview — mock APIs, dev menu. Opening plays unless EXPO_PUBLIC_SKIP_SPLASH=1.
  * Enable: EXPO_PUBLIC_DEV_PREVIEW=1 (set by npm run start:dev)
  */
 
@@ -17,17 +17,14 @@ export function useMockApi() {
 }
 
 export function skipSplash() {
-  if (!isDevPreview()) return false;
-  if (process.env.EXPO_PUBLIC_SKIP_SPLASH !== '0') {
-    return true;
-  }
-  return false;
+  const v = process.env.EXPO_PUBLIC_SKIP_SPLASH?.trim();
+  return v === '1' || v === 'true';
 }
 
 export function devScreens() {
   return [
     { id: 'home', label: 'Home', icon: '⌂' },
-    { id: 'desk', label: 'Intel / Desk', icon: '◈' },
+    { id: 'desk', label: 'Risk Desk', icon: '◎' },
     { id: 'trade', label: 'Trade', icon: '⚡' },
     { id: 'profile', label: 'Profile & Broker', icon: '👤' },
     { id: 'risk', label: 'Risk', icon: '◎' },

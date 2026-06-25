@@ -1,16 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Dimensions, Image, Platform, StyleSheet, View } from 'react-native';
-import Svg, {
-  Circle,
-  Defs,
-  G,
-  Line,
-  LinearGradient,
-  Polygon,
-  RadialGradient,
-  Stop,
-  Text as SvgText,
-} from 'react-native-svg';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import { Dimensions, Platform, StyleSheet, Text, View } from 'react-native';
+import Svg, { Defs, Line, LinearGradient, Polygon, Stop, Text as SvgText } from 'react-native-svg';
 import Animated, {
   Easing,
   Extrapolation,
@@ -18,528 +8,365 @@ import Animated, {
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
-  withDelay,
-  withRepeat,
-  withSequence,
   withTiming,
 } from 'react-native-reanimated';
-import * as SplashScreen from 'expo-splash-screen';
-import { CX, CY, DIAMONDS, FRAGMENT_ANCHORS, INNER_HEX, MAIN_HEX, VB } from './logo/hexLogoGeometry';
+import { CX, CY, MAIN_HEX, VB } from './logo/hexLogoGeometry';
 
 const AnimatedView = Animated.View;
 
-const BRAND_LOGO = require('../assets/brand/bs-app-logo.png');
-
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-const LOGO_SIZE = Math.min(SCREEN_W * 0.58, 220);
+const LOGO_SIZE = Math.min(SCREEN_W * 0.56, 210);
 
-/** Black + gold ethereal palette (no blue). */
-const COLORS = {
-  black: '#000000',
-  void: '#050403',
-  abyss: '#0A0806',
-  gold: '#D4B45A',
-  goldBright: '#F2E2B0',
-  goldPale: '#FFF4D0',
-  goldDim: 'rgba(212,180,90,0.35)',
-  goldWire: 'rgba(242,226,176,0.72)',
-  amber: '#C98A2E',
-  bronze: '#7A5C18',
-};
+const GOLD = '#D4B45A';
+const GOLD_BRIGHT = '#F2E2B0';
+const GOLD_PALE = '#FFF4D0';
 
-/** Hard cap: cinematic open — fade to home within 8s. */
-export const SPLASH_MAX_MS = 8000;
+/** 9-step cinematic open — ~8.3s animation + fade; hard cap 9s. */
+export const OPENING_STEP_COUNT = 9;
+export const SPLASH_MAX_MS = 9000;
+export const CINEMATIC_SPLASH_MS = SPLASH_MAX_MS;
 
-const WIRE_ASSEMBLY_MS = 2800;
-const MATERIALIZE_MS = 1000;
-const GOLD_SWEEP_MS = 900;
-const MIN_GLOW_MS = 700;
-const FADE_MS = 500;
-const START_DELAY_MS = 180;
-const ANIM_DONE_MS = START_DELAY_MS + WIRE_ASSEMBLY_MS + MATERIALIZE_MS + GOLD_SWEEP_MS + MIN_GLOW_MS;
+const PHASE_MS = 820;
+const TITLE_MS = 900;
+const FADE_MS = 550;
+const ANIM_MS = OPENING_STEP_COUNT * PHASE_MS + TITLE_MS;
+const HOLD_BEFORE_FADE_MS = 400;
 
-const FRAGMENTS = [
-  { id: 'outerRing', delay: 0, scatter: { x: 108, y: -52, r: 58, s: 0.26 } },
-  { id: 'mainHex', delay: 0.06, scatter: { x: -98, y: 62, r: -52, s: 0.3 } },
-  { id: 'innerRing', delay: 0.14, scatter: { x: 92, y: 88, r: 44, s: 0.28 } },
-  { id: 'diamonds', delay: 0.22, scatter: { x: -88, y: -96, r: -68, s: 0.22 } },
-  { id: 'innerHex', delay: 0.3, scatter: { x: 104, y: 28, r: 76, s: 0.34 } },
-  { id: 'radar', delay: 0.38, scatter: { x: 8, y: -118, r: 135, s: 0.18 } },
-  { id: 'center', delay: 0.46, scatter: { x: -122, y: -18, r: -95, s: 0.14 } },
-  { id: 'letterB', delay: 0.54, scatter: { x: -128, y: 42, r: -28, s: 0.38 } },
-  { id: 'letterS', delay: 0.6, scatter: { x: 132, y: -72, r: 42, s: 0.38 } },
-];
+const serif = Platform.select({ ios: 'Georgia', android: 'serif', default: 'serif' });
 
-const CONNECTIONS = [
-  ['outerRing', 'mainHex'],
-  ['mainHex', 'innerHex'],
-  ['innerHex', 'diamonds'],
-  ['mainHex', 'innerRing'],
-  ['innerHex', 'radar'],
-  ['mainHex', 'letterB'],
-  ['mainHex', 'letterS'],
-  ['center', 'mainHex'],
-];
-
-const serifSvg = Platform.select({ ios: 'Georgia', android: 'serif', default: 'serif' });
-
-function LogoDefs({ mode }) {
-  const wire = mode === 'wireframe';
-  return (
-    <Defs>
-      <RadialGradient id="hexFill" cx={CX} cy={CY} r={30} gradientUnits="userSpaceOnUse">
-        <Stop offset="0%" stopColor={wire ? 'rgba(212,180,90,0.14)' : '#1A1408'} />
-        <Stop offset="55%" stopColor={wire ? 'rgba(122,92,24,0.06)' : '#0C0A06'} />
-        <Stop offset="100%" stopColor="#000000" />
-      </RadialGradient>
-      <LinearGradient id="metalFill" x1="0%" y1="0%" x2="100%" y2="100%">
-        <Stop offset="0%" stopColor="#3A3020" />
-        <Stop offset="35%" stopColor="#1A160E" />
-        <Stop offset="70%" stopColor="#0A0806" />
-        <Stop offset="100%" stopColor="#000000" />
-      </LinearGradient>
-      <LinearGradient id="goldLine" x1="0%" y1="0%" x2="100%" y2="100%">
-        <Stop offset="0%" stopColor={wire ? COLORS.goldPale : COLORS.goldPale} />
-        <Stop offset="45%" stopColor={COLORS.gold} />
-        <Stop offset="100%" stopColor={COLORS.bronze} />
-      </LinearGradient>
-      <LinearGradient id="holoStroke" x1="0%" y1="0%" x2="100%" y2="100%">
-        <Stop offset="0%" stopColor="rgba(255,244,208,0.95)" />
-        <Stop offset="100%" stopColor="rgba(212,180,90,0.45)" />
-      </LinearGradient>
-      <LinearGradient id="gradB" x1="0%" y1="0%" x2="100%" y2="100%">
-        <Stop offset="0%" stopColor={wire ? COLORS.goldPale : COLORS.goldBright} />
-        <Stop offset="100%" stopColor={wire ? COLORS.bronze : COLORS.amber} />
-      </LinearGradient>
-      <LinearGradient id="gradS" x1="100%" y1="0%" x2="0%" y2="100%">
-        <Stop offset="0%" stopColor={wire ? COLORS.goldPale : COLORS.goldBright} />
-        <Stop offset="100%" stopColor={wire ? COLORS.bronze : COLORS.bronze} />
-      </LinearGradient>
-      <LinearGradient id="goldBeam" x1="0%" y1="0%" x2="100%" y2="0%">
-        <Stop offset="0%" stopColor="rgba(212,180,90,0)" />
-        <Stop offset="50%" stopColor="#F2E2B0" />
-        <Stop offset="100%" stopColor="rgba(212,180,90,0)" />
-      </LinearGradient>
-    </Defs>
-  );
+function hexPointsArray(pointsStr) {
+  return pointsStr.split(' ').map((pair) => {
+    const [x, y] = pair.split(',').map(Number);
+    return { x, y };
+  });
 }
 
-function LogoPiece({ id, mode }) {
-  const wire = mode === 'wireframe';
-  const stroke = wire ? 'url(#holoStroke)' : 'url(#goldLine)';
-  const sw = wire ? 0.88 : 1.2;
+const HEX_VERTS = hexPointsArray(MAIN_HEX);
 
-  switch (id) {
-    case 'mainHex':
-      return (
-        <Polygon
-          points={MAIN_HEX}
-          fill={wire ? 'rgba(212,180,90,0.05)' : 'url(#metalFill)'}
-          stroke={stroke}
-          strokeWidth={sw}
-          strokeDasharray={wire ? '5,3' : undefined}
-        />
-      );
-    case 'innerHex':
-      return (
-        <Polygon
-          points={INNER_HEX}
-          fill="none"
-          stroke={COLORS.gold}
-          strokeWidth={wire ? 0.72 : 0.58}
-          strokeOpacity={wire ? 0.88 : 0.72}
-          strokeDasharray={wire ? '4,3' : '2,2'}
-        />
-      );
-    case 'diamonds':
-      return (
-        <G>
-          {DIAMONDS.map((pts, i) => (
-            <Polygon
-              key={i}
-              points={pts}
-              fill={wire ? 'none' : COLORS.goldBright}
-              fillOpacity={wire ? 0 : i < 4 ? 0.92 : 0.62}
-              stroke={stroke}
-              strokeWidth={wire ? 0.55 : 0}
-            />
-          ))}
-        </G>
-      );
-    case 'outerRing':
-      return (
-        <G>
-          <Circle
-            cx={CX}
-            cy={CY}
-            r={35}
-            fill="none"
-            stroke={COLORS.gold}
-            strokeWidth={wire ? 0.48 : 0.4}
-            strokeOpacity={wire ? 0.7 : 0.55}
-            strokeDasharray={wire ? '3,5' : '2,4'}
-          />
-          <Line x1={40} y1={5} x2={40} y2={9} stroke={stroke} strokeWidth={1} strokeOpacity={0.92} />
-          <Line x1={40} y1={71} x2={40} y2={75} stroke={stroke} strokeWidth={1} strokeOpacity={0.92} />
-          <Line x1={71} y1={40} x2={75} y2={40} stroke={stroke} strokeWidth={1} strokeOpacity={0.92} />
-          <Line x1={5} y1={40} x2={9} y2={40} stroke={stroke} strokeWidth={1} strokeOpacity={0.92} />
-          <Line x1={14.4} y1={14.4} x2={17.2} y2={17.2} stroke={stroke} strokeWidth={0.75} strokeOpacity={0.55} />
-          <Line x1={62.8} y1={62.8} x2={65.6} y2={65.6} stroke={stroke} strokeWidth={0.75} strokeOpacity={0.55} />
-          <Line x1={65.6} y1={14.4} x2={62.8} y2={17.2} stroke={stroke} strokeWidth={0.75} strokeOpacity={0.55} />
-          <Line x1={17.2} y1={62.8} x2={14.4} y2={65.6} stroke={stroke} strokeWidth={0.75} strokeOpacity={0.55} />
-        </G>
-      );
-    case 'innerRing':
-      return (
-        <Circle
-          cx={CX}
-          cy={CY}
-          r={28}
-          fill="none"
-          stroke={COLORS.gold}
-          strokeWidth={wire ? 0.42 : 0.34}
-          strokeDasharray={wire ? '2,4' : '1,5'}
-          strokeOpacity={wire ? 0.75 : 0.48}
-        />
-      );
-    case 'radar':
-      return (
-        <G>
-          <Line
-            x1={40}
-            y1={40}
-            x2={40}
-            y2={11}
-            stroke={COLORS.goldBright}
-            strokeWidth={wire ? 0.85 : 1}
-            strokeOpacity={wire ? 0.85 : 0.7}
-            strokeLinecap="round"
-            strokeDasharray={wire ? '2,2' : undefined}
-          />
-          <Circle
-            cx={40}
-            cy={11}
-            r={1.6}
-            fill={wire ? 'none' : COLORS.goldBright}
-            stroke={wire ? COLORS.gold : 'none'}
-            strokeWidth={wire ? 0.8 : 0}
-            fillOpacity={wire ? 0 : 0.95}
-          />
-        </G>
-      );
-    case 'center':
-      return (
-        <Circle
-          cx={CX}
-          cy={CY}
-          r={wire ? 2.2 : 2.6}
-          fill={wire ? 'none' : COLORS.goldBright}
-          stroke={stroke}
-          strokeWidth={wire ? 0.9 : 0}
-          fillOpacity={wire ? 0 : 1}
-        />
-      );
-    case 'letterB':
-      return (
-        <SvgText
-          x={27}
-          y={45}
-          fontSize={16}
-          fontWeight="bold"
-          fontFamily={serifSvg}
-          fill={wire ? 'none' : 'url(#gradB)'}
-          stroke={stroke}
-          strokeWidth={wire ? 0.78 : 0.32}>
-          B
-        </SvgText>
-      );
-    case 'letterS':
-      return (
-        <SvgText
-          x={39}
-          y={45}
-          fontSize={16}
-          fontWeight="bold"
-          fontFamily={serifSvg}
-          fill={wire ? 'none' : 'url(#gradS)'}
-          stroke={stroke}
-          strokeWidth={wire ? 0.78 : 0}>
-          S
-        </SvgText>
-      );
-    default:
-      return null;
-  }
-}
-
-function FragmentSlot({ frag, assembly, lockPulse, materialize }) {
-  const motionStyle = useAnimatedStyle(() => {
-    const start = frag.delay;
-    const span = 0.38;
-    const p = interpolate(assembly.value, [start, start + span], [0, 1], Extrapolation.CLAMP);
-    const lock = interpolate(p, [0.78, 0.9, 0.96, 1], [0, 1, 1.05, 1]);
-    const snap = lock * (1 + lockPulse.value * 0.04);
+function EnergySpark({ phase }) {
+  const style = useAnimatedStyle(() => {
+    const p = interpolate(phase.value, [0, 0.6, 1.2], [0, 1, 0.35], Extrapolation.CLAMP);
     return {
-      opacity: interpolate(p, [0, 0.12, 1], [0, 0.92, 1], Extrapolation.CLAMP),
-      transform: [
-        { translateX: interpolate(p, [0, 1], [frag.scatter.x, 0]) },
-        { translateY: interpolate(p, [0, 1], [frag.scatter.y, 0]) },
-        { rotate: `${interpolate(p, [0, 1], [frag.scatter.r, 0])}deg` },
-        { scale: interpolate(p, [0, 0.88, 1], [frag.scatter.s, 1.04, 1]) * snap },
-      ],
+      opacity: p,
+      transform: [{ scale: interpolate(p, [0, 1], [0.2, 1.8]) }],
     };
   });
-
-  const wireLayerStyle = useAnimatedStyle(() => ({
-    opacity: (1 - materialize.value) * (0.86 + Math.sin(assembly.value * 20) * 0.08),
-  }));
-
-  const solidLayerStyle = useAnimatedStyle(() => ({
-    opacity: 0,
-  }));
-
   return (
-    <AnimatedView style={[styles.fragment, { width: LOGO_SIZE, height: LOGO_SIZE }, motionStyle]}>
-      <AnimatedView style={[StyleSheet.absoluteFill, wireLayerStyle]} pointerEvents="none">
-        <Svg width={LOGO_SIZE} height={LOGO_SIZE} viewBox={`0 0 ${VB} ${VB}`}>
-          <LogoDefs mode="wireframe" />
-          <LogoPiece id={frag.id} mode="wireframe" />
-        </Svg>
-      </AnimatedView>
-      <AnimatedView style={[StyleSheet.absoluteFill, solidLayerStyle]} pointerEvents="none">
-        <Svg width={LOGO_SIZE} height={LOGO_SIZE} viewBox={`0 0 ${VB} ${VB}`}>
-          <LogoDefs mode="solid" />
-          <LogoPiece id={frag.id} mode="solid" />
-        </Svg>
-      </AnimatedView>
+    <AnimatedView style={[styles.sparkCore, style]} pointerEvents="none">
+      <View style={styles.sparkDot} />
     </AnimatedView>
   );
 }
 
-function EnergyLines({ assembly, lineReveal, materialize }) {
+function ParticleRing({ phase }) {
+  const particles = useMemo(
+    () =>
+      Array.from({ length: 18 }, (_, i) => ({
+        angle: (i / 18) * Math.PI * 2,
+        radius: LOGO_SIZE * (0.55 + (i % 3) * 0.04),
+        size: 2 + (i % 3),
+        delay: i * 0.04,
+      })),
+    [],
+  );
+
+  return (
+    <>
+      {particles.map((p, i) => (
+        <OrbitingParticle key={i} p={p} phase={phase} />
+      ))}
+    </>
+  );
+}
+
+function OrbitingParticle({ p, phase }) {
   const style = useAnimatedStyle(() => {
-    const holo = 1 - materialize.value * 0.6;
+    const t = interpolate(phase.value, [0.8 + p.delay, 2.2], [0, 1], Extrapolation.CLAMP);
+    const spin = p.angle + t * Math.PI * 1.6;
+    const r = interpolate(t, [0, 0.7, 1], [p.radius * 1.35, p.radius * 0.92, p.radius * 0.78]);
     return {
-      opacity:
-        interpolate(assembly.value, [0.4, 0.72], [0, 1], Extrapolation.CLAMP) * (0.3 + lineReveal.value * 0.7) * holo,
-      transform: [{ scale: 0.9 + lineReveal.value * 0.1 + materialize.value * 0.04 }],
+      opacity: interpolate(t, [0, 0.15, 0.85, 1], [0, 0.95, 0.75, 0.5]),
+      transform: [
+        { translateX: Math.cos(spin) * r },
+        { translateY: Math.sin(spin) * r },
+        { scale: interpolate(t, [0, 1], [0.4, 1]) },
+      ],
+    };
+  });
+  return (
+    <AnimatedView
+      style={[
+        styles.particle,
+        { width: p.size, height: p.size, borderRadius: p.size, backgroundColor: GOLD_BRIGHT },
+        style,
+      ]}
+      pointerEvents="none"
+    />
+  );
+}
+
+function HexEdge({ from, to, index, phase }) {
+  const style = useAnimatedStyle(() => {
+    const start = 1.8 + index * 0.08;
+    const t = interpolate(phase.value, [start, start + 0.55], [0, 1], Extrapolation.CLAMP);
+    const scatter = 28 + index * 4;
+    return {
+      opacity: t,
+      transform: [
+        { translateX: interpolate(t, [0, 1], [(from.x - CX) * scatter, 0]) },
+        { translateY: interpolate(t, [0, 1], [(from.y - CY) * scatter, 0]) },
+        { scale: interpolate(t, [0, 0.85, 1], [0.3, 1.06, 1]) },
+      ],
     };
   });
 
   return (
-    <AnimatedView style={[styles.fragment, { width: LOGO_SIZE, height: LOGO_SIZE }, style]} pointerEvents="none">
+    <AnimatedView style={[styles.hexEdge, style]} pointerEvents="none">
       <Svg width={LOGO_SIZE} height={LOGO_SIZE} viewBox={`0 0 ${VB} ${VB}`}>
         <Defs>
-          <LinearGradient id="goldBeam" x1="0%" y1="0%" x2="100%" y2="0%">
-            <Stop offset="0%" stopColor="rgba(212,180,90,0)" />
-            <Stop offset="50%" stopColor="#F2E2B0" />
-            <Stop offset="100%" stopColor="rgba(212,180,90,0)" />
+          <LinearGradient id={`edge${index}`} x1="0%" y1="0%" x2="100%" y2="100%">
+            <Stop offset="0%" stopColor={GOLD_PALE} />
+            <Stop offset="100%" stopColor={GOLD} />
           </LinearGradient>
         </Defs>
-        {CONNECTIONS.map(([a, b]) => {
-          const p1 = FRAGMENT_ANCHORS[a];
-          const p2 = FRAGMENT_ANCHORS[b];
-          if (!p1 || !p2) return null;
-          return (
-            <Line
-              key={`${a}-${b}`}
-              x1={p1.x}
-              y1={p1.y}
-              x2={p2.x}
-              y2={p2.y}
-              stroke="url(#goldBeam)"
-              strokeWidth={0.8}
-              strokeDasharray="3,4"
-            />
-          );
-        })}
+        <Line
+          x1={from.x}
+          y1={from.y}
+          x2={to.x}
+          y2={to.y}
+          stroke={`url(#edge${index})`}
+          strokeWidth={1.4}
+          strokeLinecap="round"
+        />
       </Svg>
     </AnimatedView>
   );
 }
 
-function GoldLightSweep({ sweep, materialize }) {
-  const brightStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: interpolate(sweep.value, [0, 1], [-LOGO_SIZE * 0.8, LOGO_SIZE * 0.9]) },
-      { skewX: '-6deg' },
-    ],
-    opacity: interpolate(materialize.value, [0.3, 0.65], [0, 0.75], Extrapolation.CLAMP),
-  }));
-
-  const warmStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: interpolate(sweep.value, [0, 1], [LOGO_SIZE * 0.9, -LOGO_SIZE * 0.8]) },
-      { skewX: '6deg' },
-    ],
-    opacity: interpolate(materialize.value, [0.3, 0.65], [0, 0.55], Extrapolation.CLAMP),
-  }));
-
-  const bandH = LOGO_SIZE * 1.25;
-
+function HexFill({ phase }) {
+  const style = useAnimatedStyle(() => {
+    const t = interpolate(phase.value, [2.1, 2.8], [0, 1], Extrapolation.CLAMP);
+    return { opacity: t, transform: [{ scale: interpolate(t, [0, 1], [0.85, 1]) }] };
+  });
   return (
-    <View style={[styles.sweepClip, { width: LOGO_SIZE, height: LOGO_SIZE }]} pointerEvents="none">
-      <AnimatedView
-        style={[styles.sweepBand, { height: bandH, backgroundColor: 'rgba(242,226,176,0.28)' }, brightStyle]}
-      />
-      <AnimatedView
-        style={[styles.sweepBand, { height: bandH, backgroundColor: 'rgba(201,138,46,0.22)' }, warmStyle]}
-      />
-      <AnimatedView style={[styles.sweepBand, styles.sweepCoreBright, brightStyle]} />
-      <AnimatedView style={[styles.sweepBand, styles.sweepCoreWarm, warmStyle]} />
-    </View>
+    <AnimatedView style={[styles.hexEdge, style]} pointerEvents="none">
+      <Svg width={LOGO_SIZE} height={LOGO_SIZE} viewBox={`0 0 ${VB} ${VB}`}>
+        <Defs>
+          <LinearGradient id="hexStroke" x1="0%" y1="0%" x2="100%" y2="100%">
+            <Stop offset="0%" stopColor={GOLD_PALE} />
+            <Stop offset="50%" stopColor={GOLD} />
+            <Stop offset="100%" stopColor="#7A5C18" />
+          </LinearGradient>
+        </Defs>
+        <Polygon
+          points={MAIN_HEX}
+          fill="rgba(212,180,90,0.04)"
+          stroke="url(#hexStroke)"
+          strokeWidth={1.35}
+        />
+      </Svg>
+    </AnimatedView>
   );
 }
 
-function EtherealMist({ materialize, glow, camera }) {
-  const mistA = useAnimatedStyle(() => ({
-    opacity: 0.12 + materialize.value * 0.18 + glow.value * 0.12,
-    transform: [
-      { scale: 1.4 + camera.value * 0.2 },
-      { translateY: interpolate(camera.value, [0, 1], [20, -8]) },
-    ],
-  }));
-  const mistB = useAnimatedStyle(() => ({
-    opacity: 0.08 + glow.value * 0.2,
-    transform: [{ scale: 1.1 + glow.value * 0.15 }, { rotate: `${camera.value * 12}deg` }],
-  }));
-
+function HexagonAssemble({ phase }) {
   return (
     <>
-      <AnimatedView style={[styles.mistOrb, styles.mistOrbLg, mistA]} pointerEvents="none" />
-      <AnimatedView style={[styles.mistOrb, styles.mistOrbSm, mistB]} pointerEvents="none" />
+      {HEX_VERTS.map((from, i) => {
+        const to = HEX_VERTS[(i + 1) % HEX_VERTS.length];
+        return <HexEdge key={i} from={from} to={to} index={i} phase={phase} />;
+      })}
+      <HexFill phase={phase} />
     </>
   );
 }
 
-function DepthFloor({ materialize, camera }) {
-  const style = useAnimatedStyle(() => ({
-    opacity: materialize.value * 0.5,
-    transform: [
-      { scaleX: 0.68 + camera.value * 0.38 + materialize.value * 0.14 },
-      { scaleY: 0.32 + materialize.value * 0.18 },
-    ],
-  }));
-
-  return <AnimatedView style={[styles.depthFloor, style]} pointerEvents="none" />;
-}
-
-function LockSparks({ lockPulse, materialize }) {
-  const angles = [0, 55, 110, 165, 220, 295];
-  const hubStyle = useAnimatedStyle(() => ({
-    opacity: materialize.value * lockPulse.value * 0.9,
-  }));
-
-  return (
-    <AnimatedView style={[styles.sparkHub, hubStyle]} pointerEvents="none">
-      {angles.map((deg) => (
-        <SparkFlare key={deg} angle={deg} lockPulse={lockPulse} />
-      ))}
-    </AnimatedView>
-  );
-}
-
-function SparkFlare({ angle, lockPulse }) {
-  const style = useAnimatedStyle(() => ({
-    opacity: lockPulse.value * 0.85,
-    transform: [
-      { rotate: `${angle}deg` },
-      { translateX: LOGO_SIZE * 0.42 },
-      { scale: 0.3 + lockPulse.value * 1.3 },
-    ],
-  }));
-
-  return (
-    <AnimatedView style={[styles.spark, style]} pointerEvents="none">
-      <View style={styles.sparkCore} />
-    </AnimatedView>
-  );
-}
-
-function ParticleField({ assembly, particles, camera }) {
-  return particles.map((p, i) => <Particle key={i} p={p} assembly={assembly} camera={camera} />);
-}
-
-function Particle({ p, assembly, camera }) {
+function LettersBS({ phase }) {
   const style = useAnimatedStyle(() => {
-    const drift = interpolate(assembly.value, [0, 1], [1, 0], Extrapolation.CLAMP);
-    const parallax = 1 - p.depth * 0.32;
-    const zoom = 0.88 + camera.value * 0.14;
+    const t = interpolate(phase.value, [3, 3.75], [0, 1], Extrapolation.CLAMP);
     return {
-      opacity: drift * (0.4 + Math.sin((assembly.value + p.phase) * Math.PI * 3) * 0.25) * 0.8,
+      opacity: t,
       transform: [
-        { translateX: p.x * drift * parallax },
-        { translateY: p.y * drift * parallax },
-        { scale: (0.5 + (1 - drift) * 0.5) * zoom * parallax },
+        { scale: interpolate(t, [0, 0.7, 1], [0.5, 1.08, 1]) },
+        { translateY: interpolate(t, [0, 1], [8, 0]) },
       ],
     };
   });
 
+  const shine = useAnimatedStyle(() => {
+    const t = interpolate(phase.value, [3.2, 4.2], [0, 1], Extrapolation.CLAMP);
+    return {
+      opacity: interpolate(t, [0, 0.4, 1], [0, 0.85, 0.25]),
+      transform: [{ translateX: interpolate(t, [0, 1], [-LOGO_SIZE * 0.5, LOGO_SIZE * 0.55]) }],
+    };
+  });
+
+  return (
+    <AnimatedView style={[styles.logoLayer, style]} pointerEvents="none">
+      <View style={styles.shineClip}>
+        <AnimatedView style={[styles.metalShine, shine]} />
+      </View>
+      <Svg width={LOGO_SIZE} height={LOGO_SIZE} viewBox={`0 0 ${VB} ${VB}`}>
+        <Defs>
+          <LinearGradient id="gradB" x1="0%" y1="0%" x2="100%" y2="100%">
+            <Stop offset="0%" stopColor={GOLD_PALE} />
+            <Stop offset="100%" stopColor="#C98A2E" />
+          </LinearGradient>
+          <LinearGradient id="gradS" x1="100%" y1="0%" x2="0%" y2="100%">
+            <Stop offset="0%" stopColor={GOLD_BRIGHT} />
+            <Stop offset="100%" stopColor="#7A5C18" />
+          </LinearGradient>
+        </Defs>
+        <SvgText x={27} y={45} fontSize={16} fontWeight="bold" fontFamily={serif} fill="url(#gradB)">
+          B
+        </SvgText>
+        <SvgText x={39} y={45} fontSize={16} fontWeight="bold" fontFamily={serif} fill="url(#gradS)">
+          S
+        </SvgText>
+      </Svg>
+    </AnimatedView>
+  );
+}
+
+function GoldenBurst({ phase }) {
+  const style = useAnimatedStyle(() => {
+    const t = interpolate(phase.value, [4, 4.65], [0, 1], Extrapolation.CLAMP);
+    return {
+      opacity: interpolate(t, [0, 0.25, 1], [0, 0.95, 0.22]),
+      transform: [{ scale: interpolate(t, [0, 0.35, 1], [0.3, 1.45, 1.15]) }],
+    };
+  });
   return (
     <AnimatedView
       style={[
-        styles.particle,
-        {
-          width: p.size,
-          height: p.size,
-          borderRadius: p.size,
-          backgroundColor: p.bright ? COLORS.goldPale : COLORS.gold,
-        },
+        styles.burst,
+        { width: LOGO_SIZE * 2.1, height: LOGO_SIZE * 2.1, borderRadius: LOGO_SIZE },
         style,
       ]}
+      pointerEvents="none"
     />
   );
 }
 
-function BrandLogoBitmap({ assembly, materialize, glow, camera }) {
+function RippleRings({ phase }) {
+  return [0, 1, 2].map((i) => <Ripple key={i} index={i} phase={phase} />);
+}
+
+function Ripple({ index, phase }) {
   const style = useAnimatedStyle(() => {
-    const assemble = assembly.value;
-    const mat = materialize.value;
-    const breathe = 1 + glow.value * 0.06;
+    const start = 4.8 + index * 0.12;
+    const t = interpolate(phase.value, [start, start + 0.9], [0, 1], Extrapolation.CLAMP);
     return {
-      opacity: interpolate(assemble, [0, 0.25, 0.55, 1], [0, 0.2, 0.72, 1], Extrapolation.CLAMP) * mat,
+      opacity: interpolate(t, [0, 0.2, 1], [0, 0.55, 0]),
+      transform: [{ scale: 0.7 + t * (0.55 + index * 0.12) }],
+    };
+  });
+  return (
+    <AnimatedView
+      style={[
+        styles.ripple,
+        { width: LOGO_SIZE * 1.35, height: LOGO_SIZE * 1.35, borderRadius: LOGO_SIZE },
+        style,
+      ]}
+      pointerEvents="none"
+    />
+  );
+}
+
+function Logo3DStage({ phase, children }) {
+  const style = useAnimatedStyle(() => {
+    const t = interpolate(phase.value, [4.5, 5.8], [0, 1], Extrapolation.CLAMP);
+    const rot = interpolate(t, [0, 0.45, 0.75, 1], [0, 14, -6, 0]);
+    return {
       transform: [
-        { translateY: interpolate(camera.value, [0, 1], [18, -4]) },
-        {
-          scale:
-            interpolate(assemble, [0, 0.7, 1], [0.68, 0.94, 1], Extrapolation.CLAMP) *
-            interpolate(mat, [0, 1], [0.92, 1.04], Extrapolation.CLAMP) *
-            breathe,
-        },
+        { perspective: 900 },
+        { rotateY: `${rot}deg` },
+        { rotateX: `${interpolate(t, [0, 0.5, 1], [4, -3, 0])}deg` },
+        { scale: interpolate(t, [0, 0.5, 1], [0.96, 1.04, 1]) },
       ],
     };
   });
+  return <AnimatedView style={[styles.stage3d, style]}>{children}</AnimatedView>;
+}
 
+function LightWaves({ phase }) {
+  const waves = [0, 1, 2];
   return (
-    <AnimatedView style={[styles.brandLogoWrap, { width: LOGO_SIZE, height: LOGO_SIZE }, style]} pointerEvents="none">
-      <Image source={BRAND_LOGO} style={styles.brandLogoImg} resizeMode="contain" />
+    <View style={styles.waveField} pointerEvents="none">
+      {waves.map((i) => (
+        <WaveLine key={i} index={i} phase={phase} />
+      ))}
+    </View>
+  );
+}
+
+function WaveLine({ index, phase }) {
+  const style = useAnimatedStyle(() => {
+    const t = interpolate(phase.value, [5.2, 6.6], [0, 1], Extrapolation.CLAMP);
+    const drift = (t + index * 0.2) % 1;
+    return {
+      opacity: 0.08 + t * 0.22,
+      transform: [
+        { translateX: interpolate(drift, [0, 1], [-40, 40]) },
+        { translateY: index * 14 - 14 },
+        { scaleX: 1 + index * 0.15 },
+      ],
+    };
+  });
+  return <AnimatedView style={[styles.waveLine, style]} />;
+}
+
+function FinalGlow({ phase }) {
+  const halo = useAnimatedStyle(() => {
+    const t = interpolate(phase.value, [6.2, 7.2], [0, 1], Extrapolation.CLAMP);
+    const pulse = interpolate(phase.value, [7, 8.5], [0, 1], Extrapolation.CLAMP);
+    return {
+      opacity: 0.12 + t * 0.38 + Math.sin(pulse * Math.PI * 2) * 0.08,
+      transform: [{ scale: 0.88 + t * 0.14 }],
+    };
+  });
+  return (
+    <AnimatedView
+      style={[styles.halo, { width: LOGO_SIZE * 1.7, height: LOGO_SIZE * 1.7, borderRadius: LOGO_SIZE }, halo]}
+      pointerEvents="none"
+    />
+  );
+}
+
+function AppTitle({ phase }) {
+  const style = useAnimatedStyle(() => {
+    const t = interpolate(phase.value, [7.5, 8.6], [0, 1], Extrapolation.CLAMP);
+    return {
+      opacity: t,
+      transform: [{ translateY: interpolate(t, [0, 1], [18, 0]) }],
+    };
+  });
+  return (
+    <AnimatedView style={[styles.titleWrap, style]} pointerEvents="none">
+      <Text style={styles.title}>BSV32 TRADING SYSTEM</Text>
     </AnimatedView>
   );
 }
 
-function DepthGrid({ camera }) {
+function AmbientGlow({ phase }) {
   const style = useAnimatedStyle(() => ({
-    opacity: 0.06 + camera.value * 0.08,
-    transform: [{ scale: 1.12 - camera.value * 0.06 }, { translateY: camera.value * 16 }],
+    opacity: interpolate(phase.value, [0, 2, 8], [0, 0.35, 0.55], Extrapolation.CLAMP),
+    transform: [{ scale: 0.9 + interpolate(phase.value, [0, 9], [0, 0.18]) }],
   }));
-
-  return <AnimatedView style={[styles.depthGrid, style]} pointerEvents="none" />;
+  return (
+    <AnimatedView
+      style={[styles.ambientGlow, { width: SCREEN_W * 0.95, height: SCREEN_W * 0.95, borderRadius: SCREEN_W }, style]}
+      pointerEvents="none"
+    />
+  );
 }
 
 /**
- * Black & gold ethereal logo splash — stays until `appReady`, then fades to home.
- * @param {{ appReady: boolean, onComplete: () => void }} props
+ * 9-step cinematic opening — energy → particles → hex → BS → burst → 3D → waves → lock → title.
  */
-export default function CinematicSplash({ appReady = false, onComplete }) {
-  const assembly = useSharedValue(0);
-  const materialize = useSharedValue(0);
-  const lineReveal = useSharedValue(0);
-  const sweep = useSharedValue(0);
-  const camera = useSharedValue(0);
-  const glow = useSharedValue(0);
-  const lockPulse = useSharedValue(0);
+export default function CinematicSplash({ onComplete }) {
+  const phase = useSharedValue(0);
   const fade = useSharedValue(1);
-  const [animDone, setAnimDone] = useState(false);
   const fadingRef = useRef(false);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
@@ -552,347 +379,172 @@ export default function CinematicSplash({ appReady = false, onComplete }) {
     });
   }, [fade]);
 
-  const particles = useMemo(
-    () =>
-      Array.from({ length: 20 }, (_, i) => ({
-        x: ((i * 17) % 11 - 5) * (LOGO_SIZE * 0.26),
-        y: ((i * 23) % 13 - 6) * (LOGO_SIZE * 0.24),
-        size: 1.5 + (i % 4) * 0.5,
-        phase: i * 0.09,
-        bright: i % 3 === 0,
-        depth: (i % 5) / 5,
-      })),
-    [],
-  );
-
   useEffect(() => {
-    SplashScreen.hideAsync().catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    const wireEnd = START_DELAY_MS + WIRE_ASSEMBLY_MS;
-    const matEnd = wireEnd + MATERIALIZE_MS;
-    const scanEnd = matEnd + GOLD_SWEEP_MS;
-
-    camera.value = withDelay(
-      START_DELAY_MS,
-      withTiming(1, { duration: ANIM_DONE_MS, easing: Easing.inOut(Easing.cubic) }),
-    );
-
-    assembly.value = withDelay(
-      START_DELAY_MS,
-      withTiming(1, { duration: WIRE_ASSEMBLY_MS, easing: Easing.out(Easing.cubic) }),
-    );
-
-    lineReveal.value = withDelay(wireEnd - 500, withTiming(1, { duration: 420, easing: Easing.inOut(Easing.quad) }));
-
-    materialize.value = withDelay(
-      wireEnd,
-      withTiming(1, { duration: MATERIALIZE_MS, easing: Easing.inOut(Easing.cubic) }),
-    );
-
-    sweep.value = withDelay(
-      wireEnd + 180,
-      withTiming(1, { duration: GOLD_SWEEP_MS, easing: Easing.inOut(Easing.quad) }),
-    );
-
-    lockPulse.value = withDelay(
-      wireEnd + 100,
-      withRepeat(
-        withSequence(withTiming(1, { duration: 100 }), withTiming(0, { duration: 140 })),
-        5,
-        false,
-      ),
-    );
-
-    glow.value = withDelay(
-      scanEnd,
-      withTiming(1, { duration: 480, easing: Easing.out(Easing.quad) }),
-    );
-
-    const doneTimer = setTimeout(() => setAnimDone(true), ANIM_DONE_MS);
-    return () => clearTimeout(doneTimer);
-  }, [assembly, camera, glow, lineReveal, lockPulse, materialize, sweep]);
-
-  useEffect(() => {
-    const capTimer = setTimeout(() => beginFade(), SPLASH_MAX_MS);
-    return () => clearTimeout(capTimer);
-  }, [beginFade]);
-
-  useEffect(() => {
-    if (!animDone) return;
-    if (appReady) {
-      beginFade();
-      return;
-    }
-    glow.value = withRepeat(
-      withSequence(withTiming(1, { duration: 1100 }), withTiming(0.82, { duration: 1100 })),
-      -1,
-      true,
-    );
-  }, [animDone, appReady, beginFade, glow]);
-
-  const rootStyle = useAnimatedStyle(() => ({
-    opacity: fade.value,
-  }));
-
-  const cameraStageStyle = useAnimatedStyle(() => {
-    const z = camera.value;
-    return {
-      transform: [
-        { perspective: 920 },
-        { translateY: interpolate(z, [0, 1], [32, -8]) },
-        { scale: interpolate(z, [0, 0.5, 1], [0.86, 0.97, 1.08]) },
-      ],
+    phase.value = withTiming(OPENING_STEP_COUNT, {
+      duration: ANIM_MS,
+      easing: Easing.inOut(Easing.cubic),
+    });
+    const done = setTimeout(() => beginFade(), ANIM_MS + HOLD_BEFORE_FADE_MS);
+    const cap = setTimeout(() => beginFade(), SPLASH_MAX_MS);
+    return () => {
+      clearTimeout(done);
+      clearTimeout(cap);
     };
-  });
+  }, [beginFade, phase]);
 
-  const logoLiftStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateY: interpolate(materialize.value, [0, 1], [10, -6]) },
-      { scale: interpolate(materialize.value, [0, 1], [0.95, 1.03]) * (1 + glow.value * 0.04) },
-    ],
-  }));
-
-  const haloStyle = useAnimatedStyle(() => ({
-    opacity: 0.1 + glow.value * 0.55 + materialize.value * 0.15,
-    transform: [{ scale: 0.8 + glow.value * 0.28 + camera.value * 0.08 }],
-  }));
-
-  const ringStyle = useAnimatedStyle(() => ({
-    opacity: 0.18 + materialize.value * 0.5 + glow.value * 0.4,
-    transform: [{ scale: 0.86 + materialize.value * 0.16 + glow.value * 0.08 }],
-  }));
-
-  const holoGridStyle = useAnimatedStyle(() => ({
-    opacity: (1 - materialize.value) * 0.28,
-  }));
+  const rootStyle = useAnimatedStyle(() => ({ opacity: fade.value }));
 
   return (
     <AnimatedView style={[styles.root, rootStyle]}>
-      <View style={styles.bgBase} />
-      <View style={styles.bgWarmGlow} />
-      <DepthGrid camera={camera} />
-      <AnimatedView style={[styles.bgHoloGrid, holoGridStyle]} pointerEvents="none" />
-      <View style={styles.vignetteTop} />
-      <View style={styles.vignetteBottom} />
-
-      <AnimatedView style={[styles.stage, cameraStageStyle]}>
-        <EtherealMist materialize={materialize} glow={glow} camera={camera} />
-        <ParticleField assembly={assembly} particles={particles} camera={camera} />
-
-        <AnimatedView
-          style={[styles.halo, { width: LOGO_SIZE * 1.65, height: LOGO_SIZE * 1.65, borderRadius: LOGO_SIZE }, haloStyle]}
-        />
-        <AnimatedView
-          style={[
-            styles.goldRing,
-            { width: LOGO_SIZE * 1.16, height: LOGO_SIZE * 1.16, borderRadius: LOGO_SIZE },
-            ringStyle,
-          ]}
-        />
-
-        <AnimatedView style={[styles.logoLift, logoLiftStyle]}>
-          <DepthFloor materialize={materialize} camera={camera} />
-          <View style={[styles.logoCluster, { width: LOGO_SIZE, height: LOGO_SIZE }]}>
-            <EnergyLines assembly={assembly} lineReveal={lineReveal} materialize={materialize} />
-            {FRAGMENTS.map((frag) => (
-              <FragmentSlot
-                key={frag.id}
-                frag={frag}
-                assembly={assembly}
-                lockPulse={lockPulse}
-                materialize={materialize}
-              />
-            ))}
-            <BrandLogoBitmap assembly={assembly} materialize={materialize} glow={glow} camera={camera} />
-            <GoldLightSweep sweep={sweep} materialize={materialize} />
-            <LockSparks lockPulse={lockPulse} materialize={materialize} />
-          </View>
-        </AnimatedView>
-      </AnimatedView>
+      <View style={styles.bgVoid} />
+      <AmbientGlow phase={phase} />
+      <Logo3DStage phase={phase}>
+        <View style={styles.logoStack}>
+          <GoldenBurst phase={phase} />
+          <RippleRings phase={phase} />
+          <LightWaves phase={phase} />
+          <FinalGlow phase={phase} />
+          <EnergySpark phase={phase} />
+          <ParticleRing phase={phase} />
+          <HexagonAssemble phase={phase} />
+          <LettersBS phase={phase} />
+        </View>
+      </Logo3DStage>
+      <AppTitle phase={phase} />
     </AnimatedView>
   );
 }
 
-export const CINEMATIC_SPLASH_MS = SPLASH_MAX_MS;
-
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: COLORS.black,
+    backgroundColor: '#000000',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  bgBase: {
+  bgVoid: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: COLORS.black,
+    backgroundColor: '#000000',
   },
-  bgWarmGlow: {
+  ambientGlow: {
     position: 'absolute',
-    top: SCREEN_H * 0.22,
     alignSelf: 'center',
-    width: SCREEN_W * 0.9,
-    height: SCREEN_W * 0.9,
-    borderRadius: SCREEN_W,
-    backgroundColor: 'rgba(122,92,24,0.07)',
-  },
-  bgHoloGrid: {
-    ...StyleSheet.absoluteFillObject,
-    borderWidth: 1,
-    borderColor: 'rgba(212,180,90,0.08)',
-  },
-  depthGrid: {
-    ...StyleSheet.absoluteFillObject,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
-    borderColor: 'rgba(122,92,24,0.05)',
-    backgroundColor: 'rgba(5,4,3,0.5)',
-  },
-  vignetteTop: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: SCREEN_H * 0.4,
-    backgroundColor: 'rgba(0,0,0,0.72)',
-  },
-  vignetteBottom: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: SCREEN_H * 0.32,
-    backgroundColor: 'rgba(0,0,0,0.68)',
-  },
-  stage: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logoLift: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logoCluster: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-    borderRadius: LOGO_SIZE * 0.2,
-  },
-  fragment: {
-    position: 'absolute',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  halo: {
-    position: 'absolute',
-    backgroundColor: 'rgba(212,180,90,0.1)',
-    shadowColor: COLORS.gold,
-    shadowOpacity: 0.85,
-    shadowRadius: 44,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  goldRing: {
-    position: 'absolute',
-    borderWidth: 1,
-    borderColor: 'rgba(242,226,176,0.35)',
-    backgroundColor: 'transparent',
-    shadowColor: COLORS.goldBright,
+    top: SCREEN_H * 0.2,
+    backgroundColor: 'rgba(212,180,90,0.07)',
+    shadowColor: GOLD,
     shadowOpacity: 0.45,
-    shadowRadius: 20,
+    shadowRadius: 80,
     shadowOffset: { width: 0, height: 0 },
   },
-  mistOrb: {
-    position: 'absolute',
-    borderRadius: 999,
-    backgroundColor: 'rgba(212,180,90,0.12)',
-  },
-  mistOrbLg: {
-    width: LOGO_SIZE * 2.2,
-    height: LOGO_SIZE * 2.2,
-    shadowColor: COLORS.gold,
-    shadowOpacity: 0.35,
-    shadowRadius: 60,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  mistOrbSm: {
-    width: LOGO_SIZE * 1.4,
-    height: LOGO_SIZE * 1.4,
-    backgroundColor: 'rgba(242,226,176,0.06)',
-  },
-  sweepClip: {
-    ...StyleSheet.absoluteFillObject,
-    overflow: 'hidden',
+  stage3d: {
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sweepBand: {
-    position: 'absolute',
-    width: 24,
-    borderRadius: 2,
-    shadowColor: COLORS.goldBright,
-    shadowOpacity: 0.8,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 0 },
+  logoStack: {
+    width: LOGO_SIZE,
+    height: LOGO_SIZE,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  sweepCoreBright: {
-    width: 5,
-    backgroundColor: 'rgba(255,244,208,0.9)',
-  },
-  sweepCoreWarm: {
-    width: 4,
-    backgroundColor: 'rgba(201,138,46,0.85)',
-    shadowColor: COLORS.amber,
-  },
-  depthFloor: {
-    position: 'absolute',
-    bottom: -LOGO_SIZE * 0.18,
-    width: LOGO_SIZE * 1.12,
-    height: LOGO_SIZE * 0.22,
-    borderRadius: LOGO_SIZE,
-    backgroundColor: 'rgba(212,180,90,0.06)',
-    shadowColor: '#000',
-    shadowOpacity: 0.9,
-    shadowRadius: 28,
-    shadowOffset: { width: 0, height: 10 },
-  },
-  particle: {
-    position: 'absolute',
-    shadowColor: COLORS.gold,
-    shadowOpacity: 0.85,
-    shadowRadius: 5,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  sparkHub: {
+  logoLayer: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  spark: {
-    position: 'absolute',
-    width: 10,
-    height: 2,
+  hexEdge: {
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
   },
   sparkCore: {
-    width: 10,
-    height: 2,
-    borderRadius: 1,
-    backgroundColor: COLORS.goldPale,
-    shadowColor: COLORS.goldBright,
-    shadowOpacity: 1,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  brandLogoWrap: {
     position: 'absolute',
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 12,
   },
-  brandLogoImg: {
+  sparkDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: GOLD_PALE,
+    shadowColor: GOLD_BRIGHT,
+    shadowOpacity: 1,
+    shadowRadius: 22,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  particle: {
+    position: 'absolute',
+    shadowColor: GOLD,
+    shadowOpacity: 0.9,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  shineClip: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: 'hidden',
+  },
+  metalShine: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 28,
+    backgroundColor: 'rgba(255,244,208,0.35)',
+    transform: [{ skewX: '-12deg' }],
+  },
+  burst: {
+    position: 'absolute',
+    backgroundColor: 'rgba(242,226,176,0.22)',
+    shadowColor: GOLD_BRIGHT,
+    shadowOpacity: 0.95,
+    shadowRadius: 50,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  ripple: {
+    position: 'absolute',
+    borderWidth: 1,
+    borderColor: 'rgba(242,226,176,0.35)',
+    backgroundColor: 'transparent',
+  },
+  halo: {
+    position: 'absolute',
+    backgroundColor: 'rgba(212,180,90,0.1)',
+    shadowColor: GOLD,
+    shadowOpacity: 0.75,
+    shadowRadius: 36,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  waveField: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  waveLine: {
+    position: 'absolute',
+    width: LOGO_SIZE * 1.4,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: 'rgba(212,180,90,0.28)',
+    shadowColor: GOLD,
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  titleWrap: {
+    position: 'absolute',
+    bottom: SCREEN_H * 0.14,
+    alignItems: 'center',
     width: '100%',
-    height: '100%',
+    paddingHorizontal: 24,
+  },
+  title: {
+    color: GOLD_BRIGHT,
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 3.2,
+    textAlign: 'center',
+    fontFamily: serif,
+    textShadowColor: GOLD,
+    textShadowRadius: 12,
+    textShadowOffset: { width: 0, height: 0 },
   },
 });

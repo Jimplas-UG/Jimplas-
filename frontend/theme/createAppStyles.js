@@ -12,7 +12,6 @@ export function createAppStyles(C) {
   return StyleSheet.create({
   appShell: { flex: 1 },
   appUnderlay: { flex: 1 },
-  splashOverlay: { ...StyleSheet.absoluteFillObject, zIndex: 100 },
   safeRoot: { flex: 1, backgroundColor: C.appBg },
   root: { flex: 1, backgroundColor: C.appBg },
   scrollContent: { paddingBottom: 0, backgroundColor: C.appBg },

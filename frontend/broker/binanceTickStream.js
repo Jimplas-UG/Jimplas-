@@ -71,6 +71,7 @@ export function subscribeBinanceTickStream(baseUrl, symbol, onTick, { onError, o
 
     ws.onclose = () => {
       ws = null;
+      onError?.('WebSocket closed');
       if (!closed) scheduleReconnect();
     };
   };

@@ -11,7 +11,6 @@ import { publicBlockReason } from '../security/publicLabels';
 import { handleValidationRoute } from './validationRoutes';
 import { handleBinanceProxy, isBinanceProxyPath } from './binanceProxy';
 import { attachBinanceWebSocketProxy } from './binanceWsProxy';
-import { handleMt5Proxy, isMt5ProxyPath } from './mt5Proxy';
 import { handleAuthRoute, isAuthPath } from './auth/routes';
 import { isStrategyFreezeEnforced, mergeFrozenDeskCfg, verifyFrozenStrategy } from '../strategy/frozenProduction';
 import * as path from 'node:path';
@@ -185,17 +184,6 @@ const server = http.createServer(async (req, res) => {
     if (await handleAuthRoute(req, res, urlEarly)) return;
   }
 
-  // MT5 proxy: allow all /v1/mt5/* without desk-api auth — MT5 bridge is internal-only
-  if (isMt5ProxyPath(urlEarly.pathname)) {
-    try {
-      if (await handleMt5Proxy(req, res, urlEarly)) return;
-    } catch {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ detail: 'MT5 bridge unreachable on VPS. Ensure Bilshenz-MT5-API task is running.' }));
-      return;
-    }
-  }
-
   // Binance proxy — require desk-api auth when DESK_API_KEY is set (mobile sends Bearer via binanceHeaders).
   if (isBinanceProxyPath(urlEarly.pathname)) {
     if (!authOk(req)) {
@@ -285,20 +273,34 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// Bind 0.0.0.0 so mobile app can reach VPS; MT5 Python API stays on 127.0.0.1 only.
+// Bind 0.0.0.0 so mobile app can reach VPS; Binance bridge stays on 127.0.0.1 or LAN.
 attachBinanceWebSocketProxy(server, (socket) => {
   socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
   socket.destroy();
 });
 
+const isProductionDesk =
+  process.env.PRODUCTION_MODE === '1' || process.env.NODE_ENV === 'production';
+
+if (isProductionDesk) {
+  if (!API_KEY) {
+    console.error('[desk-api] FATAL: DESK_API_KEY required when PRODUCTION_MODE=1');
+    process.exit(1);
+  }
+  if (!process.env.AUTH_JWT_SECRET?.trim() || process.env.AUTH_JWT_SECRET.trim().length < 32) {
+    console.error('[desk-api] FATAL: AUTH_JWT_SECRET required (min 32 chars) when PRODUCTION_MODE=1');
+    process.exit(1);
+  }
+}
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[desk-api] listening on http://0.0.0.0:${PORT} (LAN/VPS + localhost)`);
-  console.log(`[desk-api] POST /v1/desk/compute · POST /v1/desk/execute-gate · /v1/mt5/* · /v1/binance/*`);
+  console.log(`[desk-api] POST /v1/desk/compute · POST /v1/desk/execute-gate · /v1/binance/*`);
   console.log(`[desk-api] /v1/auth/* — user registration, login, JWT sessions`);
   console.log(`[desk-api] POST /v1/validation/event · GET /v1/validation/events · GET /v1/validation/freeze-status`);
   if (isStrategyFreezeEnforced()) console.log('[desk-api] STRATEGY_FREEZE=1 — locked production config');
-  if (!API_KEY) console.warn('[desk-api] WARNING: DESK_API_KEY not set — open to LAN');
+  if (!API_KEY) console.warn('[desk-api] WARNING: DESK_API_KEY not set — desk routes open on LAN');
   if (!process.env.AUTH_JWT_SECRET?.trim()) {
-    console.warn('[desk-api] WARNING: AUTH_JWT_SECRET not set — using fallback (set in production)');
+    console.warn('[desk-api] WARNING: AUTH_JWT_SECRET not set — dev-only JWT signing active');
   }
 });

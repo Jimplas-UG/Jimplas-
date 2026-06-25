@@ -49,7 +49,9 @@ export function friendlyAuthError(error, fallback = 'Something went wrong') {
   if (/invalid email or password/i.test(error)) return 'Invalid email or password.';
   if (/session expired|unauthorized/i.test(error)) return 'Your session expired. Please sign in again.';
   if (/too many attempts/i.test(error)) return error;
-  if (/network|timed out|fetch/i.test(error)) return 'Cannot reach server. Check desk API URL and Wi‑Fi.';
+  if (/network|timed out|fetch|failed to fetch|econnrefused|connection refused/i.test(error)) {
+    return 'Cannot reach desk API. Start it first: cd backend && npm run desk-api';
+  }
   return error;
 }
 

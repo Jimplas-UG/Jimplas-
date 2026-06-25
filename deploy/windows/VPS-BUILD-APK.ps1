@@ -4,7 +4,7 @@
 param(
   [string]$DeskApiUrl = '',
   [string]$DeskApiKey = '',
-  [string]$Mt5ApiUrl = '',
+  [string]$BinanceApiUrl = '',
   [switch]$UseEasCloud
 )
 Set-ExecutionPolicy Bypass -Scope Process -Force
@@ -53,16 +53,16 @@ if ((Test-Path $env:ANDROID_HOME) -and -not (Test-Path $sdkProps)) {
 
 Write-Host "==> VPS APK build (frontend: $Frontend)" -ForegroundColor Cyan
 if ($DeskApiUrl) { Write-Host "    Desk API: $DeskApiUrl" -ForegroundColor DarkGray }
-if (-not $Mt5ApiUrl -and $DeskApiUrl -and $DeskApiUrl -notmatch '127\.0\.0\.1|localhost') {
-  $Mt5ApiUrl = ($DeskApiUrl.TrimEnd('/') + '/v1/mt5')
+if (-not $BinanceApiUrl -and $DeskApiUrl -and $DeskApiUrl -notmatch '127\.0\.0\.1|localhost') {
+  $BinanceApiUrl = ($DeskApiUrl.TrimEnd('/') + '/v1/binance')
 }
-if ($Mt5ApiUrl) { Write-Host "    MT5 API:  $Mt5ApiUrl" -ForegroundColor DarkGray }
+if ($BinanceApiUrl) { Write-Host "    Binance API: $BinanceApiUrl" -ForegroundColor DarkGray }
 if ($UseEasCloud) { Write-Host '    Mode: EAS cloud' -ForegroundColor DarkGray }
 
 $buildArgs = @{}
 if ($DeskApiUrl) { $buildArgs.DeskApiUrl = $DeskApiUrl }
 if ($DeskApiKey) { $buildArgs.DeskApiKey = $DeskApiKey }
-if ($Mt5ApiUrl) { $buildArgs.Mt5ApiUrl = $Mt5ApiUrl }
+if ($BinanceApiUrl) { $buildArgs.BinanceApiUrl = $BinanceApiUrl }
 if ($UseEasCloud) { $buildArgs.UseEasCloud = $true }
 
 & $BuildScript @buildArgs

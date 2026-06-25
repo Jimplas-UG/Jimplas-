@@ -10,7 +10,9 @@ const adbName = process.platform === 'win32' ? 'adb.exe' : 'adb';
 function sdkRoots() {
   const home = process.env.USERPROFILE || process.env.HOME || '';
   const localApp = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const bundled = path.join(__dirname, '..', '.tools', 'platform-tools');
   return [
+    bundled,
     process.env.ANDROID_HOME,
     process.env.ANDROID_SDK_ROOT,
     path.join(localApp, 'Android', 'Sdk'),
@@ -21,8 +23,10 @@ function sdkRoots() {
 
 function resolveAdbPath() {
   for (const root of sdkRoots()) {
-    const candidate = path.join(root, 'platform-tools', adbName);
+    const candidate = path.join(root, adbName);
     if (fs.existsSync(candidate)) return candidate;
+    const nested = path.join(root, 'platform-tools', adbName);
+    if (fs.existsSync(nested)) return nested;
   }
   return null;
 }

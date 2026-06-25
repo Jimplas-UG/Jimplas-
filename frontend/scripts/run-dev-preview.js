@@ -1,5 +1,5 @@
 /**
- * Dev preview launcher — mock APIs, skip splash, hot reload via Metro.
+ * Dev preview launcher — mock APIs, hot reload via Metro.
  * Usage: npm run start:dev
  *        npm run android:dev   (USB emulator + Metro)
  */
@@ -14,7 +14,7 @@ const childEnv = {
   ...process.env,
   EXPO_PUBLIC_DEV_PREVIEW: '1',
   EXPO_PUBLIC_MOCK_API: '1',
-  EXPO_PUBLIC_SKIP_SPLASH: '1',
+  EXPO_PUBLIC_SKIP_SPLASH: process.env.EXPO_PUBLIC_SKIP_SPLASH ?? '0',
   EXPO_PUBLIC_DESK_REMOTE: '1',
   EXPO_PUBLIC_DESK_DIAG: '1',
   EXPO_PUBLIC_BROKER_MODE: process.env.EXPO_PUBLIC_BROKER_MODE || 'binance',

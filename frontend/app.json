@@ -12,17 +12,14 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#000000"
+      "backgroundColor": "#000000",
+      "resizeMode": "contain"
     },
     "plugins": [
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#000000",
-          "image": "./assets/splash-icon.png",
-          "imageWidth": 160
+          "backgroundColor": "#000000"
         }
       ],
       [
@@ -45,7 +42,14 @@
       }
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "bundler": "metro",
+      "favicon": "./assets/favicon.png",
+      "backgroundColor": "#000000",
+      "themeColor": "#000000",
+      "name": "Bilshenz",
+      "shortName": "Bilshenz",
+      "display": "standalone",
+      "lang": "en"
     },
     "extra": {
       "deskApiUrl": "http://127.0.0.1:8791",

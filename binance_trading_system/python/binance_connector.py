@@ -67,6 +67,10 @@ class BinanceConnector:
         self.cfg = cfg or BinanceConfig()
         self._symbol_info: dict[str, Any] | None = None
         self._connected = False
+        self._time_offset_ms = 0
+        self._time_synced_at = 0.0
+        if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper:
+            self.sync_server_time(force=True)
 
     @property
     def base_url(self) -> str:
@@ -79,6 +83,26 @@ class BinanceConnector:
             self.cfg.testnet = testnet
         self._symbol_info = None
         self._connected = bool(self.cfg.api_key and self.cfg.api_secret) or self.cfg.paper
+        if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper:
+            self.sync_server_time(force=True)
+
+    def sync_server_time(self, force: bool = False) -> None:
+        if not force and self._time_synced_at and time.time() - self._time_synced_at < 300:
+            return
+        try:
+            data = self._request("GET", "/fapi/v1/time", signed=False)
+            server_ms = int(data.get("serverTime", 0))
+            local_ms = int(time.time() * 1000)
+            self._time_offset_ms = server_ms - local_ms
+            self._time_synced_at = time.time()
+            log.info("Binance time sync offset_ms=%s", self._time_offset_ms)
+        except Exception as e:
+            log.warning("Binance time sync failed: %s", e)
+
+    def _server_timestamp_ms(self) -> int:
+        if not self._time_synced_at:
+            self.sync_server_time(force=True)
+        return int(time.time() * 1000) + self._time_offset_ms
 
     def _headers(self, signed: bool = False) -> dict[str, str]:
         h = {"Content-Type": "application/json"}
@@ -97,23 +121,23 @@ class BinanceConnector:
     ) -> Any:
         params = dict(params or {})
         root = (base_url or self.base_url).rstrip("/")
-        if signed:
-            params["timestamp"] = int(time.time() * 1000)
-            params["recvWindow"] = 10000
-            query = urllib.parse.urlencode(params)
-            sig = hmac.new(
-                self.cfg.api_secret.encode("utf-8"),
-                query.encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest()
-            url = f"{root}{path}?{query}&signature={sig}"
-        else:
-            qs = urllib.parse.urlencode(params) if params else ""
-            url = f"{root}{path}" + (f"?{qs}" if qs else "")
-
-        req = urllib.request.Request(url, method=method, headers=self._headers(signed))
         last_err: Exception | None = None
         for attempt in range(3):
+            if signed:
+                params["timestamp"] = self._server_timestamp_ms()
+                params["recvWindow"] = 60000
+                query = urllib.parse.urlencode(params)
+                sig = hmac.new(
+                    self.cfg.api_secret.encode("utf-8"),
+                    query.encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest()
+                url = f"{root}{path}?{query}&signature={sig}"
+            else:
+                qs = urllib.parse.urlencode(params) if params else ""
+                url = f"{root}{path}" + (f"?{qs}" if qs else "")
+
+            req = urllib.request.Request(url, method=method, headers=self._headers(signed))
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     return json.loads(resp.read().decode("utf-8"))
@@ -123,6 +147,11 @@ class BinanceConnector:
                     detail = json.loads(body)
                 except json.JSONDecodeError:
                     detail = {"msg": body}
+                msg = detail.get("msg") or detail.get("detail") or body
+                if signed and attempt < 2 and ("Timestamp" in str(msg) or "-1021" in str(body)):
+                    self.sync_server_time(force=True)
+                    last_err = RuntimeError(msg)
+                    continue
                 if e.code == 429 and attempt < 2:
                     retry_after = 1.0
                     try:
@@ -136,7 +165,7 @@ class BinanceConnector:
             except urllib.error.URLError as e:
                 last_err = e
                 if attempt < 2:
-                    time.sleep(0.5 * (attempt + 1))
+                    time.sleep(1.0 * (attempt + 1))
                     continue
                 raise RuntimeError(str(e)) from e
         if last_err:
@@ -230,6 +259,60 @@ class BinanceConnector:
         except RuntimeError as e:
             log.warning("leverage: %s", e)
 
+    def symbol_margin_type(self, symbol: str | None = None) -> str:
+        sym = (symbol or self.cfg.symbol).upper()
+        if self.cfg.paper:
+            return self.cfg.margin_type.upper()
+        try:
+            rows = self._request("GET", "/fapi/v2/positionRisk", {"symbol": sym}, signed=True)
+            if rows:
+                mt = str(rows[0].get("marginType", self.cfg.margin_type)).upper()
+                if mt in ("ISOLATED", "CROSS"):
+                    return mt
+        except RuntimeError as e:
+            log.warning("symbol_margin_type: %s", e)
+        return self.cfg.margin_type.upper()
+
+    def set_margin_type(self, margin_type: str, symbol: str | None = None) -> dict[str, Any]:
+        sym = (symbol or self.cfg.symbol).upper()
+        mt = margin_type.upper()
+        if mt not in ("ISOLATED", "CROSS"):
+            return {"ok": False, "error": "margin_type must be ISOLATED or CROSS"}
+        if self.cfg.paper:
+            self.cfg.margin_type = mt
+            return {"ok": True, "margin_type": mt, "symbol": sym}
+        if not self.cfg.api_key:
+            return {"ok": False, "error": "not connected"}
+        try:
+            self._request(
+                "POST",
+                "/fapi/v1/marginType",
+                {"symbol": sym, "marginType": mt},
+                signed=True,
+            )
+            self.cfg.margin_type = mt
+            return {"ok": True, "margin_type": mt, "symbol": sym}
+        except RuntimeError as e:
+            msg = str(e)
+            if "No need to change" in msg:
+                self.cfg.margin_type = mt
+                return {"ok": True, "margin_type": mt, "symbol": sym, "note": "already_set"}
+            return {"ok": False, "error": msg}
+
+    def symbol_leverage(self, symbol: str | None = None) -> int:
+        sym = (symbol or self.cfg.symbol).upper()
+        if self.cfg.paper:
+            return int(self.cfg.leverage)
+        try:
+            rows = self._request("GET", "/fapi/v2/positionRisk", {"symbol": sym}, signed=True)
+            if rows:
+                lev = int(float(rows[0].get("leverage", self.cfg.leverage)))
+                if lev > 0:
+                    return lev
+        except RuntimeError as e:
+            log.warning("symbol_leverage: %s", e)
+        return int(self.cfg.leverage)
+
     def status_snapshot(self) -> dict[str, Any]:
         if self.cfg.paper:
             return {
@@ -286,6 +369,8 @@ class BinanceConnector:
                 "profit": 0.0,
                 "currency": "USDT",
                 "trade_allowed": True,
+                "leverage": int(self.cfg.leverage),
+                "margin_type": self.cfg.margin_type,
             }
         data = self._request("GET", "/fapi/v2/account", signed=True)
         total = float(data.get("totalWalletBalance", 0))
@@ -302,6 +387,8 @@ class BinanceConnector:
             "profit": upnl,
             "currency": "USDT",
             "trade_allowed": True,
+            "leverage": self.symbol_leverage(),
+            "margin_type": self.symbol_margin_type(),
         }
 
     def book_ticker(self, symbol: str | None = None) -> dict[str, Any] | None:
@@ -330,6 +417,7 @@ class BinanceConnector:
             "/fapi/v1/klines",
             {"symbol": sym, "interval": "30m", "limit": n},
             base_url=self._klines_base_url(),
+            timeout=35.0,
         )
         return self._klines_to_bars(data)
 
@@ -414,6 +502,7 @@ class BinanceConnector:
                     "profit": float(p.get("unRealizedProfit", 0)),
                     "magic": DEFAULT_MAGIC,
                     "liquidationPrice": float(p.get("liquidationPrice", 0)),
+                    "leverage": int(float(p.get("leverage", self.cfg.leverage))),
                 }
             )
         return out
@@ -542,22 +631,29 @@ class BinanceConnector:
 
         stop_id = None
         tp_id = None
+        protection_errors: list[str] = []
         if sl is not None:
             try:
                 stop_resp = self._place_conditional(
                     side_u, "STOP_MARKET", float(sl), qty, f"{cid}_SL"
                 )
                 stop_id = stop_resp.get("orderId")
+                if not stop_id:
+                    protection_errors.append("STOP_MARKET returned no orderId")
             except RuntimeError as e:
                 log.error("STOP_MARKET failed: %s", e)
+                protection_errors.append(f"STOP_MARKET failed: {e}")
         if tp is not None:
             try:
                 tp_resp = self._place_conditional(
                     side_u, "TAKE_PROFIT_MARKET", float(tp), qty, f"{cid}_TP"
                 )
                 tp_id = tp_resp.get("orderId")
+                if not tp_id:
+                    protection_errors.append("TAKE_PROFIT_MARKET returned no orderId")
             except RuntimeError as e:
                 log.error("TAKE_PROFIT_MARKET failed: %s", e)
+                protection_errors.append(f"TAKE_PROFIT_MARKET failed: {e}")
 
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         return {
@@ -574,6 +670,9 @@ class BinanceConnector:
             "deal": entry_resp.get("orderId"),
             "stop_order": stop_id,
             "tp_order": tp_id,
+            "protection_ok": len(protection_errors) == 0,
+            "protection_errors": protection_errors,
+            "naked_position": bool(protection_errors),
             "client_order_id": cid,
             "magic": magic,
             "broker": "binance",
@@ -587,6 +686,67 @@ class BinanceConnector:
             return True
         except RuntimeError:
             return False
+
+    def close_position(self, symbol: str | None = None, volume: float | None = None) -> dict[str, Any]:
+        import time as _time
+
+        if _truthy(os.environ.get("FORWARD_DRY_RUN")):
+            return {"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True}
+
+        if self.cfg.paper:
+            from paper_simulator import paper_store
+
+            return paper_store.close_position(symbol, volume)
+
+        sym = (symbol or self.cfg.symbol).upper()
+        positions = self.positions(sym)
+        if not positions:
+            return {"ok": False, "error": "no_open_position"}
+
+        if not self.cfg.api_key:
+            return {"ok": False, "error": "api_key_missing"}
+
+        self.cancel_all_orders(sym)
+        info = self.exchange_info()
+        closed: list[dict[str, Any]] = []
+        t0 = _time.perf_counter()
+
+        for p in positions:
+            pos_side = str(p.get("type", "")).upper()
+            pos_vol = float(p.get("volume", 0))
+            qty = round_to_step(float(volume) if volume is not None else pos_vol, info["stepSize"])
+            if qty < info["minQty"]:
+                qty = info["minQty"]
+            if qty > pos_vol + 1e-12:
+                qty = round_to_step(pos_vol, info["stepSize"])
+            exit_side = "SELL" if pos_side == "BUY" else "BUY"
+            cid = f"{CLIENT_ID_PREFIX}_CLS_{int(_time.time())}"[:36]
+            params = {
+                "symbol": sym,
+                "side": exit_side,
+                "type": "MARKET",
+                "quantity": qty,
+                "reduceOnly": "true",
+                "newClientOrderId": cid,
+            }
+            try:
+                resp = self._request("POST", "/fapi/v1/order", params, signed=True)
+            except RuntimeError as e:
+                return {"ok": False, "error": str(e), "closed": closed}
+            fill = float(resp.get("avgPrice") or p.get("price_open") or 0)
+            closed.append(
+                {
+                    "symbol": sym,
+                    "side": pos_side,
+                    "volume": qty,
+                    "fill_price": fill,
+                    "profit": float(p.get("profit", 0)),
+                    "order": resp.get("orderId"),
+                }
+            )
+
+        latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
+        return {"ok": True, "closed": closed, "latency_ms": latency_ms, "broker": "binance"}
 
 
 def config_from_env() -> BinanceConfig:

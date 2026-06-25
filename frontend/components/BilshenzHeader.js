@@ -19,13 +19,9 @@ function AnimatedSvgLogo() {
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
-    let id;
-    const loop = () => {
-      setTick(Date.now());
-      id = requestAnimationFrame(loop);
-    };
-    id = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(id);
+    setTick(Date.now());
+    const id = setInterval(() => setTick(Date.now()), 100);
+    return () => clearInterval(id);
   }, []);
 
   const ms = tick || Date.now();

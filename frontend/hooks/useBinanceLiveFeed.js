@@ -14,15 +14,19 @@ import {
 } from '../broker/binanceFuturesApi';
 import { subscribeBinanceTickStream } from '../broker/binanceTickStream';
 import { formatBinanceNetworkError } from '../utils/binanceApiUrl';
+import { rewriteLocalhostBridgeUrl } from '../utils/bridgeLanUrl';
 
 const PIP = DISPLAY_PIP_SIZE;
-/** Enough M30 bars for engine gates on first paint (~4.5 days). */
-const STARTUP_BARS = 220;
+/** Minimum M30 bars for engine gates on first paint (~2 days). */
+const STARTUP_BARS = 96;
 /** Deeper history loaded in background after UI is interactive. */
-const FULL_BARS = 1200;
+const FULL_BARS = 800;
 const CACHE_KEY = '@bilshenz_v1/binanceFeedCache';
-const CACHE_TTL_MS = 15 * 60 * 1000;
-const MIN_CACHE_BARS = 80;
+const CACHE_TTL_MS = 20 * 60 * 1000;
+const STALE_CACHE_MS = 24 * 60 * 60 * 1000;
+const MIN_CACHE_BARS = 32;
+const STARTUP_TIMEOUT_MS = 10000;
+const STARTUP_RETRIES = 1;
 
 async function fetchStatusAccount(base) {
   try {
@@ -54,8 +58,9 @@ async function readBarCache(sym) {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed?.bars?.length || parsed.sym !== sym) return null;
-    if (Date.now() - (parsed.ts ?? 0) > CACHE_TTL_MS) return null;
-    return parsed.bars;
+    const age = Date.now() - (parsed.ts ?? 0);
+    if (age > STALE_CACHE_MS) return null;
+    return { bars: parsed.bars, stale: age > CACHE_TTL_MS };
   } catch {
     return null;
   }
@@ -123,13 +128,17 @@ export function useBinanceLiveFeed({
       if (background) bgLoadRef.current = true;
       try {
         const sym = symRef.current;
-        const gold = await fetchBinanceBarsM30(b, sym, count);
-        if (!gold.length) {
-          if (!background) setFeedError('No M30 bars from Binance');
+        const result = await fetchBinanceBarsM30(b, sym, count, background ? undefined : STARTUP_TIMEOUT_MS, {
+          retries: background ? 2 : STARTUP_RETRIES,
+        });
+        if (!result.ok || !result.bars.length) {
+          if (!background) {
+            setFeedError(result.error || 'No M30 bars from Binance');
+          }
           return false;
         }
-        applyBars(gold);
-        void writeBarCache(sym, gold);
+        applyBars(result.bars);
+        void writeBarCache(sym, result.bars);
         if (sessionActive) {
           const st = await fetchStatusAccount(b);
           if (st.account) setAccount(st.account);
@@ -163,66 +172,76 @@ export function useBinanceLiveFeed({
     const tickSetters = { setBid, setAsk, setPrice, setSpreadPips, setResolvedSymbol };
 
     (async () => {
-      let b = baseUrl.trim();
-      const cached = await readBarCache(symbol);
-      if (!cancelled && cached?.length >= MIN_CACHE_BARS) {
-        applyBars(cached);
+      let b = rewriteLocalhostBridgeUrl(baseUrl.trim());
+      if (b !== baseUrl.trim()) {
+        onBridgeUrlResolved?.(b);
       }
 
-      const tryFetchStartup = async (bridgeUrl) => {
-        const [spec, tk, startupBars] = await Promise.all([
-          fetchBinanceSymbolSpec(bridgeUrl, symbol),
-          fetchBinanceTick(bridgeUrl, symbol),
-          fetchBinanceBarsM30(bridgeUrl, symbol, STARTUP_BARS),
-        ]);
-        return { spec, tk, startupBars, bridgeUrl };
-      };
+      const cached = await readBarCache(symbol);
+      if (!cancelled && cached?.bars?.length >= MIN_CACHE_BARS) {
+        applyBars(cached.bars);
+      }
 
-      let result = await tryFetchStartup(b);
-      if (!result.startupBars?.length) {
-        const picked = await pickReachableBinanceBridgeUrl(b);
-        if (picked && picked !== b) {
-          b = picked;
-          onBridgeUrlResolved?.(picked);
-          result = await tryFetchStartup(b);
+      const fetchStartupBars = async (bridgeUrl) =>
+        fetchBinanceBarsM30(bridgeUrl, symbol, STARTUP_BARS, STARTUP_TIMEOUT_MS, {
+          retries: STARTUP_RETRIES,
+        });
+
+      let barsResult = await fetchStartupBars(b);
+      if (!barsResult.ok || !barsResult.bars.length) {
+        try {
+          const health = await binanceFetch(b, '/health', {}, 3000);
+          if (!health.ok) {
+            const picked = await pickReachableBinanceBridgeUrl(b, symbol);
+            if (picked && picked !== b) {
+              b = picked;
+              onBridgeUrlResolved?.(picked);
+              barsResult = await fetchStartupBars(b);
+            }
+          }
+        } catch {
+          const picked = await pickReachableBinanceBridgeUrl(b, symbol);
+          if (picked && picked !== b) {
+            b = picked;
+            onBridgeUrlResolved?.(picked);
+            barsResult = await fetchStartupBars(b);
+          }
         }
       }
 
       if (cancelled) return;
 
-      if (result.spec) {
-        setSymbolSpec(result.spec);
-        if (result.spec?.symbol) {
-          symRef.current = result.spec.symbol;
-          setResolvedSymbol(result.spec.symbol);
-        }
+      if (barsResult.ok && barsResult.bars.length) {
+        applyBars(barsResult.bars);
+        void writeBarCache(symRef.current, barsResult.bars);
+      } else if (!cached?.bars?.length) {
+        setFeedError(
+          formatBinanceNetworkError(barsResult.error || 'No M30 bars — bridge may be offline.', b),
+        );
       }
-      applyTickState(result.tk, tickSetters);
 
-      if (result.startupBars?.length) {
-        applyBars(result.startupBars);
-        void writeBarCache(symRef.current, result.startupBars);
-      } else if (!cached?.length) {
-        let hint = 'No M30 bars — bridge may be offline or wrong URL.';
-        try {
-          const health = await binanceFetch(b, '/health', {}, 8000);
-          if (!health.ok) {
-            hint = `Bridge at ${b} not reachable. Use Profile → USE PC ON WI‑FI → :8766 (not :8791 unless desk-api is running).`;
+      void (async () => {
+        const [spec, tk] = await Promise.all([
+          fetchBinanceSymbolSpec(b, symbol),
+          fetchBinanceTick(b, symbol),
+        ]);
+        if (cancelled) return;
+        if (spec) {
+          setSymbolSpec(spec);
+          if (spec?.symbol) {
+            symRef.current = spec.symbol;
+            setResolvedSymbol(spec.symbol);
           }
-        } catch {
-          hint = formatBinanceNetworkError('Cannot reach Binance bridge', b);
         }
-        setFeedError(hint);
-      }
-
-      if (!cancelled && sessionActive) {
-        const st = await fetchStatusAccount(b);
-        if (st.account) setAccount(st.account);
-      }
-
-      if (!cancelled && result.startupBars?.length) {
-        void loadBars(FULL_BARS, { background: true });
-      }
+        applyTickState(tk, tickSetters);
+        if (sessionActive) {
+          const st = await fetchStatusAccount(b);
+          if (!cancelled && st.account) setAccount(st.account);
+        }
+        if (!cancelled && barsResult.ok && barsResult.bars.length) {
+          void loadBars(FULL_BARS, { background: true });
+        }
+      })();
     })();
 
     return () => {
@@ -245,7 +264,10 @@ export function useBinanceLiveFeed({
 
     const refreshAccount = async () => {
       const st = await fetchStatusAccount(b);
-      if (!cancelled && st.account) setAccount(st.account);
+      if (!cancelled) {
+        if (st.account) setAccount(st.account);
+        else if (!st.connected) setAccount(null);
+      }
     };
 
     const refreshDeals = async () => {
@@ -272,6 +294,21 @@ export function useBinanceLiveFeed({
       clearInterval(dealsId);
       clearInterval(posId);
     };
+  }, [sessionActive, enabled, baseUrl]);
+
+  const refreshBrokerSnapshot = useCallback(async () => {
+    if (!sessionActive || !enabled || !baseUrl?.trim()) return;
+    const b = baseUrl.trim();
+    const sym = symRef.current;
+    const [st, d, p] = await Promise.all([
+      fetchStatusAccount(b),
+      fetchBinanceDeals(b, 100),
+      fetchBinancePositions(b, sym),
+    ]);
+    if (st.account) setAccount(st.account);
+    else if (!st.connected) setAccount(null);
+    if (d.length) setBrokerDeals(d);
+    setPositions(p);
   }, [sessionActive, enabled, baseUrl]);
 
   useEffect(() => {
@@ -333,5 +370,6 @@ export function useBinanceLiveFeed({
     feedReady,
     symbolSpec,
     refreshFeed,
+    refreshBrokerSnapshot,
   };
 }

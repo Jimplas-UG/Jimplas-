@@ -118,6 +118,8 @@ export function mockBinanceStatus() {
       currency: 'USDT',
       server: 'mock-paper',
       trade_allowed: true,
+      leverage: 10,
+      margin_type: mockMarginType,
     },
   };
 }
@@ -133,7 +135,11 @@ export function mockTick(symbol = 'XAUUSDT') {
   return { symbol, bid: mid - 0.15, ask: mid + 0.15, time: Date.now() };
 }
 
+let mockHasOpenPosition = true;
+let mockMarginType = 'ISOLATED';
+
 export function mockPositions() {
+  if (!mockHasOpenPosition) return { positions: [] };
   return {
     positions: [
       {
@@ -203,6 +209,25 @@ export function tryMockFetch(url, init = {}) {
   }
   if (u.includes('/api/positions')) {
     return jsonResponse(mockPositions());
+  }
+  if (u.includes('/api/close') && method === 'POST') {
+    mockHasOpenPosition = false;
+    logMock('/api/close', 'closed');
+    return jsonResponse({
+      ok: true,
+      closed: [{ symbol: 'XAUUSDT', side: 'BUY', volume: 0.05, fill_price: 2654.35, profit: 285.5 }],
+      broker: 'mock',
+    });
+  }
+  if (u.includes('/api/margin') && method === 'POST') {
+    try {
+      const body = JSON.parse(init.body || '{}');
+      mockMarginType = String(body.margin_type || 'ISOLATED').toUpperCase() === 'CROSS' ? 'CROSS' : 'ISOLATED';
+    } catch {
+      mockMarginType = 'ISOLATED';
+    }
+    logMock('/api/margin', mockMarginType);
+    return jsonResponse({ ok: true, margin_type: mockMarginType, symbol: 'XAUUSDT' });
   }
   if (u.includes('/api/order') && method === 'POST') {
     let side = 'BUY';

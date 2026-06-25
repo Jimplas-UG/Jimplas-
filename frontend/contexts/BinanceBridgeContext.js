@@ -1,8 +1,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getBinanceApiUrl } from '../lib/envConfig';
-import { fetchBinanceSession, pickReachableBinanceBridgeUrl } from '../broker/binanceFuturesApi';
-import { getDefaultBinanceBridgeUrl } from '../utils/binanceApiUrl';
+import { fetchBinanceSession, pickReachableBinanceBridgeUrl, binanceFetch } from '../broker/binanceFuturesApi';
+import { getDefaultBinanceBridgeUrl, resolveBridgeUrlForDevice } from '../utils/binanceApiUrl';
 import { isLocalhostApiUrl } from '../utils/bridgeLanUrl';
 import { getBrokerMode } from '../lib/brokerMode';
 import { tryBinanceSessionConnect } from '../lib/binanceSession';
@@ -17,7 +17,7 @@ const BINANCE_URL_REV = '3';
 function canonicalBinanceUrl() {
   const u = getBinanceApiUrl();
   if (u && !isLocalhostApiUrl(u)) return u.replace(/\/$/, '');
-  return getDefaultBinanceBridgeUrl();
+  return resolveBridgeUrlForDevice(getDefaultBinanceBridgeUrl());
 }
 
 export function BinanceBridgeProvider({ children }) {
@@ -40,11 +40,19 @@ export function BinanceBridgeProvider({ children }) {
         if (storedUrl && urlRev === BINANCE_URL_REV && !isLocalhostApiUrl(storedUrl)) {
           resolved = storedUrl.replace(/\/$/, '');
         } else if (storedUrl && isLocalhostApiUrl(storedUrl)) {
-          resolved = canonicalBinanceUrl();
+          resolved = resolveBridgeUrlForDevice();
         }
 
-        const reachable = await pickReachableBinanceBridgeUrl(resolved);
-        if (reachable) resolved = reachable;
+        try {
+          const health = await binanceFetch(resolved, '/health', {}, 3500);
+          if (!health.ok) {
+            const reachable = await pickReachableBinanceBridgeUrl(resolved);
+            if (reachable) resolved = reachable;
+          }
+        } catch {
+          const reachable = await pickReachableBinanceBridgeUrl(resolved);
+          if (reachable) resolved = reachable;
+        }
 
         setBaseUrlState(resolved);
         await AsyncStorage.multiSet([
@@ -55,12 +63,17 @@ export function BinanceBridgeProvider({ children }) {
 
         const session = await fetchBinanceSession(resolved, 10000);
         if (session.ok) {
-          if (!cancelled) setConnected(true);
+          if (!cancelled) {
+            setConnected(true);
+            await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '1');
+          }
           return;
         }
 
-        if (conn === '1' || getBrokerMode() === 'paper') {
-          const restored = await tryBinanceSessionConnect(resolved, 18000);
+        const hadSession = conn === '1';
+        const shouldRestore = hadSession || getBrokerMode() === 'paper';
+        if (shouldRestore) {
+          const restored = await tryBinanceSessionConnect(resolved, 20000);
           if (cancelled) return;
           if (restored.ok) {
             setBaseUrlState(restored.url);
@@ -70,6 +83,8 @@ export function BinanceBridgeProvider({ children }) {
               [STORAGE_BINANCE_CONNECTED, '1'],
             ]);
             setConnected(true);
+          } else if (hadSession) {
+            await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '0');
           }
         }
       } catch {

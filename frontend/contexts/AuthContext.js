@@ -26,6 +26,17 @@ import {
 
 const AuthContext = createContext(null);
 
+async function probeBiometricHardware() {
+  if (Platform.OS === 'web') return { hw: false, enrolled: false };
+  try {
+    const hw = await LocalAuthentication.hasHardwareAsync();
+    const enrolled = await LocalAuthentication.isEnrolledAsync();
+    return { hw, enrolled };
+  } catch {
+    return { hw: false, enrolled: false };
+  }
+}
+
 function isAuthRequired() {
   if (process.env.EXPO_PUBLIC_AUTH_REQUIRED === '0') return false;
   return process.env.EXPO_PUBLIC_AUTH_REQUIRED !== 'skip';
@@ -254,8 +265,7 @@ export function AuthProvider({ children }) {
     setBusy(true);
     setError('');
     try {
-      const hw = await LocalAuthentication.hasHardwareAsync();
-      const enrolled = await LocalAuthentication.isEnrolledAsync();
+      const { hw, enrolled } = await probeBiometricHardware();
       if (!hw || !enrolled) {
         setError('Biometrics not available on this device.');
         return { ok: false };
@@ -298,8 +308,7 @@ export function AuthProvider({ children }) {
 
     (async () => {
       try {
-        const hw = await LocalAuthentication.hasHardwareAsync();
-        const enrolled = await LocalAuthentication.isEnrolledAsync();
+        const { hw, enrolled } = await probeBiometricHardware();
         if (!cancelled) setBiometricAvailable(hw && enrolled);
         const bioOn = await isBiometricEnabled();
         if (!cancelled) setBiometricEnabled(bioOn);

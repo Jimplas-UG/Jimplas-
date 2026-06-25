@@ -1,8 +1,9 @@
+import '@expo/metro-runtime';
 import 'react-native-reanimated';
 import './security/productionGuard';
 import { useMockApi } from './lib/devPreview';
 import { tryMockFetch } from './mocks/mockApi';
-import React, { useEffect } from 'react';
+import React from 'react';
 import { Platform, ScrollView, Text, View } from 'react-native';
 import { registerRootComponent } from 'expo';
 import { initBootSplash, hideBootSplash } from './lib/bootSplash';
@@ -70,10 +71,6 @@ class RootErrorBoundary extends React.Component {
 }
 
 function Root() {
-  useEffect(() => {
-    hideBootSplash('root-mounted');
-  }, []);
-
   return (
     <RootErrorBoundary>
       <App />

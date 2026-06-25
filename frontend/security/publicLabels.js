@@ -45,6 +45,22 @@ export function publicSessionLabel(session) {
 /** Map internal execute-block text to opaque codes for logs. */
 export function publicBlockReason(reason) {
   if (!reason || typeof reason !== 'string') return 'DESK_BLOCKED';
+  if (reason.startsWith('RISK_')) {
+    const map = {
+      RISK_EMERGENCY_STOP: 'RISK_STOP',
+      RISK_PAUSE_NEW_TRADES: 'RISK_PAUSED',
+      RISK_API_ERRORS: 'RISK_API_HALT',
+      RISK_DAILY_LOSS_LIMIT: 'RISK_DAILY_LIMIT',
+      RISK_WEEKLY_LOSS_LIMIT: 'RISK_WEEKLY_LIMIT',
+      RISK_DRAWDOWN_LIMIT: 'RISK_DRAWDOWN',
+      RISK_MAX_OPEN_POSITIONS: 'RISK_MAX_POSITIONS',
+      RISK_ASSET_EXPOSURE: 'RISK_ASSET_CAP',
+      RISK_PORTFOLIO_EXPOSURE: 'RISK_EXPOSURE_CAP',
+      RISK_LEVERAGE_CAP: 'RISK_LEVERAGE',
+      RISK_NO_AVAILABLE_CAPITAL: 'RISK_NO_CAPITAL',
+    };
+    return map[reason] ?? 'RISK_LIMIT';
+  }
   const r = reason.toLowerCase();
   if (r.includes('no buy') || r.includes('no sell')) return 'SIDE_BLOCKED';
   if (r.includes('spread')) return 'MARKET_BLOCKED';

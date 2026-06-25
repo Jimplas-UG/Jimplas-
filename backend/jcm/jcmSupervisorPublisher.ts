@@ -59,7 +59,7 @@ export async function publishTradeExecuted(opts: {
   marketRegime?: string;
   tradingSession?: string;
   bsv32Confidence?: number;
-  mt5Connected?: boolean;
+  brokerConnected?: boolean;
 }): Promise<boolean> {
   return publishJcmEvent('trade_executed', {
     event_id: newEventId('bilshenz-exec'),
@@ -79,7 +79,7 @@ export async function publishTradeExecuted(opts: {
     bsv32_confidence: opts.bsv32Confidence,
     bsv32_version: '3.2',
     vps_health: {
-      mt5_connected: opts.mt5Connected ?? true,
+      broker_connected: opts.brokerConnected ?? true,
     },
     raw_payload: { setup: opts.setup, bar_time_ms: opts.barTimeMs },
   });
@@ -105,7 +105,7 @@ export async function publishTradeBlocked(opts: {
 }
 
 export async function publishSystemState(opts: {
-  mt5Connected: boolean;
+  brokerConnected: boolean;
   deskApiOk: boolean;
   forwardBotOk?: boolean;
   accountEquity?: number;
@@ -114,13 +114,13 @@ export async function publishSystemState(opts: {
 }): Promise<boolean> {
   return publishJcmEvent('system_state', {
     bsv32_status: opts.dryRun ? 'dry_run' : 'running',
-    mt5_connected: opts.mt5Connected,
+    broker_connected: opts.brokerConnected,
     desk_api_ok: opts.deskApiOk,
     forward_bot_ok: opts.forwardBotOk ?? true,
     watchdog_api_ok: true,
     open_positions: opts.openPositions ?? 0,
     account_equity: opts.accountEquity,
     market_regime: 'unknown',
-    system_running: opts.mt5Connected && opts.deskApiOk,
+    system_running: opts.brokerConnected && opts.deskApiOk,
   });
 }

@@ -1,7 +1,7 @@
 /**
- * Headless 30-day Exness demo forward test — frozen config, live MT5 feed, real demo orders.
+ * Headless 30-day Binance Futures forward test — frozen config, live feed, real orders.
  *
- * Prerequisites: Exness MT5 logged in + npm run mt5-api (8765)
+ * Prerequisites: Binance bridge running (npm run binance-api on :8766)
  *
  * Usage:
  *   npm run forward-demo:30d
@@ -57,16 +57,11 @@ const DATA_DIR = path.join(BACKEND_ROOT, 'validation', 'data');
 const SESSION_FILE = path.join(DATA_DIR, 'forward-demo-session.json');
 const JOURNAL_FILE = path.join(DATA_DIR, 'forward-demo-journal.json');
 
-const BROKER_MODE = (process.env.BROKER_MODE ?? 'mt5').trim().toLowerCase();
-const USE_BINANCE = BROKER_MODE === 'binance' || BROKER_MODE === 'paper';
-const BROKER_LABEL = USE_BINANCE ? (BROKER_MODE === 'paper' ? 'Binance paper' : 'Binance') : 'MT5';
-const MT5_API = (process.env.MT5_API_URL ?? 'http://127.0.0.1:8765').replace(/\/$/, '');
+const BROKER_MODE = (process.env.BROKER_MODE ?? 'binance').trim().toLowerCase();
+const BROKER_LABEL = BROKER_MODE === 'paper' ? 'Binance paper' : 'Binance';
 const BINANCE_API = (process.env.BINANCE_API_URL ?? 'http://127.0.0.1:8766').replace(/\/$/, '');
-const BROKER_API = USE_BINANCE ? BINANCE_API : MT5_API;
-const SYMBOL =
-  process.env.BINANCE_SYMBOL?.trim() ||
-  process.env.MT5_SYMBOL?.trim() ||
-  (USE_BINANCE ? 'XAUUSDT' : 'XAUUSD');
+const BROKER_API = BINANCE_API;
+const SYMBOL = process.env.BINANCE_SYMBOL?.trim() || 'XAUUSDT';
 const M30_MS = 30 * 60 * 1000;
 const WARMUP_BARS = 200;
 const RISK_PCT = Math.max(0.0001, Math.min(0.05, Number(process.env.RISK_PCT ?? '0.005') || 0.005));
@@ -148,14 +143,11 @@ async function fetchM30Bars(fromMs: number, toMs: number): Promise<Bar[]> {
   const url = `${BROKER_API}/api/bars/${encodeURIComponent(SYMBOL)}?from_ms=${fromMs}&to_ms=${toMs}`;
   const res = await fetch(url);
   if (!res.ok) {
-    if (USE_BINANCE) {
-      const fallback = `${BROKER_API}/api/bars/${encodeURIComponent(SYMBOL)}?count=1500`;
-      const res2 = await fetch(fallback);
-      if (!res2.ok) throw new Error(`${BROKER_LABEL} bars ${res2.status}`);
-      const j2 = (await res2.json()) as { bars?: Bar[] };
-      return (j2.bars ?? []).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t);
-    }
-    throw new Error(`${BROKER_LABEL} bars ${res.status}`);
+    const fallback = `${BROKER_API}/api/bars/${encodeURIComponent(SYMBOL)}?count=1500`;
+    const res2 = await fetch(fallback);
+    if (!res2.ok) throw new Error(`${BROKER_LABEL} bars ${res2.status}`);
+    const j2 = (await res2.json()) as { bars?: Bar[] };
+    return (j2.bars ?? []).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t);
   }
   const j = (await res.json()) as { bars?: Bar[] };
   return (j.bars ?? []).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t);
@@ -205,7 +197,7 @@ async function maybePublishJcmSystemState(
   jcmStatePolls += 1;
   if (jcmStatePolls % 10 !== 1) return;
   await publishSystemState({
-    mt5Connected: status.connected,
+    brokerConnected: status.connected,
     deskApiOk: await deskHealthOk(),
     forwardBotOk: true,
     accountEquity: status.equity,
@@ -431,9 +423,7 @@ async function tickOnce(session: SessionState): Promise<void> {
     intent.entry != null && intent.sl != null
       ? Math.abs(intent.entry - intent.sl) / cfg.pipSize
       : 20;
-  const volume = USE_BINANCE
-    ? await binanceQuantityForIntent(status.equity, intent.entry, intent.sl, cfg.pipSize)
-    : lotsForRisk(status.equity, slPips, status.usdPerPip);
+  const volume = await binanceQuantityForIntent(status.equity, intent.entry, intent.sl, cfg.pipSize);
   const setup =
     intent.setup === 'P1' || intent.setup === 'P2' || intent.setup === 'P3' ? intent.setup : 'NONE';
   const idemKey = orderIdempotencyKey(bar.t, intent.side, setup);
@@ -461,17 +451,13 @@ async function tickOnce(session: SessionState): Promise<void> {
     return;
   }
 
-  const useBinance = USE_BINANCE;
   const riskUsd = status.equity * RISK_PCT;
   const r = await executeBrokerRoutes({
     intent,
-    useMt5: !useBinance,
-    mt5BaseUrl: MT5_API,
-    mt5Volume: volume,
-    useBinance,
+    useBinance: true,
     binanceBaseUrl: BINANCE_API,
-    binanceQuantity: useBinance ? volume : undefined,
-    riskUsd: useBinance ? riskUsd : undefined,
+    binanceQuantity: volume,
+    riskUsd,
     symbol: SYMBOL,
   });
 
@@ -513,7 +499,7 @@ async function tickOnce(session: SessionState): Promise<void> {
       setup: intent.setup,
       barTimeMs: bar.t,
       filtersPassed: ['risk_gating'],
-      mt5Connected: status.connected,
+      brokerConnected: status.connected,
     });
   } else {
     const reason = recordApiFailure(safety, `order: ${r.summary}`);
@@ -548,12 +534,8 @@ async function main() {
     const endMs = startMs + DAYS * 86400000;
     const st = await brokerStatus();
     if (!st.connected) {
-      if (USE_BINANCE) {
-        console.error('Start Binance bridge: cd binance_trading_system/python && .\\start-api.ps1');
-        if (BROKER_MODE === 'paper') console.error('  Set BINANCE_PAPER=1 for simulated fills');
-      } else {
-        console.error('Start Exness MT5 + login, then: npm run mt5-api');
-      }
+      console.error('Start Binance bridge: cd binance_trading_system/python && .\\start-api.ps1');
+      if (BROKER_MODE === 'paper') console.error('  Set BINANCE_PAPER=1 for simulated fills');
       process.exit(1);
     }
     session = {

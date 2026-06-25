@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, createContext } from 'react';
 import { hideBootSplash } from './lib/bootSplash';
-import CinematicSplash, { SPLASH_MAX_MS } from './components/CinematicSplash';
+import AppOpeningSplash, { shouldPlayOpening } from './components/AppOpeningSplash';
 import {
   Alert,
   Image,
@@ -24,6 +24,8 @@ import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import BilshenzHeader from './components/BilshenzHeader';
 import BinanceStatusStrip from './components/BinanceStatusStrip';
+import OpenPositionsPanel from './components/OpenPositionsPanel';
+import InstitutionalRiskDesk from './components/InstitutionalRiskDesk';
 import GeoPoliticalTicker from './components/GeoPoliticalTicker';
 
 const BinanceBridgePanelLazy = lazy(() => import('./components/BinanceBridgePanel'));
@@ -56,7 +58,9 @@ import OnboardingGate, { useOnboardingDone } from './components/OnboardingGate';
 import SkeletonLoader from './components/ui/SkeletonLoader';
 import ErrorState from './components/ui/ErrorState';
 import { useBrokerLiveFeed } from './hooks/useBrokerLiveFeed';
-import { isDevPreview, skipSplash, useMockApi } from './lib/devPreview';
+import { useRiskDesk } from './hooks/useRiskDesk';
+import { postBinanceMarginMode } from './broker/binanceFuturesApi';
+import { isDevPreview, useMockApi } from './lib/devPreview';
 import { DevPreviewProvider } from './contexts/DevPreviewContext';
 import DevMenu from './components/dev/DevMenu';
 import UIShowcaseScreen from './components/dev/UIShowcaseScreen';
@@ -1031,7 +1035,6 @@ function CenterColumn({
   const elevPct = cfg?.riskPctAtrElevated ?? 0.7;
   const crisisPct = cfg?.riskPctAtrCrisis ?? 0.5;
   const currentRiskLbl = `${effRiskPct.toFixed(2)}% · ${fmtUsd(riskAtPct)} at risk`;
-  const sizeModeLbl = er?.geoHigh ? `GEO cap ${effRiskPct.toFixed(2)}%` : `${effRiskPct.toFixed(2)}% of balance`;
   const tp2Sub = er?.yieldHigh ? 'TP2 −30% (yield rule)' : 'Next ladder zone';
   const tp1Sub =
     cfg?.useLegacyTpClampOnly && cfg?.tp1MinRewardPips != null
@@ -1051,6 +1054,25 @@ function CenterColumn({
   const rangeCol = sr.bullClean ? C.green : C.amber;
   const modeCls =
     atrModePill.cls === 'std' ? styles.modeStd : atrModePill.cls === 'amb' ? styles.modeAmb : styles.modeRed;
+  const leverageX =
+    brokerLiveAccount && brokerAccount?.leverage != null && Number(brokerAccount.leverage) > 0
+      ? Number(brokerAccount.leverage)
+      : 10;
+  const marginTypeLbl = (brokerAccount?.margin_type ?? 'ISOLATED').toUpperCase();
+  const leverageBadge = brokerLiveAccount ? `${leverageX}x · ${marginTypeLbl}` : `${leverageX}x sim`;
+  const qtyNum = parseFloat(sizeStr);
+  const notionalUsd =
+    trade?.side && Number.isFinite(entPx) && Number.isFinite(qtyNum) && qtyNum > 0
+      ? Math.round(qtyNum * entPx)
+      : null;
+  const marginAtLev =
+    notionalUsd != null && leverageX > 0 ? Math.round(notionalUsd / leverageX) : null;
+  const leverageSub = brokerLiveAccount
+    ? `${marginTypeLbl} margin · Binance Futures`
+    : 'Sim desk default';
+  const marginUseLbl =
+    marginAtLev != null ? `~$${marginAtLev.toLocaleString('en-US')} margin` : '—';
+  const notionalLbl = notionalUsd != null ? `$${notionalUsd.toLocaleString('en-US')} notional` : '—';
 
   return (
     <View style={styles.centerCol}>
@@ -1229,7 +1251,7 @@ function CenterColumn({
       </Panel>
       ) : null}
 
-      <Panel shell={{}} head={{ title: 'Entry & Exit Engine', badge: 'JIMPLAS FLUIDITY' }}>
+      <Panel shell={{}} head={{ title: 'Entry & Exit Engine', badge: leverageBadge }}>
         <View style={styles.eeGrid}>
           <EeCell lab="Entry Price" val={fmtPx(entPx)} sub={`${effRiskPct.toFixed(2)}% risk tier`} valStyle={styles.eeEntry} />
           <EeCell lab={beTriggerLabel(beOff, cfg)} val={fmtPx(bePx)} sub="Move SL to entry" valStyle={styles.eeBe} />
@@ -1244,6 +1266,20 @@ function CenterColumn({
             sub={`${effRiskPct.toFixed(2)}% of ${equityLbl}`}
             valStyle={styles.eePlain}
           />
+          <EeCell
+            lab="Leverage"
+            val={`${leverageX}x`}
+            sub={leverageSub}
+            valStyle={styles.eeGold}
+          />
+          <EeCell
+            lab="Margin @ Lev"
+            val={marginAtLev != null ? `$${marginAtLev.toLocaleString('en-US')}` : '—'}
+            sub={notionalLbl}
+            valStyle={styles.eePlain}
+          />
+        </View>
+        <View style={styles.eeGrid}>
           <EeCell lab="R:R Ratio" val={rrDisp} sub={`On journal risk ${u}s`} valStyle={styles.eeGold} />
           <EeCell
             lab={positionSizeLabel()}
@@ -1255,8 +1291,8 @@ function CenterColumn({
         <Row style={styles.rrStrip}>
           <RrCell lab="REWARD $" val={`$${rewardUsd.toLocaleString('en-US')}`} color={C.green} />
           <RrCell lab="DAY TRADES" val={`${tradeCountDisp} / ${tradeCap}`} color={C.gold} />
-          <RrCell lab="SIZE MODE" val={sizeModeLbl} color={C.amber} />
-          <RrCell lab="TRAIL" val="H1 Lows" color={C.text} />
+          <RrCell lab="LEV USE" val={`${leverageX}x`} color={C.amber} />
+          <RrCell lab="MARGIN" val={marginUseLbl} color={C.teal} />
           <RrCell lab="DAY MODE" val={dayBits.modeRR} color={dayBits.rrColor} />
         </Row>
       </Panel>
@@ -1479,6 +1515,13 @@ function RightColumn({
   brokerAccount,
   brokerDeals,
   brokerPositions,
+  livePrice,
+  bid,
+  ask,
+  binanceBaseUrl,
+  brokerConnected,
+  onRefreshBroker,
+  onBrokerCloseMsg,
 }) {
   const { colors: C, styles } = useBilshenzTheme();
   const pr = Math.round(pnl);
@@ -1565,17 +1608,18 @@ function RightColumn({
         </View>
       </Panel>
 
-      {brokerLiveAccount && brokerPositions?.length ? (
-        <Panel shell={{}} head={{ title: 'Open Positions', badge: String(brokerPositions.length) }}>
-          {brokerPositions.map((p, i) => (
-            <DxyRow
-              key={`${p.symbol}-${p.type}-${i}`}
-              l={`${p.type} · ${p.volume} ${p.symbol ?? 'XAUUSDT'}`}
-              v={`$${Number(p.profit ?? 0).toFixed(2)}`}
-              vc={(p.profit ?? 0) >= 0 ? C.green : C.red}
-            />
-          ))}
-        </Panel>
+      {brokerLiveAccount ? (
+        <OpenPositionsPanel
+          positions={brokerPositions ?? []}
+          brokerDeals={brokerDeals ?? []}
+          livePrice={livePrice}
+          bid={bid}
+          ask={ask}
+          binanceBaseUrl={binanceBaseUrl}
+          brokerConnected={brokerConnected}
+          onRefresh={onRefreshBroker}
+          onCloseMessage={onBrokerCloseMsg}
+        />
       ) : null}
 
       {SHOW_STRATEGY_INTEL && g && r ? (
@@ -1817,6 +1861,7 @@ function ProfileTab({
   onTelegramNotifyEnabledChange,
   lastBrokerMsg,
   autoExecuteSignals,
+  autoExecuteForced,
   onAutoExecuteSignalsChange,
   brokerConnected,
   paperBtAutoExec,
@@ -1993,10 +2038,17 @@ function ProfileTab({
         <AccountProfileCardLazy />
       </Suspense>
 
+      <View style={{ marginTop: 14, marginBottom: 4 }}>
+        <Text style={styles.psRowLabel}>BINANCE CONNECTION</Text>
+        <Text style={[styles.psToggleHint, { marginTop: 4 }]}>
+          API keys, testnet/mainnet, and live order routing
+        </Text>
+      </View>
+
       <Suspense
         fallback={
           <View style={{ paddingVertical: 12, paddingHorizontal: pad }}>
-            <Text style={{ color: C.dim, fontSize: 11 }}>Loading broker…</Text>
+            <Text style={{ color: C.dim, fontSize: 11 }}>Loading Binance panel…</Text>
           </View>
         }>
         <BinanceBridgePanelLazy />
@@ -2035,19 +2087,21 @@ function ProfileTab({
           <View style={{ flex: 1 }}>
             <Text style={styles.psToggleLbl}>AUTO-EXECUTE SIGNALS</Text>
             <Text style={styles.psToggleHint}>
-              {autoExecuteSignals
-                ? 'ON — sends allowed signals to Binance Futures.'
-                : brokerLive
-                  ? 'OFF — tap EXEC manually on each signal.'
-                  : 'Connect Binance above first.'}
+              {autoExecuteForced
+                ? 'ON — auto-enabled while Binance live is connected.'
+                : autoExecuteSignals
+                  ? 'ON — sends allowed signals to Binance Futures.'
+                  : brokerLive
+                    ? 'OFF — tap EXEC manually on each signal.'
+                    : 'Connect Binance above first.'}
             </Text>
           </View>
           <Switch
-            value={autoExecuteSignals}
+            value={autoExecuteForced ? true : autoExecuteSignals}
             onValueChange={onAutoExecuteSignalsChange}
-            disabled={!brokerLive || !engineHydrated || runMode !== 'live'}
+            disabled={!brokerLive || !engineHydrated || runMode !== 'live' || autoExecuteForced}
             trackColor={{ false: C.border, true: 'rgba(255,61,87,0.45)' }}
-            thumbColor={autoExecuteSignals ? C.red : C.dim2}
+            thumbColor={autoExecuteForced || autoExecuteSignals ? C.red : C.dim2}
           />
         </Row>
       </View>
@@ -2836,10 +2890,9 @@ function MobileBottomNav({ tab, onChange, bottomInset }) {
   const { colors: C, styles } = useBilshenzTheme();
   const items = [
     { id: 'home', icon: '⌂', label: 'HOME' },
-    { id: 'desk', icon: '◈', label: 'INTEL' },
+    { id: 'desk', icon: '◎', label: 'RISK' },
     { id: 'trade', icon: '⚡', label: 'TRADE' },
     { id: 'profile', icon: '👤', label: 'PROFILE' },
-    { id: 'risk', icon: '◎', label: 'RISK' },
   ];
   return (
     <View style={[styles.bottomNavOuter, { paddingBottom: Math.max(bottomInset, 4) }]}>
@@ -2927,11 +2980,9 @@ function AppContent({ onEngineReady }) {
   const [lastBrokerMsg, setLastBrokerMsg] = useState('');
   const [autoExecuteSignals, setAutoExecuteSignals] = useState(false);
   const [paperBtAutoExec, setPaperBtAutoExec] = useState(true);
-  const userDisabledAutoExecRef = useRef(false);
   const { done: onboardingDone, markDone: markOnboardingDone } = useOnboardingDone();
 
   const onAutoExecuteSignalsChange = useCallback((enabled) => {
-    userDisabledAutoExecRef.current = !enabled;
     setAutoExecuteSignals(!!enabled);
   }, []);
 
@@ -2944,6 +2995,8 @@ function AppContent({ onEngineReady }) {
     !mockApi && (runMode === 'live' || runMode === 'backtest') && !!binanceBaseUrl?.trim();
   const useBrokerForEngine = brokerFeedEnabled;
   const useBrokerSession = !mockApi && brokerConnected && runMode === 'live';
+  const autoExecuteForced = useBrokerSession;
+  const effectiveAutoExecute = autoExecuteForced ? true : autoExecuteSignals;
 
   const brokerFeed = useBrokerLiveFeed({
     baseUrl: binanceBaseUrl,
@@ -2963,7 +3016,42 @@ function AppContent({ onEngineReady }) {
     return null;
   }, [useBrokerSession, brokerFeed.account?.balance, brokerFeed.account?.equity]);
 
-  const sizingEquity = accountEquity ?? SIM_DESK_EQUITY;
+  const riskDesk = useRiskDesk({
+    brokerAccount: useBrokerSession ? brokerFeed.account : null,
+    brokerPositions: useBrokerSession ? brokerFeed.positions : [],
+    brokerDeals: useBrokerSession ? brokerFeed.brokerDeals : [],
+    markPrice: brokerFeed.price,
+    simEquity: SIM_DESK_EQUITY,
+  });
+
+  const sizingEquity = useMemo(() => {
+    const base = accountEquity ?? SIM_DESK_EQUITY;
+    if (!riskDesk.hydrated) return base;
+    const deskEq = riskDesk.sizingEquity;
+    return deskEq > 0 ? deskEq : base;
+  }, [accountEquity, riskDesk.hydrated, riskDesk.sizingEquity]);
+
+  const riskDeskRef = useRef(riskDesk);
+  riskDeskRef.current = riskDesk;
+
+  const handleMarginModeChange = useCallback(
+    async (mode) => {
+      const next = mode === 'CROSS' ? 'CROSS' : 'ISOLATED';
+      riskDesk.updateConfig({ marginMode: next });
+      if (!useBrokerSession || !binanceBaseUrl) return;
+      const r = await postBinanceMarginMode(binanceBaseUrl, {
+        symbol: brokerFeed.resolvedSymbol || TRADING_SYMBOL,
+        marginType: next,
+      });
+      if (r.ok) {
+        brokerFeed.refreshBrokerSnapshot?.();
+        setLastBrokerMsg(`Margin: ${next}`);
+      } else {
+        setLastBrokerMsg(`Margin: ${r.bodySnippet || 'failed'}`);
+      }
+    },
+    [useBrokerSession, binanceBaseUrl, brokerFeed, riskDesk.updateConfig],
+  );
 
   const est = useMemo(() => getEST(now), [now]);
 
@@ -2985,14 +3073,8 @@ function AppContent({ onEngineReady }) {
         if (m[STORAGE_TELEGRAM_RELAY_URL]) setTelegramRelayUrl(m[STORAGE_TELEGRAM_RELAY_URL] ?? '');
         if (m[STORAGE_TELEGRAM_RELAY_SECRET]) setTelegramRelaySecret(m[STORAGE_TELEGRAM_RELAY_SECRET] ?? '');
         if (m[STORAGE_TELEGRAM_NOTIFY] === '1') setTelegramNotifyEnabled(true);
-        if (m[STORAGE_AUTO_EXEC] === '0') {
-          userDisabledAutoExecRef.current = true;
-          setAutoExecuteSignals(false);
-        } else if (m[STORAGE_AUTO_EXEC] === '1') {
-          userDisabledAutoExecRef.current = false;
-          setAutoExecuteSignals(true);
-        }
-        /* unset storage → default ON when Binance connects (see effect below) */
+        if (m[STORAGE_AUTO_EXEC] === '0') setAutoExecuteSignals(false);
+        else if (m[STORAGE_AUTO_EXEC] === '1') setAutoExecuteSignals(true);
         if (m[STORAGE_PAPER_BT_AUTO] === '0') setPaperBtAutoExec(false);
         else if (m[STORAGE_PAPER_BT_AUTO] === '1') setPaperBtAutoExec(true);
       } catch {
@@ -3004,13 +3086,11 @@ function AppContent({ onEngineReady }) {
     };
   }, []);
 
-  /** Default ON in live mode while Binance is connected unless user turned it off (stored or this session). */
+  /** Always ON once Binance live session is connected (overrides stored preference). */
   useEffect(() => {
-    if (runMode !== 'live') return;
-    if (brokerConnected && !userDisabledAutoExecRef.current) {
-      setAutoExecuteSignals(true);
-    }
-  }, [brokerConnected, runMode]);
+    if (!autoExecuteForced) return;
+    setAutoExecuteSignals(true);
+  }, [autoExecuteForced]);
 
   useEffect(() => {
     AsyncStorage.setItem(STORAGE_BROKER_HOOK_URL, brokerWebhookUrl).catch(() => {});
@@ -3062,7 +3142,7 @@ function AppContent({ onEngineReady }) {
     useBrokerData: useBrokerForEngine,
     brokerFeedReady: brokerBarsReady,
     noSyntheticFallback: true,
-    countSignalTowardCap: runMode === 'backtest' ? paperBtAutoExec : !autoExecuteSignals,
+    countSignalTowardCap: runMode === 'backtest' ? paperBtAutoExec : !effectiveAutoExecute,
     accountEquity: sizingEquity,
   });
 
@@ -3075,7 +3155,7 @@ function AppContent({ onEngineReady }) {
       useBrokerForEngine,
       brokerConnected,
       brokerFeedReady: brokerBarsReady,
-      autoExecuteSignals,
+      autoExecuteSignals: effectiveAutoExecute,
       liveBrokerLabel,
       isBinanceLive: useBrokerSession,
       brokerAccount: useBrokerSession ? brokerFeed.account : null,
@@ -3091,7 +3171,7 @@ function AppContent({ onEngineReady }) {
       useBrokerForEngine,
       brokerConnected,
       brokerBarsReady,
-      autoExecuteSignals,
+      effectiveAutoExecute,
       liveBrokerLabel,
       brokerFeed.account,
       brokerFeed.brokerDeals,
@@ -3138,21 +3218,25 @@ function AppContent({ onEngineReady }) {
   const execLotsForTrade = useCallback(
     (tradeSnap) => {
       const cfg = displayCfg(bilshenzEngine.cfg);
-      const riskPct = effectiveRiskPctFromEngine(cfg.geoRisk, bzSnapshot.risk?.atrPips ?? null, cfg);
+      const riskPct = riskDesk.hydrated
+        ? riskDesk.sizingRiskPct
+        : effectiveRiskPctFromEngine(cfg.geoRisk, bzSnapshot.risk?.atrPips ?? null, cfg);
       return lotsForTrade(tradeSnap, cfg, sizingEquity, riskPct);
     },
-    [sizingEquity, bilshenzEngine.cfg, bzSnapshot.risk?.atrPips]
+    [sizingEquity, bilshenzEngine.cfg, bzSnapshot.risk?.atrPips, riskDesk.hydrated, riskDesk.sizingRiskPct]
   );
 
   const execQtyForTrade = useCallback(
     (tradeSnap) => {
       const cfg = displayCfg(bilshenzEngine.cfg);
-      const riskPct = effectiveRiskPctFromEngine(cfg.geoRisk, bzSnapshot.risk?.atrPips ?? null, cfg);
+      const riskPct = riskDesk.hydrated
+        ? riskDesk.sizingRiskPct
+        : effectiveRiskPctFromEngine(cfg.geoRisk, bzSnapshot.risk?.atrPips ?? null, cfg);
       const spec = brokerFeed.symbolSpec ?? { stepSize: 0.001, minQty: 0.001 };
       const s = quantityForTrade(tradeSnap, cfg, sizingEquity, riskPct, spec);
       return s.quantity > 0 ? s.quantity : 0.001;
     },
-    [sizingEquity, bilshenzEngine.cfg, bzSnapshot.risk?.atrPips, brokerFeed.symbolSpec]
+    [sizingEquity, bilshenzEngine.cfg, bzSnapshot.risk?.atrPips, brokerFeed.symbolSpec, riskDesk.hydrated, riskDesk.sizingRiskPct]
   );
 
   const sendTelegramEligibleIfNeeded = useCallback(
@@ -3174,18 +3258,26 @@ function AppContent({ onEngineReady }) {
   );
 
   const resolveExecuteGate = useCallback(async (snap, trade) => {
+    let strategyGate;
     const body = engineRef.current?.getDeskExecuteGateBody?.();
     if (body) {
-      return validateExecutionGate(body, { runMode: runModeRef.current });
-    }
-    if (IS_PRODUCTION_DESK || USE_REMOTE_DESK) {
+      strategyGate = await validateExecutionGate(body, { runMode: runModeRef.current });
+    } else if (IS_PRODUCTION_DESK || USE_REMOTE_DESK) {
       return { ok: false, reason: 'SERVER_GATE' };
+    } else {
+      strategyGate = canExecuteTrade(snap, trade);
     }
-    return canExecuteTrade(snap, trade);
+    if (!strategyGate.ok) return strategyGate;
+    const rd = riskDeskRef.current;
+    if (rd?.hydrated) {
+      const riskGate = rd.checkExecution();
+      if (!riskGate.ok) return riskGate;
+    }
+    return { ok: true };
   }, []);
 
   useEffect(() => {
-    if (!autoExecuteSignals || !engineHydrated) return;
+    if (!effectiveAutoExecute || !engineHydrated) return;
     if (runMode !== 'live') return;
     const hookUrl = brokerWebhookUrl.trim();
     if (!hookUrl && !brokerConnected) return;
@@ -3252,17 +3344,21 @@ function AppContent({ onEngineReady }) {
         if (r.anyOk) {
           bumpAutoTradeCount();
           autoHookDoneBarRef.current = bar.t;
+          riskDeskRef.current?.clearApiErrors?.();
+        } else if (binanceConnected) {
+          riskDeskRef.current?.recordApiError?.();
         }
         setLastBrokerMsg(r.anyOk ? `Auto: ${r.summary}` : `Auto: ${r.summary}`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
+        riskDeskRef.current?.recordApiError?.();
         setLastBrokerMsg(`Auto error: ${msg}`);
       } finally {
         autoHookInFlight.current = false;
       }
     })();
   }, [
-    autoExecuteSignals,
+    effectiveAutoExecute,
     resolveExecuteGate,
     engineHydrated,
     runMode,
@@ -3296,8 +3392,8 @@ function AppContent({ onEngineReady }) {
   }, [brokerConnected, brokerFeed.feedReady, brokerFeed.feedError, liveBrokerLabel]);
 
   useEffect(() => {
-    if (!autoExecuteSignals) autoHookDoneBarRef.current = null;
-  }, [autoExecuteSignals]);
+    if (!effectiveAutoExecute) autoHookDoneBarRef.current = null;
+  }, [effectiveAutoExecute]);
 
   useEffect(() => {
     if (runMode !== 'live') autoHookDoneBarRef.current = null;
@@ -3567,6 +3663,8 @@ function AppContent({ onEngineReady }) {
           binanceQuantity: qty,
           symbol: brokerFeed.resolvedSymbol || defaultSymbolForBroker(),
         });
+        if (r.anyOk) riskDeskRef.current?.clearApiErrors?.();
+        else if (binanceConnected) riskDeskRef.current?.recordApiError?.();
         setLastBrokerMsg(r.summary ? `${r.summary} · ${qty} qty` : r.summary);
       } else {
         setLastBrokerMsg('');
@@ -3601,7 +3699,7 @@ function AppContent({ onEngineReady }) {
   const scrollBottomPad = !isWide ? 6 : 10;
   const showDeskChrome = isWide || mobileTab === 'desk';
   const showFullHeader =
-    isWide || mobileTab === 'desk' || mobileTab === 'home' || mobileTab === 'profile' || mobileTab === 'risk';
+    isWide || mobileTab === 'desk' || mobileTab === 'home' || mobileTab === 'profile';
 
   const gmAlerts = useMemo(
     () => buildGmAlertRows(bzSnapshot.risk, nfpBlackout, newsActive, C),
@@ -3675,7 +3773,11 @@ function AppContent({ onEngineReady }) {
     newsActive,
   ]);
 
-  if (!bundleReady || (useBrokerForEngine && !brokerFeed.feedReady && !mockApi)) {
+  const brokerBarsOk =
+    mockApi || !useBrokerForEngine || brokerFeed.feedReady || !!brokerFeed.feedError;
+  const engineOk = bundleReady || (brokerFeed.marketBundle?.m30?.length ?? 0) >= 32;
+
+  if (!brokerBarsOk || !engineOk) {
     return (
       <View style={[styles.safeRoot, { alignItems: 'center', justifyContent: 'center', padding: 24 }]}>
         {mockApi ? (
@@ -3699,7 +3801,7 @@ function AppContent({ onEngineReady }) {
             </View>
             {!brokerFeed.feedError ? (
               <Text style={{ color: C.dim, fontSize: 11, textAlign: 'center', marginTop: 16 }}>
-                Loading M30 bars from Binance bridge…
+                {brokerFeed.feedReady ? 'Refreshing live data…' : 'Connecting to Binance bridge…'}
               </Text>
             ) : null}
           </>
@@ -3718,8 +3820,11 @@ function AppContent({ onEngineReady }) {
           setMobileTab('profile');
         }}
       />
-      <EmailVerificationBanner />
       <SafeAreaView style={styles.safeRoot} edges={['top']}>
+        <EmailVerificationBanner
+          active={mobileTab === 'home'}
+          onOpenProfile={() => setMobileTab('profile')}
+        />
         <View style={styles.root}>
           <ScrollView
             style={{ flex: 1 }}
@@ -3918,7 +4023,7 @@ function AppContent({ onEngineReady }) {
                   feedReady={brokerFeed.feedReady}
                   feedError={brokerFeed.feedError}
                   connected={brokerConnected}
-                  autoExecute={autoExecuteSignals}
+                  autoExecute={effectiveAutoExecute}
                   onPressConnect={() => setMobileTab('profile')}
                 />
               </View>
@@ -3969,6 +4074,13 @@ function AppContent({ onEngineReady }) {
                     brokerAccount={useBrokerSession ? brokerFeed.account : null}
                     brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : null}
                     brokerPositions={useBrokerSession ? brokerFeed.positions : null}
+                    livePrice={chartPrice}
+                    bid={brokerFeed.bid}
+                    ask={brokerFeed.ask}
+                    binanceBaseUrl={binanceBaseUrl}
+                    brokerConnected={brokerConnected}
+                    onRefreshBroker={brokerFeed.refreshBrokerSnapshot}
+                    onBrokerCloseMsg={(msg) => setLastBrokerMsg(`Close: ${msg}`)}
                   />
                 </View>
               </View>
@@ -3989,34 +4101,35 @@ function AppContent({ onEngineReady }) {
                   brokerConnected={brokerConnected}
                   feedReady={brokerFeed.feedReady}
                   feedError={brokerFeed.feedError}
-                  autoExecuteSignals={autoExecuteSignals}
+                  autoExecuteSignals={effectiveAutoExecute}
                   onOpenProfile={() => setMobileTab('profile')}
                 />
               </View>
             ) : mobileTab === 'desk' ? (
               <View style={[styles.mobileTabBody, styles.ghBody, { paddingHorizontal: 0 }]}>
-                <GodmodeIntel
+                <InstitutionalRiskDesk
                   pad={pad}
-                  price={chartPrice}
-                  sr={sr}
-                  spread={spread}
-                  spHigh={spHigh}
-                  sessionBits={sessionBits}
-                  sigPill={sigPill}
-                  pillStyle={pillStyle}
-                  sigMuted={sigMuted}
-                  engineTrade={bzSnapshot.trade}
-                  execBusy={execBusy}
-                  tradeCount={tradeCount}
-                  onExecute={onExecute}
-                  onSkip={onSkip}
-                  flowNodes={flowNodes}
+                  config={riskDesk.config}
+                  metrics={riskDesk.metrics}
+                  hydrated={riskDesk.hydrated}
+                  onConfigChange={riskDesk.updateConfig}
+                  onMarginModeChange={handleMarginModeChange}
+                  onEmergencyStop={riskDesk.triggerEmergencyStop}
+                  onResumeTrading={riskDesk.resumeTrading}
+                  brokerConnected={brokerConnected}
+                  brokerAccount={useBrokerSession ? brokerFeed.account : null}
+                  brokerPositions={useBrokerSession ? brokerFeed.positions : []}
+                  brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : []}
+                  binanceBaseUrl={binanceBaseUrl}
+                  livePrice={chartPrice}
+                  bid={brokerFeed.bid}
+                  ask={brokerFeed.ask}
+                  onRefreshBroker={brokerFeed.refreshBrokerSnapshot}
+                  onBrokerCloseMsg={(msg) => setLastBrokerMsg(`Close: ${msg}`)}
                   feedReady={brokerFeed.feedReady}
                   feedError={brokerFeed.feedError}
-                  brokerConnected={brokerConnected}
-                  autoExecuteSignals={autoExecuteSignals}
+                  autoExecute={effectiveAutoExecute}
                   onOpenProfile={() => setMobileTab('profile')}
-                  onOpenTrade={() => setMobileTab('trade')}
                 />
               </View>
             ) : mobileTab === 'trade' ? (
@@ -4026,8 +4139,8 @@ function AppContent({ onEngineReady }) {
                     feedReady={brokerFeed.feedReady}
                     feedError={brokerFeed.feedError}
                     connected={brokerConnected}
-                    autoExecute={autoExecuteSignals}
-                    onPressConnect={() => setMobileTab('profile')}
+                  autoExecute={effectiveAutoExecute}
+                  onPressConnect={() => setMobileTab('profile')}
                   />
                 </View>
                 {lastBrokerMsg ? (
@@ -4111,38 +4224,13 @@ function AppContent({ onEngineReady }) {
                   telegramNotifyEnabled={telegramNotifyEnabled}
                   onTelegramNotifyEnabledChange={setTelegramNotifyEnabled}
                   lastBrokerMsg={lastBrokerMsg}
-                  autoExecuteSignals={autoExecuteSignals}
+                  autoExecuteSignals={effectiveAutoExecute}
+                  autoExecuteForced={autoExecuteForced}
                   onAutoExecuteSignalsChange={onAutoExecuteSignalsChange}
                   brokerConnected={brokerConnected}
                   paperBtAutoExec={paperBtAutoExec}
                   onPaperBtAutoExecChange={onPaperBtAutoExecChange}
                   usePaperBacktest={usePaperBacktest}
-                />
-              </View>
-            ) : mobileTab === 'risk' ? (
-              <View style={[styles.mobileTabBody, { paddingHorizontal: pad }]}>
-                <View style={{ paddingBottom: 8 }}>
-                  <BinanceStatusStrip
-                    feedReady={brokerFeed.feedReady}
-                    feedError={brokerFeed.feedError}
-                    connected={brokerConnected}
-                    autoExecute={autoExecuteSignals}
-                    onPressConnect={() => setMobileTab('profile')}
-                  />
-                </View>
-                <RightColumn
-                  tradeCount={tradeCount}
-                  pnl={useBrokerSession && brokerFeed.account?.profit != null ? brokerFeed.account.profit : pnl}
-                  sessTag={sessTag}
-                  spread={spread}
-                  spreadOkColor={spreadOkColor}
-                  spHigh={spHigh}
-                  dayBits={dayBits}
-                  accountEquity={sizingEquity}
-                  brokerLiveAccount={useBrokerSession}
-                  brokerAccount={useBrokerSession ? brokerFeed.account : null}
-                  brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : null}
-                  brokerPositions={useBrokerSession ? brokerFeed.positions : null}
                 />
               </View>
             ) : mobileTab === 'showcase' ? (
@@ -4165,7 +4253,7 @@ function AppContent({ onEngineReady }) {
                 <Text style={styles.footerTxt}>
                   BILSHENZ v3.2 ·{' '}
                   <Text style={styles.footerGold}>
-                    {mobileTab === 'desk' ? 'INTEL' : mobileTab === 'profile' ? 'PROFILE' : mobileTab.toUpperCase()}
+                    {mobileTab === 'desk' ? 'RISK' : mobileTab === 'profile' ? 'PROFILE' : mobileTab.toUpperCase()}
                   </Text>{' '}
                   · {useLiveQuotes ? `${liveBrokerLabel} live data` : 'Simulated'} · Not financial advice
                 </Text>
@@ -4218,27 +4306,16 @@ class AppContentBoundary extends React.Component {
 
 function AppRoot() {
   const { styles } = useBilshenzTheme();
-  const [showOverlay, setShowOverlay] = useState(!skipSplash());
-  const [splashDone, setSplashDone] = useState(skipSplash());
-
-  useEffect(() => {
-    const t = setTimeout(() => setSplashDone(true), SPLASH_MAX_MS);
-    return () => clearTimeout(t);
-  }, []);
-
   return (
     <View style={[styles.appShell, { backgroundColor: styles.safeRoot.backgroundColor }]}>
       <AppContentBoundary />
-      {showOverlay ? (
-        <View style={styles.splashOverlay}>
-          <CinematicSplash appReady={splashDone} onComplete={() => setShowOverlay(false)} />
-        </View>
-      ) : null}
     </View>
   );
 }
 
 export default function App() {
+  const [showOpening, setShowOpening] = useState(() => shouldPlayOpening());
+
   return (
     <SafeAreaProvider>
       <ThemeProvider>
@@ -4248,6 +4325,9 @@ export default function App() {
               <AuthGate>
                 <AppRoot />
               </AuthGate>
+              {showOpening ? (
+                <AppOpeningSplash onComplete={() => setShowOpening(false)} />
+              ) : null}
             </BinanceBridgeProvider>
           </DevPreviewProvider>
         </AuthProvider>

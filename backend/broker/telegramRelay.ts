@@ -6,7 +6,7 @@ export type TelegramSignalRelayPayload = {
   /** Plain-text message for Telegram (you can paste into sendMessage text). */
   text: string;
   intent: BrokerOrderIntent;
-  /** Lots the app intends to send to MT5 (optional, informational). */
+  /** Contracts the app intends to send to Binance (optional, informational). */
   lotsEstimated?: number | null;
 };
 

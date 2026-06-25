@@ -3,9 +3,22 @@ import { SignJWT, jwtVerify } from 'jose';
 const ACCESS_TTL_SEC = Number(process.env.AUTH_ACCESS_TTL_SEC) || 15 * 60;
 const REFRESH_TTL_SEC = Number(process.env.AUTH_REFRESH_TTL_SEC) || 30 * 24 * 60 * 60;
 
+function isProductionAuth(): boolean {
+  return process.env.PRODUCTION_MODE === '1' || process.env.NODE_ENV === 'production';
+}
+
+function resolveAuthSecret(): string {
+  const auth = process.env.AUTH_JWT_SECRET?.trim() ?? '';
+  if (auth.length >= 32) return auth;
+  if (isProductionAuth()) {
+    throw new Error('AUTH_JWT_SECRET required in production (min 32 chars, independent of DESK_API_KEY)');
+  }
+  if (auth.length > 0) return auth;
+  return 'bsv32-dev-auth-secret-local-only-not-for-prod';
+}
+
 function secretKey(): Uint8Array {
-  const raw = process.env.AUTH_JWT_SECRET?.trim() || process.env.DESK_API_KEY?.trim() || 'bsv32-dev-auth-secret-change-me';
-  return new TextEncoder().encode(raw);
+  return new TextEncoder().encode(resolveAuthSecret());
 }
 
 export interface AccessClaims {

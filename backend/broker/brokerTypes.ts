@@ -1,4 +1,4 @@
-/** Payload your webhook / bridge can map to MT5, OANDA, cTrader, etc. */
+/** Payload your webhook / bridge can map to Binance Futures, OANDA, cTrader, etc. */
 export type BrokerOrderIntent = {
   source: 'bilshenz_v3';
   /** ISO time the intent was built (bar time in backtest mode). */

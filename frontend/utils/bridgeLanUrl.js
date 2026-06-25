@@ -36,3 +36,18 @@ export function getMetroLanHost() {
 function isLoopbackHost(host) {
   return host === 'localhost' || host === '127.0.0.1';
 }
+
+/** On Expo Go, 127.0.0.1 is the phone — rewrite to Metro LAN host when available. */
+export function rewriteLocalhostBridgeUrl(url, port = 8766) {
+  const u = String(url || '').trim();
+  if (!isLocalhostApiUrl(u)) return u.replace(/\/$/, '');
+  const lan = getMetroLanHost();
+  if (!lan) return u.replace(/\/$/, '');
+  try {
+    const parsed = new URL(u);
+    const p = parsed.port || String(port);
+    return `http://${lan}:${p}`.replace(/\/$/, '');
+  } catch {
+    return `http://${lan}:${port}`.replace(/\/$/, '');
+  }
+}

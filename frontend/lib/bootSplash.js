@@ -3,7 +3,7 @@
  */
 import * as SplashScreen from 'expo-splash-screen';
 
-const FORCE_HIDE_MS = 5500;
+const FORCE_HIDE_MS = 10000;
 let hideStarted = false;
 let forceTimer = null;
 

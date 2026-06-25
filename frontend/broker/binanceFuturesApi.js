@@ -217,34 +217,120 @@ export async function fetchBinancePositions(apiBaseUrl, symbol) {
   }
 }
 
-export async function fetchBinanceBarsM30(apiBaseUrl, symbol = TRADING_SYMBOL, count = 320, timeoutMs) {
+export async function fetchBinanceBarsM30(
+  apiBaseUrl,
+  symbol = TRADING_SYMBOL,
+  count = 320,
+  timeoutMs,
+  { retries = 3 } = {},
+) {
   const b = base(apiBaseUrl);
   const ms = timeoutMs ?? Math.min(45000, 10000 + Math.max(50, count) * 12);
-  try {
-    const res = await binanceFetch(b, `/api/bars/${encodeURIComponent(symbol)}?count=${count}`, {}, ms);
-    if (!res.ok) return [];
-    const j = await res.json();
-    return Array.isArray(j.bars) ? j.bars : [];
-  } catch {
-    return [];
+  let lastErr = 'Bars request failed';
+  let lastStatus = 0;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await binanceFetch(b, `/api/bars/${encodeURIComponent(symbol)}?count=${count}`, {}, ms);
+      const text = await res.text().catch(() => '');
+      if (!res.ok) {
+        lastStatus = res.status;
+        try {
+          const j = JSON.parse(text);
+          lastErr = parseApiDetail(j, text.slice(0, 200) || `HTTP ${res.status}`);
+        } catch {
+          lastErr = text.slice(0, 200) || `HTTP ${res.status}`;
+        }
+        if (res.status === 401 && /unauthorized/i.test(lastErr)) {
+          lastErr =
+            b.includes('/v1/binance')
+              ? 'Desk auth failed — set EXPO_PUBLIC_DESK_API_KEY to match DESK_API_KEY on desk-api.'
+              : 'Bridge auth failed — set EXPO_PUBLIC_BRIDGE_TOKEN to match BRIDGE_TOKEN on the PC bridge.';
+        }
+        if (attempt < retries && (res.status >= 500 || res.status === 429)) {
+          await new Promise((r) => setTimeout(r, 900 * (attempt + 1)));
+          continue;
+        }
+        return { ok: false, bars: [], error: lastErr, status: lastStatus };
+      }
+      let j = {};
+      try {
+        j = JSON.parse(text);
+      } catch {
+        return { ok: false, bars: [], error: 'Invalid bars JSON from bridge', status: res.status };
+      }
+      const bars = Array.isArray(j.bars) ? j.bars : [];
+      if (!bars.length) {
+        lastErr = 'Bridge returned empty bars array';
+        if (attempt < retries) {
+          await new Promise((r) => setTimeout(r, 900 * (attempt + 1)));
+          continue;
+        }
+        return { ok: false, bars: [], error: lastErr, status: res.status };
+      }
+      return { ok: true, bars, error: null, status: res.status };
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e);
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 900 * (attempt + 1)));
+        continue;
+      }
+      return { ok: false, bars: [], error: lastErr, status: lastStatus };
+    }
   }
+  return { ok: false, bars: [], error: lastErr, status: lastStatus };
 }
 
-/** Pick first bridge URL that responds — prefers one with M30 bars, falls back to health-only. */
-export async function pickReachableBinanceBridgeUrl(preferred = '', symbol = TRADING_SYMBOL) {
-  let healthOnly = null;
+/** Pick first bridge URL that responds to /health (login does not require bars). */
+export async function pickReachableBinanceBridgeUrl(preferred = '', _symbol = TRADING_SYMBOL) {
   for (const url of binanceBridgeUrlCandidates(preferred)) {
     try {
-      const health = await binanceFetch(url, '/health', {}, 8000);
-      if (!health.ok) continue;
-      if (!healthOnly) healthOnly = url.replace(/\/$/, '');
-      const bars = await fetchBinanceBarsM30(url, symbol, 10, 20000);
-      if (bars.length > 0) return url.replace(/\/$/, '');
+      const health = await binanceFetch(url, '/health', {}, 4000);
+      if (health.ok) return url.replace(/\/$/, '');
     } catch {
       /* try next */
     }
   }
-  return healthOnly;
+  return null;
+}
+
+export async function postBinanceClosePosition(apiBaseUrl, { symbol = TRADING_SYMBOL, volume } = {}) {
+  const b = base(apiBaseUrl);
+  const connected = await fetchBinanceConnected(b);
+  if (!connected) {
+    return { ok: false, status: 0, bodySnippet: 'Binance API not connected', connected: false };
+  }
+  const body = { symbol };
+  if (volume != null && Number.isFinite(volume)) body.volume = volume;
+  try {
+    const res = await binanceFetch(
+      b,
+      '/api/close',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+      30000,
+    );
+    const text = await res.text();
+    let j = {};
+    try {
+      j = JSON.parse(text);
+    } catch {
+      /* text */
+    }
+    let snippet = trimSnippet(text || (res.ok ? 'OK' : 'Empty body'));
+    if (!res.ok) {
+      if (typeof j.detail === 'string') snippet = j.detail;
+      else if (j.detail) snippet = trimSnippet(JSON.stringify(j.detail));
+    }
+    return {
+      ok: res.ok && !!j.ok,
+      status: res.status,
+      bodySnippet: snippet,
+      connected: true,
+      closed: Array.isArray(j.closed) ? j.closed : [],
+    };
+  } catch (e) {
+    return { ok: false, status: 0, bodySnippet: trimSnippet(e instanceof Error ? e.message : String(e)), connected };
+  }
 }
 
 export async function postBinanceOrderFromIntent(intent, opts) {
@@ -304,6 +390,48 @@ export async function postBinanceOrderFromIntent(intent, opts) {
 }
 
 /** Poll order fill status after market order (reconciliation). */
+export async function postBinanceMarginMode(apiBaseUrl, { symbol = TRADING_SYMBOL, marginType = 'ISOLATED' } = {}) {
+  const b = base(apiBaseUrl);
+  const connected = await fetchBinanceConnected(b);
+  if (!connected) {
+    return { ok: false, status: 0, bodySnippet: 'Binance API not connected', connected: false };
+  }
+  const mt = String(marginType).toUpperCase() === 'CROSS' ? 'CROSS' : 'ISOLATED';
+  try {
+    const res = await binanceFetch(
+      b,
+      '/api/margin',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, margin_type: mt }),
+      },
+      20000,
+    );
+    const text = await res.text();
+    let j = {};
+    try {
+      j = JSON.parse(text);
+    } catch {
+      /* text */
+    }
+    let snippet = trimSnippet(text || (res.ok ? 'OK' : 'Empty body'));
+    if (!res.ok) {
+      if (typeof j.detail === 'string') snippet = j.detail;
+      else if (j.detail) snippet = trimSnippet(JSON.stringify(j.detail));
+    }
+    return {
+      ok: res.ok && !!j.ok,
+      status: res.status,
+      bodySnippet: snippet,
+      connected: true,
+      margin_type: j.margin_type ?? mt,
+    };
+  } catch (e) {
+    return { ok: false, status: 0, bodySnippet: trimSnippet(e instanceof Error ? e.message : String(e)), connected };
+  }
+}
+
 export async function fetchBinanceOrderStatus(apiBaseUrl, orderId, symbol = TRADING_SYMBOL, timeoutMs = 15000) {
   const b = base(apiBaseUrl);
   try {

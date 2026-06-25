@@ -7,6 +7,7 @@ import { Platform } from 'react-native';
 import {
   binanceFetch,
   fetchBinanceSession,
+  pickReachableBinanceBridgeUrl,
   postBinanceAttach,
   postBinanceLogin,
 } from '../broker/binanceFuturesApi';
@@ -79,15 +80,18 @@ export async function loadStoredBinanceCredentials() {
 }
 
 export async function saveStoredBinanceCredentials(apiKey, apiSecret, testnet) {
-  await AsyncStorage.multiSet([
-    [STORAGE_BINANCE_TESTNET, testnet ? '1' : '0'],
-    [STORAGE_BINANCE_KEY, apiKey],
-    [STORAGE_BINANCE_SECRET, apiSecret],
-  ]);
-  const ok = (await secureSet(SECURE_KEYS.apiKey, apiKey)) && (await secureSet(SECURE_KEYS.apiSecret, apiSecret));
-  if (ok) {
-    await AsyncStorage.setItem(MIGRATION_FLAG, '1');
+  await AsyncStorage.setItem(STORAGE_BINANCE_TESTNET, testnet ? '1' : '0');
+  if (canUseSecureStore()) {
+    await AsyncStorage.multiRemove([STORAGE_BINANCE_KEY, STORAGE_BINANCE_SECRET]);
+    await secureSet(SECURE_KEYS.apiKey, apiKey);
+    await secureSet(SECURE_KEYS.apiSecret, apiSecret);
+  } else {
+    await AsyncStorage.multiSet([
+      [STORAGE_BINANCE_KEY, apiKey],
+      [STORAGE_BINANCE_SECRET, apiSecret],
+    ]);
   }
+  await AsyncStorage.setItem(MIGRATION_FLAG, '1');
 }
 
 /** Persist testnet/mainnet preference before connect (keeps auto-restore in sync with UI toggle). */
@@ -101,55 +105,144 @@ export async function clearStoredBinanceCredentials() {
   await AsyncStorage.multiRemove([STORAGE_BINANCE_KEY, STORAGE_BINANCE_SECRET, STORAGE_BINANCE_TESTNET]);
 }
 
-async function pickReachableBridgeUrl(candidates) {
-  for (const url of candidates) {
-    try {
-      const res = await binanceFetch(url, '/health', {}, 6000);
-      if (res.ok) return url;
-    } catch {
-      /* try next */
+function isKeyEnvMismatch(detail) {
+  return /invalid api-key|api-key format|signature|permissions|unauthorized/i.test(String(detail || ''));
+}
+
+/**
+ * Login with optional auto-detect: if keys fail on selected env, try the other (testnet ↔ mainnet).
+ */
+async function loginWithEnvFallback(url, apiKey, apiSecret, testnet, timeoutMs) {
+  let login = await postBinanceLogin(
+    url,
+    { api_key: apiKey, api_secret: apiSecret, testnet },
+    timeoutMs,
+  );
+  if (login.ok) return { login, testnet, autoDetected: false };
+
+  if (isKeyEnvMismatch(login.detail)) {
+    const alt = !testnet;
+    const altLogin = await postBinanceLogin(
+      url,
+      { api_key: apiKey, api_secret: apiSecret, testnet: alt },
+      timeoutMs,
+    );
+    if (altLogin.ok) {
+      return { login: altLogin, testnet: alt, autoDetected: true };
     }
   }
-  return null;
+
+  return { login, testnet, autoDetected: false };
+}
+
+/**
+ * Full connect flow: reach bridge → clear stale session → login/attach → verify account.
+ */
+export async function connectBinanceBridge({
+  baseUrl = '',
+  apiKey = '',
+  apiSecret = '',
+  testnet = true,
+  mode = getBrokerMode(),
+  timeoutMs = 22000,
+  autoDetectEnv = true,
+} = {}) {
+  const url = await pickReachableBinanceBridgeUrl(baseUrl);
+  if (!url) {
+    return { ok: false, url: baseUrl, error: 'Cannot reach Binance bridge' };
+  }
+
+  try {
+    await binanceFetch(url, '/api/logout', { method: 'POST' }, 8000);
+  } catch {
+    /* clear stale session */
+  }
+
+  let resolvedTestnet = testnet;
+  let login;
+  let autoDetected = false;
+
+  if (mode === 'paper') {
+    login = await postBinanceAttach(url, timeoutMs);
+    if (!login.ok) {
+      return { ok: false, url, error: login.detail || 'Paper attach failed' };
+    }
+  } else {
+    const key = apiKey.trim();
+    const secret = apiSecret.trim();
+    if (!key || !secret) {
+      return { ok: false, url, error: 'Enter API key and secret' };
+    }
+
+    const attempt = autoDetectEnv
+      ? await loginWithEnvFallback(url, key, secret, testnet, timeoutMs)
+      : {
+          login: await postBinanceLogin(url, { api_key: key, api_secret: secret, testnet }, timeoutMs),
+          testnet,
+          autoDetected: false,
+        };
+    login = attempt.login;
+    resolvedTestnet = attempt.testnet;
+    autoDetected = attempt.autoDetected;
+
+    if (!login.ok) {
+      return { ok: false, url, error: login.detail || 'Login failed', testnet: resolvedTestnet };
+    }
+
+    await saveStoredBinanceCredentials(key, secret, resolvedTestnet);
+  }
+
+  let account = login.account;
+  let modeLabel = login.mode ?? (resolvedTestnet ? 'testnet' : 'live');
+
+  const verified = await fetchBinanceSession(url, timeoutMs, 3);
+  if (verified.account) {
+    account = verified.account;
+    modeLabel = verified.mode ?? modeLabel;
+    resolvedTestnet = verified.testnet ?? resolvedTestnet;
+  } else if (!account) {
+    return {
+      ok: false,
+      url,
+      error: verified.error || 'Could not verify account after login',
+      testnet: resolvedTestnet,
+    };
+  }
+
+  return {
+    ok: true,
+    url,
+    session: { ok: true, account, mode: modeLabel, testnet: resolvedTestnet },
+    testnet: resolvedTestnet,
+    autoDetected,
+  };
 }
 
 /**
  * Restore bridge session — uses stored keys for binance mode, attach for paper.
  */
-export async function tryBinanceSessionConnect(baseUrl, timeoutMs = 15000) {
+export async function tryBinanceSessionConnect(baseUrl, timeoutMs = 18000) {
   const mode = getBrokerMode();
-  const candidates = binanceBridgeUrlCandidates(baseUrl);
-  const url = await pickReachableBridgeUrl(candidates);
-  if (!url) {
-    return { ok: false, url: baseUrl, error: 'Cannot reach Binance bridge' };
-  }
 
-  let session = await fetchBinanceSession(url, timeoutMs);
-  if (session.ok) return { ok: true, url, session };
-
-  if (mode === 'paper') {
-    const login = await postBinanceAttach(url, timeoutMs);
-    if (!login.ok) return { ok: false, url, error: login.detail || 'Paper attach failed' };
-    session = await fetchBinanceSession(url, timeoutMs);
-    return { ok: session.ok, url, session, error: session.error };
+  const session = await fetchBinanceSession(baseUrl, timeoutMs, 1);
+  if (session.ok) {
+    const url = await pickReachableBinanceBridgeUrl(baseUrl);
+    return { ok: true, url: url || baseUrl, session };
   }
 
   const creds = await loadStoredBinanceCredentials();
-  if (!creds.apiKey.trim() || !creds.apiSecret.trim()) {
-    return { ok: false, url, error: 'No stored API credentials' };
+  if (mode !== 'paper' && (!creds.apiKey.trim() || !creds.apiSecret.trim())) {
+    const url = await pickReachableBinanceBridgeUrl(baseUrl);
+    return { ok: false, url: url || baseUrl, error: 'No stored API credentials' };
   }
 
-  const login = await postBinanceLogin(
-    url,
-    {
-      api_key: creds.apiKey.trim(),
-      api_secret: creds.apiSecret.trim(),
-      testnet: creds.testnet,
-    },
+  return connectBinanceBridge({
+    baseUrl,
+    apiKey: creds.apiKey,
+    apiSecret: creds.apiSecret,
+    testnet: creds.testnet,
+    mode,
     timeoutMs,
-  );
-  if (!login.ok) return { ok: false, url, error: login.detail || 'Login failed' };
-
-  session = await fetchBinanceSession(url, timeoutMs);
-  return { ok: session.ok, url, session, error: session.error };
+    autoDetectEnv: true,
+  });
 }

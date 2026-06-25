@@ -7,15 +7,10 @@ import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 
 const DESK = process.env.DESK_HEALTH_URL ?? 'http://127.0.0.1:8791/health';
-const MT5 = (process.env.MT5_API_URL ?? 'http://127.0.0.1:8765').replace(/\/$/, '');
 const BINANCE = (process.env.BINANCE_API_URL ?? 'http://127.0.0.1:8766').replace(/\/$/, '');
-const BROKER_MODE = (process.env.BROKER_MODE ?? 'binance').toLowerCase();
-const USE_BINANCE = BROKER_MODE === 'binance' || BROKER_MODE === 'paper';
 const INTERVAL_MS = Number(process.env.WATCHDOG_INTERVAL_MS ?? 60_000);
 const LOG_DIR = process.env.TRADINGBOT_LOG_DIR ?? 'C:\\logs\\tradingbot';
 const SAFETY_FILE = process.env.SAFETY_STATE_PATH ?? path.join(LOG_DIR, 'safety-state.json');
-
-const MT5_TERMINAL_PATH = process.env.MT5_TERMINAL_PATH ?? 'C:\\Program Files\\MetaTrader 5 Exness';
 
 let prevDesk = true;
 let prevBroker = true;
@@ -47,12 +42,12 @@ function runPs(cmd: string, timeoutMs = 90_000): string {
   }
 }
 
-async function probe(url: string, expectConnected = false): Promise<{ ok: boolean; detail: string }> {
+async function probe(url: string): Promise<{ ok: boolean; detail: string }> {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
     const text = await res.text();
     let ok = res.ok;
-    if (expectConnected && res.ok) {
+    if (res.ok) {
       try {
         const j = JSON.parse(text) as { connected?: boolean; ok?: boolean };
         ok = url.includes('/health') ? Boolean(j.ok ?? true) : Boolean(j.connected);
@@ -61,25 +56,6 @@ async function probe(url: string, expectConnected = false): Promise<{ ok: boolea
     return { ok, detail: text.slice(0, 200) };
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-function ensureTerminal64(): void {
-  if (USE_BINANCE) return;
-  try {
-    const result = runPs("(Get-Process terminal64 -ErrorAction SilentlyContinue).Id");
-    if (result && result.match(/\d+/)) return;
-    const exe = `${MT5_TERMINAL_PATH}\\terminal64.exe`;
-    const check = runPs(`Test-Path '${exe}'`);
-    if (check.toLowerCase() !== 'true') {
-      log(`terminal64.exe not found at ${exe}`);
-      return;
-    }
-    log('terminal64 not running — starting with /algotrading...');
-    runPs(`Start-Process '${exe}' -ArgumentList '/algotrading'`);
-    logReconnect('terminal64 started by watchdog', { service: 'terminal64' });
-  } catch (e) {
-    log(`ensureTerminal64 error: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -98,30 +74,14 @@ function resetBotFailsafe(): void {
 }
 
 function restartBrokerTask(): void {
-  if (USE_BINANCE) {
-    log('Restarting Bilshenz-Binance-API...');
-    runPs("Get-NetTCPConnection -LocalPort 8766 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }; Start-Sleep 3; Start-ScheduledTask -TaskName 'Bilshenz-Binance-API'");
-    logReconnect('binance-api restarted by watchdog', { service: 'binance-api' });
-    return;
-  }
-  log('MT5 down for 3 checks — full restart (terminal64 + Python API)...');
-  runPs("Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue");
-  runPs("taskkill /f /im terminal64.exe 2>$null");
-  runPs("Start-Sleep 10");
-  const exe = `${MT5_TERMINAL_PATH}\\terminal64.exe`;
-  runPs(`Start-Process '${exe}' -ArgumentList '/algotrading'`);
-  runPs("Start-Sleep 60");
-  runPs("Start-ScheduledTask -TaskName 'Bilshenz-MT5-API'");
-  runPs("Start-Sleep 15");
-  logReconnect('full MT5 stack restarted by watchdog', { service: 'mt5-full' });
+  log('Restarting Bilshenz-Binance-API...');
+  runPs("Get-NetTCPConnection -LocalPort 8766 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }; Start-Sleep 3; Start-ScheduledTask -TaskName 'Bilshenz-Binance-API'");
+  logReconnect('binance-api restarted by watchdog', { service: 'binance-api' });
 }
 
 async function tick(): Promise<void> {
-  ensureTerminal64();
-
   const desk = await probe(DESK);
-  const brokerUrl = USE_BINANCE ? `${BINANCE}/health` : `${MT5}/api/status`;
-  const broker = await probe(brokerUrl, !USE_BINANCE);
+  const broker = await probe(`${BINANCE}/health`);
 
   if (!desk.ok) {
     deskDownCount++;
@@ -145,11 +105,8 @@ async function tick(): Promise<void> {
   if (!broker.ok) {
     brokerDownCount++;
     if (prevBroker) {
-      logReconnect(`${USE_BINANCE ? 'binance' : 'mt5'}-api disconnected`, {
-        service: USE_BINANCE ? 'binance-api' : 'mt5-api',
-        detail: broker.detail,
-      });
-      log(`${USE_BINANCE ? 'Binance' : 'MT5'} DOWN: ${broker.detail}`);
+      logReconnect('binance-api disconnected', { service: 'binance-api', detail: broker.detail });
+      log(`Binance DOWN: ${broker.detail}`);
     }
     if (brokerDownCount >= RESTART_AFTER) {
       restartBrokerTask();
@@ -157,10 +114,8 @@ async function tick(): Promise<void> {
     }
   } else {
     if (!prevBroker) {
-      logReconnect(`${USE_BINANCE ? 'binance' : 'mt5'}-api connected`, {
-        service: USE_BINANCE ? 'binance-api' : 'mt5-api',
-      });
-      log(`${USE_BINANCE ? 'Binance' : 'MT5'} recovered`);
+      logReconnect('binance-api connected', { service: 'binance-api' });
+      log('Binance recovered');
       resetBotFailsafe();
     }
     brokerDownCount = 0;
@@ -196,8 +151,7 @@ async function tick(): Promise<void> {
   } catch { /* ignore */ }
 
   const ts = new Date().toISOString().slice(11, 19);
-  const brokerLabel = USE_BINANCE ? 'binance' : 'mt5';
-  console.log(`${ts} desk=${desk.ok} ${brokerLabel}=${broker.ok}${!broker.ok ? ' ' + broker.detail.slice(0, 80) : ''}`);
+  console.log(`${ts} desk=${desk.ok} binance=${broker.ok}${!broker.ok ? ' ' + broker.detail.slice(0, 80) : ''}`);
 
   prevDesk = desk.ok;
   prevBroker = broker.ok;
@@ -205,7 +159,7 @@ async function tick(): Promise<void> {
 
 async function main(): Promise<void> {
   if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
-  log(`Started — desk=${DESK} broker=${USE_BINANCE ? BINANCE : MT5} mode=${BROKER_MODE} interval=${INTERVAL_MS}ms`);
+  log(`Started — desk=${DESK} binance=${BINANCE} interval=${INTERVAL_MS}ms`);
   await tick();
   setInterval(() => void tick(), INTERVAL_MS);
 }

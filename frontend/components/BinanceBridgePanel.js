@@ -18,35 +18,19 @@ import {
   binanceFetch,
   fetchBinancePositions,
   fetchBinanceSession,
-  postBinanceAttach,
-  postBinanceLogin,
-  pickReachableBinanceBridgeUrl,
 } from '../broker/binanceFuturesApi';
 import { getBrokerMode } from '../lib/brokerMode';
 import {
+  connectBinanceBridge,
   loadStoredBinanceCredentials,
-  saveStoredBinanceCredentials,
   saveStoredBinanceTestnetPref,
   tryBinanceSessionConnect,
 } from '../lib/binanceSession';
 import {
-  binanceBridgeUrlCandidates,
   formatBinanceNetworkError,
   getDefaultBinanceBridgeUrl,
 } from '../utils/binanceApiUrl';
 import { getMetroLanHost, isLocalhostApiUrl } from '../utils/bridgeLanUrl';
-
-async function pickReachableBridgeUrl(candidates) {
-  for (const url of candidates) {
-    try {
-      const res = await binanceFetch(url, '/health', {}, 6000);
-      if (res.ok) return url;
-    } catch {
-      /* try next */
-    }
-  }
-  return null;
-}
 
 function sessionLabel(account, mode) {
   if (!account) return 'Not connected';
@@ -108,22 +92,6 @@ export default function BinanceBridgePanel() {
     setPositions([]);
   }, [baseUrl, setConnected]);
 
-  const onTestnetChange = useCallback(
-    async (next) => {
-      setTestnet(next);
-      await saveStoredBinanceTestnetPref(next);
-      if (sessionLive && sessionTestnet != null && sessionTestnet !== next) {
-        await clearBridgeSession();
-        setErr(
-          next
-            ? 'Switched to Testnet — paste testnet.binancefuture.com keys and tap Connect Testnet.'
-            : 'Switched to Mainnet — paste binance.com Futures keys and tap Connect Live.',
-        );
-      }
-    },
-    [clearBridgeSession, sessionLive, sessionTestnet],
-  );
-
   const stopPoll = () => {
     if (pollRef.current) {
       clearInterval(pollRef.current);
@@ -175,25 +143,86 @@ export default function BinanceBridgePanel() {
     }
   }, [applySession, baseUrl, setConnected]);
 
+  const onTestnetChange = useCallback(
+    async (next) => {
+      setTestnet(next);
+      await saveStoredBinanceTestnetPref(next);
+      if (sessionLive && sessionTestnet != null && sessionTestnet !== next) {
+        await clearBridgeSession();
+        const creds = await loadStoredBinanceCredentials();
+        if (creds.apiKey.trim() && creds.apiSecret.trim() && mode !== 'paper') {
+          setBusy(true);
+          setErr(next ? 'Switching to Testnet…' : 'Switching to Mainnet…');
+          try {
+            const result = await connectBinanceBridge({
+              baseUrl,
+              apiKey: creds.apiKey,
+              apiSecret: creds.apiSecret,
+              testnet: next,
+              mode,
+              autoDetectEnv: false,
+            });
+            if (result.ok && result.session) {
+              if (result.autoDetected) setTestnet(result.testnet);
+              applySession(result.session, result.url);
+              void refresh();
+              return;
+            }
+            setErr(
+              formatLoginEnvError(
+                result.error,
+                next,
+              ) || (next ? 'Testnet login failed — use testnet.binancefuture.com keys' : 'Mainnet login failed — use binance.com keys'),
+            );
+          } catch (e) {
+            setErr(formatBinanceNetworkError(e instanceof Error ? e.message : String(e), baseUrl));
+          } finally {
+            setBusy(false);
+          }
+          return;
+        }
+        setErr(
+          next
+            ? 'Switched to Testnet — paste testnet.binancefuture.com keys and tap Connect.'
+            : 'Switched to Mainnet — paste binance.com Futures keys and tap Connect.',
+        );
+      }
+    },
+    [applySession, baseUrl, clearBridgeSession, mode, refresh, sessionLive, sessionTestnet],
+  );
+
   useEffect(() => {
+    let cancelled = false;
     loadStoredBinanceCredentials().then((creds) => {
+      if (cancelled) return;
       if (creds.apiKey) setApiKey(creds.apiKey);
       if (creds.apiSecret) setApiSecret(creds.apiSecret);
       setTestnet(creds.testnet);
     });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
-    if (!hydrated || sessionLive || busy || mode === 'paper') return;
+    if (!hydrated || sessionLive || busy || mode === 'paper' || connected) return;
     let cancelled = false;
     (async () => {
       const creds = await loadStoredBinanceCredentials();
       if (!creds.apiKey.trim() || !creds.apiSecret.trim()) return;
       setBusy(true);
       try {
-        const restored = await tryBinanceSessionConnect(baseUrl, 18000);
+        const restored = await tryBinanceSessionConnect(baseUrl, 20000);
         if (cancelled) return;
         if (restored.ok && restored.session) {
+          if (restored.testnet != null) setTestnet(restored.testnet);
+          if (restored.autoDetected) {
+            setErr(
+              restored.testnet
+                ? 'Connected to Testnet (auto-detected from your API keys).'
+                : 'Connected to Mainnet (auto-detected from your API keys).',
+            );
+          }
           applySession(restored.session, restored.url);
         }
       } finally {
@@ -203,7 +232,7 @@ export default function BinanceBridgePanel() {
     return () => {
       cancelled = true;
     };
-  }, [hydrated, sessionLive, busy, mode, baseUrl, applySession]);
+  }, [hydrated, sessionLive, busy, mode, baseUrl, connected, applySession]);
 
   useEffect(() => {
     if (isLocalhostApiUrl(baseUrl) && metroLan) {
@@ -275,67 +304,43 @@ export default function BinanceBridgePanel() {
         return;
       }
 
-      const url = await pickReachableBinanceBridgeUrl(baseUrl, TRADING_SYMBOL);
-      if (!url) {
-        const msg = formatBinanceNetworkError('Cannot reach Binance bridge', baseUrl);
-        setErr(msg);
-        Alert.alert('Bridge offline', msg);
-        return;
-      }
-      setBaseUrl(url);
+      const result = await connectBinanceBridge({
+        baseUrl,
+        apiKey: key,
+        apiSecret: secret,
+        testnet,
+        mode,
+        autoDetectEnv: true,
+      });
 
-      try {
-        await binanceFetch(url, '/api/logout', { method: 'POST' }, 8000);
-      } catch {
-        /* clear stale mainnet/testnet session before new login */
-      }
-
-      let login;
-      if (mode === 'paper') {
-        login = await postBinanceAttach(url);
-      } else {
-        login = await postBinanceLogin(url, {
-          api_key: key,
-          api_secret: secret,
-          testnet,
-        });
-        await saveStoredBinanceCredentials(key, secret, testnet);
-      }
-
-      if (!login.ok) {
+      if (!result.ok) {
         setConnected(false);
         setAccount(null);
-        const msg = formatLoginEnvError(login.detail, testnet);
-        setErr(msg);
-        Alert.alert('Binance login failed', msg);
+        const msg = formatLoginEnvError(result.error, result.testnet ?? testnet);
+        const netMsg = /bridge|network|fetch|ECONNREFUSED/i.test(msg)
+          ? formatBinanceNetworkError(msg, baseUrl)
+          : msg;
+        setErr(netMsg);
+        if (/bridge|network|fetch|ECONNREFUSED/i.test(msg)) {
+          Alert.alert('Bridge offline', netMsg);
+        } else {
+          Alert.alert('Binance login failed', netMsg);
+        }
         return;
       }
 
-      let acct = login.account;
-      let modeLabel = login.mode ?? (testnet ? 'testnet' : 'live');
-      const verified = await fetchBinanceSession(url, 15000, 3);
-      if (verified.account) {
-        acct = verified.account;
-        modeLabel = verified.mode ?? modeLabel;
+      if (result.testnet != null && result.testnet !== testnet) {
+        setTestnet(result.testnet);
+      }
+      if (result.autoDetected) {
+        setErr(
+          result.testnet
+            ? 'Connected to Testnet — keys matched testnet.binancefuture.com.'
+            : 'Connected to Mainnet — keys matched binance.com.',
+        );
       }
 
-      if (!acct) {
-        setConnected(false);
-        setAccount(null);
-        const msg =
-          formatLoginEnvError(
-            verified.error,
-            testnet,
-          ) ||
-          (testnet
-            ? 'Could not load testnet account — enable Futures + Read at testnet.binancefuture.com'
-            : 'Could not load mainnet account — enable USD-M Futures + Read on binance.com');
-        setErr(msg);
-        Alert.alert('Binance', msg);
-        return;
-      }
-
-      applySession({ ok: true, account: acct, mode: modeLabel }, url);
+      applySession(result.session, result.url);
       setConnected(true);
       void refresh();
     } catch (e) {
@@ -346,7 +351,7 @@ export default function BinanceBridgePanel() {
     } finally {
       setBusy(false);
     }
-  }, [apiKey, apiSecret, applySession, baseUrl, mode, refresh, setBaseUrl, setConnected, testnet]);
+  }, [apiKey, apiSecret, applySession, baseUrl, mode, refresh, setConnected, testnet]);
 
   const onDisconnect = useCallback(async () => {
     setBusy(true);
@@ -376,7 +381,7 @@ export default function BinanceBridgePanel() {
   const statusText = sessionLive
     ? `Connected · ${sessionLabel(account, bridgeMode)}`
     : feedLive
-      ? `Market data live · paste secret & tap ${testnet ? 'Connect Testnet' : 'Connect Live'}`
+      ? `Market data live · paste secret & tap Connect`
       : busy
         ? 'Connecting…'
         : err
@@ -386,7 +391,15 @@ export default function BinanceBridgePanel() {
   const spreadPips =
     tick?.bid != null && tick?.ask != null ? ((tick.ask - tick.bid) / 0.1).toFixed(1) : null;
 
-  const envLabel = bridgeMode === 'live' || (!testnet && bridgeMode !== 'paper') ? 'MAINNET' : bridgeMode === 'paper' ? 'PAPER' : 'TESTNET';
+  const envLabel = sessionLive
+    ? sessionTestnet
+      ? 'TESTNET'
+      : 'MAINNET'
+    : bridgeMode === 'paper'
+      ? 'PAPER'
+      : testnet
+        ? 'TESTNET'
+        : 'MAINNET';
 
   return (
     <View style={st.root}>
@@ -481,7 +494,7 @@ export default function BinanceBridgePanel() {
 
             {!sessionLive && apiKey.trim() && !apiSecret.trim() ? (
               <Text style={[st.hint, { color: C.amber, fontWeight: '700' }]}>
-                Paste your API secret above, then tap {testnet ? 'Connect Testnet' : 'Connect Live'}.
+                Paste your API secret above, then tap Connect.
               </Text>
             ) : null}
 
@@ -504,7 +517,7 @@ export default function BinanceBridgePanel() {
                 ]}>
                 {busy ? <ActivityIndicator color="#F2E6C5" /> : (
                   <Text style={st.btnOnTxt}>
-                    {mode === 'paper' ? 'Connect Paper' : testnet ? 'Connect Testnet' : 'Connect Live'}
+                    {mode === 'paper' ? 'Connect Paper' : 'Connect Binance'}
                   </Text>
                 )}
               </Pressable>

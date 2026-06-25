@@ -1,5 +1,5 @@
 BILSHENZ DUPLICATION-RISK AUDIT
-Generated: 2026-05-18T20:22:43.303Z
+Generated: 2026-06-18T15:19:40.131Z
 
 === CLIENT BUNDLE (Metro ships when EXPO_PUBLIC_DESK_REMOTE is not 1) ===
 engine/*.ts — FULL strategy (critical) unless remote mode + metro stub
@@ -48,14 +48,24 @@ scripts/backtest-jimplas-12mo-output.txt
   /jimplas/i
 scripts/backtest-jimplas-geometry-12mo.txt
   /jimplas/i
+scripts/lib/runBacktestWindow.ts
+  /jimplas/i, /pineV5/i, /leftSideScan/i, /defaultBilshenzConfig/
 scripts/run-3mo-autotrade-backtest.ts
   /leftSideScan/i, /defaultBilshenzConfig/, /athZoneLow/, /leftScanBars/, /signalEngine/
 scripts/run-3yr-backtest.ts
   /leftSideScan/i, /defaultBilshenzConfig/, /athZoneLow/, /leftScanBars/, /signalEngine/
+scripts/run-backtest-matrix.ts
+  /jimplas/i, /pineV5/i, /defaultBilshenzConfig/
+scripts/run-forward-demo-30d.ts
+  /computeBilshenzSnapshot/
+scripts/run-institutional-audit.ts
+  /defaultBilshenzConfig/
 scripts/run-jimplas-audit.ts
   /jimplas/i, /pineV5/i, /defaultBilshenzConfig/
 scripts/run-loss-analysis.ts
   /pineV5/i, /leftSideScan/i, /defaultBilshenzConfig/
+scripts/run-migration-parity-audit.ts
+  /computeBilshenzSnapshot/
 scripts/run-monte-carlo-stress.ts
   /defaultBilshenzConfig/
 scripts/run-pine-parity-audit.ts
@@ -68,6 +78,8 @@ scripts/security-duplication-audit.mjs
   /jimplas/i, /pineV5/i, /leftSideScan/i, /defaultBilshenzConfig/, /riskPctAtr/, /p1VolumeAtrMult/, /wickRatioMin/, /athZoneLow/, /yieldHighThreshold/, /leftScanBars/, /hard_block/i, /computeBilshenzSnapshot/, /signalEngine/
 security/sanitizeDesk.js
   /defaultBilshenzConfig/
+strategy/frozenProduction.ts
+  /jimplas/i, /pineV5/i, /p1VolumeAtrMult/, /leftScanBars/, /signalEngine/
 
 === REMAINING HIGH RISK (even after changes) ===
 1. Dev builds (__DEV__) still bundle full engine — use release + DESK_REMOTE=1 for phones
@@ -77,4 +89,4 @@ security/sanitizeDesk.js
 5. Webhook/Telegram payloads may include entry/SL/TP — server should sign orders
 6. Hermes bundle is decompilable — remote API is the real protection
 
-Total flagged paths: 27
+Total flagged paths: 33

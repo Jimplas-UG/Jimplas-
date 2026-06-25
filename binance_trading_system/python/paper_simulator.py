@@ -150,5 +150,55 @@ class PaperStore:
     def recent_deals(self, limit: int = 50) -> list[dict[str, Any]]:
         return self._deals[-max(1, limit) :]
 
+    def close_position(self, symbol: str | None = None, volume: float | None = None) -> dict[str, Any]:
+        sym = (symbol or "XAUUSDT").upper()
+        remaining: list[PaperPosition] = []
+        closed: list[dict[str, Any]] = []
+        for p in self._positions:
+            if p.symbol != sym:
+                remaining.append(p)
+                continue
+            qty = float(volume) if volume is not None else p.volume
+            if qty <= 0 or qty > p.volume + 1e-12:
+                remaining.append(p)
+                continue
+            tick = self._last_tick.get(sym)
+            if not tick:
+                return {"ok": False, "error": "no tick — call set_tick first"}
+            fill = tick["bid"] if p.side == "BUY" else tick["ask"]
+            pnl = (fill - p.price_open) * qty * (1 if p.side == "BUY" else -1)
+            self.balance += pnl
+            self.equity = self.balance
+            deal_id = len(self._deals) + 1
+            self._deals.append(
+                {
+                    "ticket": deal_id,
+                    "symbol": sym,
+                    "type": p.side,
+                    "volume": qty,
+                    "price": fill,
+                    "profit": pnl,
+                    "time": int(time.time() * 1000),
+                }
+            )
+            closed.append(
+                {
+                    "symbol": sym,
+                    "side": p.side,
+                    "volume": qty,
+                    "fill_price": fill,
+                    "profit": pnl,
+                }
+            )
+            leftover = p.volume - qty
+            if leftover > 1e-12:
+                remaining.append(
+                    PaperPosition(sym, p.side, leftover, p.price_open, p.sl, p.tp, p.magic)
+                )
+        if not closed:
+            return {"ok": False, "error": "no_open_position"}
+        self._positions = remaining
+        return {"ok": True, "closed": closed, "broker": "binance-paper"}
+
 
 paper_store = PaperStore()

@@ -26,7 +26,13 @@ log = logging.getLogger("binance_api")
 
 BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN", "").strip()
 _PUBLIC_PATHS = frozenset({"/health", "/ping", "/docs", "/openapi.json"})
-_SENSITIVE_PATHS = frozenset({"/api/login", "/api/order", "/api/attach", "/api/logout"})
+# Unsigned Binance market data — safe without bridge token (home M30 feed).
+_PUBLIC_QUOTE_PREFIXES = ("/api/tick/", "/api/bars/", "/api/symbol/")
+
+
+def _is_public_quote(path: str) -> bool:
+    return any(path.startswith(p) for p in _PUBLIC_QUOTE_PREFIXES)
+_SENSITIVE_PATHS = frozenset({"/api/login", "/api/order", "/api/close", "/api/attach", "/api/logout", "/api/margin"})
 _rate_buckets: dict[str, list[float]] = defaultdict(list)
 _DEFAULT_SYMBOL = os.environ.get("BINANCE_SYMBOL", "XAUUSDT").upper()
 
@@ -124,7 +130,12 @@ class BridgeAuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if path.startswith("/ws/"):
             return await call_next(request)
-        if BRIDGE_TOKEN and path not in _PUBLIC_PATHS and not _bridge_token_ok(request):
+        if (
+            BRIDGE_TOKEN
+            and path not in _PUBLIC_PATHS
+            and not _is_public_quote(path)
+            and not _bridge_token_ok(request)
+        ):
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         if path in _SENSITIVE_PATHS:
             key = _client_key(request)
@@ -138,9 +149,12 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(BridgeAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get("CORS_ORIGINS", "http://127.0.0.1:8791").split(","),
+    allow_origins=os.environ.get(
+        "CORS_ORIGINS",
+        "http://127.0.0.1:8791,http://localhost:8081,http://127.0.0.1:8081",
+    ).split(","),
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Bridge-Token"],
 )
 
@@ -181,6 +195,16 @@ class OrderBody(BaseModel):
     magic: int = Field(77002002, ge=0)
 
 
+class CloseBody(BaseModel):
+    symbol: str = Field("XAUUSDT", max_length=20, pattern=r"^[A-Za-z0-9]+$")
+    volume: float | None = Field(None, ge=0.0001, le=1000.0)
+
+
+class MarginBody(BaseModel):
+    symbol: str = Field("XAUUSDT", max_length=20, pattern=r"^[A-Za-z0-9]+$")
+    margin_type: str = Field("ISOLATED", pattern=r"^(ISOLATED|CROSS)$")
+
+
 @app.get("/ping")
 def ping():
     st = connector.status_snapshot()
@@ -203,10 +227,15 @@ def api_login(body: LoginBody):
     # Explicit app login must validate real Futures credentials (not paper bypass).
     connector.cfg.paper = False
     connector.configure(body.api_key, body.api_secret, body.testnet)
+    connector.sync_server_time(force=True)
     snap = connector.status_snapshot()
     if not snap.get("connected"):
         err = _login_error_detail(snap.get("error") or "Binance login failed", body.testnet)
         raise HTTPException(status_code=401, detail=err)
+    try:
+        connector._ensure_margin_setup()
+    except Exception as e:
+        log.warning("post-login margin setup: %s", e)
     return {
         "ok": True,
         "account": snap.get("account"),
@@ -235,8 +264,9 @@ def api_attach():
 
 @app.post("/api/logout")
 def api_logout():
+    prev_testnet = connector.cfg.testnet
     connector.cfg.paper = _truthy(os.environ.get("BINANCE_PAPER", "0"))
-    connector.configure("", "")
+    connector.configure("", "", prev_testnet)
     return {"ok": True}
 
 
@@ -263,14 +293,21 @@ def api_bars(symbol: str, count: int = 320, from_ms: int | None = None, to_ms: i
     if cached and now - cached[0] < _PUBLIC_CACHE_TTL_SEC:
         bars = cached[1]
     else:
-        if from_ms is not None and to_ms is not None:
-            bars = connector.bars_m30_range(symbol, from_ms, to_ms)
-        else:
-            bars = connector.bars_m30(symbol, count)
+        try:
+            if from_ms is not None and to_ms is not None:
+                bars = connector.bars_m30_range(symbol, from_ms, to_ms)
+            else:
+                bars = connector.bars_m30(symbol, count)
+        except RuntimeError as e:
+            log.warning("bars %s count=%s: %s", sym, count, e)
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        except Exception as e:
+            log.exception("bars %s count=%s", sym, count)
+            raise HTTPException(status_code=503, detail=f"Bars fetch failed: {e}") from e
         if bars:
             _bars_cache[cache_key] = (now, bars)
     if not bars:
-        raise HTTPException(status_code=503, detail="No bars — check symbol or API")
+        raise HTTPException(status_code=503, detail="No bars — check symbol or Binance API reachability")
     if connector.cfg.paper and bars:
         from paper_simulator import paper_store
 
@@ -321,6 +358,26 @@ def api_order(body: OrderBody):
     if os.environ.get("FORWARD_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
         raise HTTPException(status_code=403, detail={"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True})
     r = connector.order_market(body.symbol, body.side, body.volume, body.sl, body.tp, body.magic)
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r)
+    return r
+
+
+@app.post("/api/close")
+def api_close(body: CloseBody):
+    if os.environ.get("FORWARD_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
+        raise HTTPException(status_code=403, detail={"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True})
+    r = connector.close_position(body.symbol, body.volume)
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r)
+    return r
+
+
+@app.post("/api/margin")
+def api_margin(body: MarginBody):
+    if os.environ.get("FORWARD_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
+        raise HTTPException(status_code=403, detail={"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True})
+    r = connector.set_margin_type(body.margin_type, body.symbol)
     if not r.get("ok"):
         raise HTTPException(status_code=400, detail=r)
     return r

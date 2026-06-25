@@ -1,5 +1,5 @@
 import { getBinanceApiUrl, getDeskApiUrl } from '../lib/envConfig';
-import { getMetroLanHost, isLocalhostApiUrl } from './bridgeLanUrl';
+import { getMetroLanHost, isLocalhostApiUrl, rewriteLocalhostBridgeUrl } from './bridgeLanUrl';
 
 /** Best Binance bridge URL for this device (LAN :8766, desk proxy, or env). */
 export function getDefaultBinanceBridgeUrl(port = 8766) {
@@ -13,6 +13,12 @@ export function getDefaultBinanceBridgeUrl(port = 8766) {
   if (lan) return `http://${lan}:${port}`;
 
   return `http://127.0.0.1:${port}`;
+}
+
+/** Best URL for this device — never use loopback on Expo Go when LAN host is known. */
+export function resolveBridgeUrlForDevice(preferred = '') {
+  const raw = String(preferred || '').trim() || getDefaultBinanceBridgeUrl();
+  return rewriteLocalhostBridgeUrl(raw);
 }
 
 /** Candidate URLs to try when connecting — direct :8766 first (desk-api often offline in dev). */

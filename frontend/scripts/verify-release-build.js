@@ -82,10 +82,10 @@ if (appJs.includes('SplashScreen.preventAutoHideAsync()') && !fs.existsSync(path
   ok('App.js splash guard clean');
 }
 
-if (!appJs.includes('CinematicSplash') || !appJs.includes('SPLASH_MAX_MS')) {
-  fail('App.js must use CinematicSplash with SPLASH_MAX_MS for 8s production boot');
+if (!appJs.includes('AppOpeningSplash') && !appJs.includes('CinematicSplash')) {
+  fail('App.js must use AppOpeningSplash (9-step cinematic opening)');
 } else {
-  ok('CinematicSplash 8s boot wired in App.js');
+  ok('AppOpeningSplash wired in App.js');
 }
 
 if (!fs.existsSync(path.join(ROOT, 'lib', 'bootSplash.js'))) {

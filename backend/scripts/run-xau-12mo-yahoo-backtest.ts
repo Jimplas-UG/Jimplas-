@@ -386,7 +386,6 @@ function useBinanceFromArgs(): boolean {
 }
 
 function readBinanceApiUrlFromArgs(): string | null {
-  if (!useBinanceFromArgs()) return null;
   const env = process.env.BINANCE_API_URL?.trim();
   if (env) return env.replace(/\/$/, '');
   const argv = process.argv.slice(2);
@@ -396,23 +395,17 @@ function readBinanceApiUrlFromArgs(): string | null {
     if (a === '--binance-api' && argv[i + 1]) return argv[i + 1]!.replace(/\/$/, '');
     if (a === '--binance') return 'http://127.0.0.1:8766';
   }
-  return 'http://127.0.0.1:8766';
+  if (useBinanceFromArgs()) return 'http://127.0.0.1:8766';
+  if (!readMt5CsvPathFromArgs() && !readTradingViewCsvPathFromArgs() && !allowYahooFallbackFromArgs()) {
+    return 'http://127.0.0.1:8766';
+  }
+  return null;
 }
 
 function readMt5ApiUrlFromArgs(): string | null {
-  if (useBinanceFromArgs()) return null;
-  const env = process.env.MT5_API_URL?.trim();
-  if (env) return env.replace(/\/$/, '');
   const argv = process.argv.slice(2);
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    if (a.startsWith('--mt5-api=')) return a.slice('--mt5-api='.length).replace(/\/$/, '');
-    if (a === '--mt5-api' && argv[i + 1]) return argv[i + 1]!.replace(/\/$/, '');
-    if (a === '--exness' || a === '--use-mt5') return 'http://127.0.0.1:8765';
-  }
-  /** Default: connected Exness/broker terminal via local Python API (not Yahoo). */
-  if (!readMt5CsvPathFromArgs() && !readTradingViewCsvPathFromArgs()) {
-    return 'http://127.0.0.1:8765';
+  if (argv.some((a) => a === '--exness' || a === '--use-mt5' || a.startsWith('--mt5-api'))) {
+    console.error('[backtest] MT5 API removed — use --binance or --binance-api=http://127.0.0.1:8766');
   }
   return null;
 }
@@ -574,7 +567,7 @@ async function main() {
   const maxDailyTrades = readMaxDailyTradesFromArgs();
   const mt5Api = readMt5ApiUrlFromArgs();
   const binanceApi = readBinanceApiUrlFromArgs();
-  const useMt5Equity = process.argv.includes('--equity-from-mt5') || process.argv.includes('--equity-from-broker');
+  const useBrokerEquity = process.argv.includes('--equity-from-broker') || process.argv.includes('--equity-from-mt5');
   const realisticMode = readRealisticFromArgs();
   const slippagePips = readSlippagePipsFromArgs();
   const spreadPipsOverride = readSpreadPipsOverrideFromArgs();
@@ -583,25 +576,18 @@ async function main() {
   let mt5Broker: Mt5BrokerContext | null = null;
   const symbol = binanceApi
     ? process.env.BINANCE_SYMBOL?.trim() || 'XAUUSDT'
-    : process.env.MT5_SYMBOL?.trim() || 'XAUUSD';
+    : process.env.BINANCE_SYMBOL?.trim() || 'XAUUSDT';
 
-  if (useMt5Equity && (mt5Api || binanceApi)) {
-    mt5Broker = binanceApi
-      ? await fetchBinanceBrokerContext(
-          binanceApi,
-          symbol,
-          defaultBilshenzConfig.pipSize,
-          defaultBilshenzConfig.simUsdPerEnginePip
-        )
-      : await fetchMt5BrokerContext(
-          mt5Api!,
-          symbol,
-          defaultBilshenzConfig.pipSize,
-          defaultBilshenzConfig.simUsdPerEnginePip
-        );
+  if (useBrokerEquity && binanceApi) {
+    mt5Broker = await fetchBinanceBrokerContext(
+      binanceApi,
+      symbol,
+      defaultBilshenzConfig.pipSize,
+      defaultBilshenzConfig.simUsdPerEnginePip
+    );
     const eq = mt5Broker.equity ?? mt5Broker.balance;
     if (eq != null) STARTING_EQUITY_USD = eq;
-    else console.error('MT5 connected but no equity in /api/status — using default starting equity');
+    else console.error('Binance connected but no equity in /api/status — using default starting equity');
   } else {
     STARTING_EQUITY_USD = readEquityFromArgs();
   }
@@ -665,44 +651,16 @@ async function main() {
       );
     }
     dataNote = `Binance Futures — ${symbol} M30 (${m30All.length} bars via ${binanceApi})`;
-  } else if (mt5Api) {
-    const fetchEndMs = RANGE_END_MS + 24 * 3600 * 1000;
-    if (!mt5Broker) {
-      mt5Broker = await fetchMt5BrokerContext(
-        mt5Api,
-        symbol,
-        defaultBilshenzConfig.pipSize,
-        defaultBilshenzConfig.simUsdPerEnginePip
-      );
-    }
-    if (!mt5Broker?.server) {
-      throw new Error(
-        'MT5 API not connected — open Exness MT5, log in to demo/live, run mt5_trading_system/python/start-api.ps1'
-      );
-    }
-    console.error(
-      `Fetching ${symbol} M30 from MT5 (${mt5Broker.server}) via ${mt5Api} (${new Date(FETCH_START_MS).toISOString()} → ${new Date(fetchEndMs).toISOString()}) ...`
-    );
-    m30All = await fetchMt5ApiM30Bars(mt5Api, symbol, FETCH_START_MS, fetchEndMs);
-    if (m30All.length < WARMUP + 100) {
-      throw new Error(
-        `Too few M30 bars from MT5 API (${m30All.length}). Open XAUUSD chart in MT5 and scroll/load more history.`
-      );
-    }
-    const resolved = mt5Broker.server ? ` · server ${mt5Broker.server}` : '';
-    dataNote = `Exness/broker MT5 terminal${resolved} — ${symbol} M30 (${m30All.length} bars)`;
   } else {
     const fetchEndMs = RANGE_END_MS + 24 * 3600 * 1000;
     const p1 = Math.floor(FETCH_START_MS / 1000);
     const p2 = Math.floor(fetchEndMs / 1000);
     if (!allowYahooFallbackFromArgs()) {
       throw new Error(
-        'No data source. Use --binance (Binance XAUUSDT), start MT5 + start-api.ps1, pass --mt5-api=… / --mt5-csv=…. Yahoo only with --yahoo-fallback.'
+        'No data source. Use --binance-api (Binance XAUUSDT), pass --mt5-csv for historical CSV, or --yahoo-fallback.'
       );
     }
-    console.error(
-      'No MT5/IC CSV or MT5 API; using Yahoo GC=F 1h (--yahoo-fallback).'
-    );
+    console.error('No CSV or Binance API; using Yahoo GC=F 1h (--yahoo-fallback).');
     console.error(
       `Fetching ${YAHOO_GOLD} 1h from ${new Date(FETCH_START_MS).toISOString()} to ${new Date(fetchEndMs).toISOString()} (upsampling to M30) ...`
     );

@@ -26,8 +26,8 @@ async function main() {
   const tick = await get(`/api/tick/${SYMBOL}`);
   console.log(`tick bid=${tick.bid} ask=${tick.ask}`);
 
-  const bars = await get(`/api/bars/${SYMBOL}?count=20`) as { bars?: unknown[] };
-  if (!bars.bars?.length) throw new Error('no bars');
+  const bars = await get(`/api/bars/${SYMBOL}?count=220`) as { bars?: unknown[] };
+  if (!bars.bars?.length || bars.bars.length < 50) throw new Error(`insufficient bars (${bars.bars?.length ?? 0})`);
   console.log(`bars ${bars.bars.length} M30`);
 
   const status = await get('/api/status');
