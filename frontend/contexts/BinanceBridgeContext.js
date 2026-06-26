@@ -60,32 +60,32 @@ export function BinanceBridgeProvider({ children }) {
           [STORAGE_BINANCE_URL_REV, BINANCE_URL_REV],
         ]);
 
-
-        const session = await fetchBinanceSession(resolved, 10000);
+        const session = await fetchBinanceSession(resolved, 5000, 0);
         if (session.ok) {
           if (!cancelled) {
             setConnected(true);
             await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '1');
           }
+          if (!cancelled) setHydrated(true);
           return;
         }
 
+        if (!cancelled) setHydrated(true);
+
         const hadSession = conn === '1';
         const shouldRestore = hadSession || getBrokerMode() === 'paper';
-        if (shouldRestore) {
-          const restored = await tryBinanceSessionConnect(resolved, 20000);
-          if (cancelled) return;
-          if (restored.ok) {
-            setBaseUrlState(restored.url);
-            await AsyncStorage.multiSet([
-              [STORAGE_BINANCE_BASE, restored.url],
-              [STORAGE_BINANCE_URL_REV, BINANCE_URL_REV],
-              [STORAGE_BINANCE_CONNECTED, '1'],
-            ]);
-            setConnected(true);
-          } else if (hadSession) {
-            await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '0');
-          }
+        if (!shouldRestore || cancelled) return;
+
+        const restored = await tryBinanceSessionConnect(resolved, 12000);
+        if (cancelled) return;
+        if (restored.ok) {
+          setBaseUrlState(restored.url);
+          await AsyncStorage.multiSet([
+            [STORAGE_BINANCE_BASE, restored.url],
+            [STORAGE_BINANCE_URL_REV, BINANCE_URL_REV],
+            [STORAGE_BINANCE_CONNECTED, '1'],
+          ]);
+          setConnected(true);
         }
       } catch {
         /* ignore */
@@ -117,17 +117,22 @@ export function BinanceBridgeProvider({ children }) {
     let cancelled = false;
     let failStreak = 0;
     const tick = async () => {
-      const session = await fetchBinanceSession(baseUrl, 8000, 1);
+      const session = await fetchBinanceSession(baseUrl, 8000, 0);
       if (cancelled) return;
       if (session.ok) {
         failStreak = 0;
         return;
       }
-      failStreak += 1;
-      if (failStreak >= 3) markConnected(false);
+      if (session.error && /unauthorized|bridge auth/i.test(session.error)) {
+        failStreak += 1;
+      } else {
+        /* transient network blip — do not count toward disconnect */
+        return;
+      }
+      if (failStreak >= 8) markConnected(false);
     };
-    const boot = setTimeout(tick, 30000);
-    const id = setInterval(tick, 60000);
+    const boot = setTimeout(tick, 120000);
+    const id = setInterval(tick, 120000);
     return () => {
       cancelled = true;
       clearTimeout(boot);

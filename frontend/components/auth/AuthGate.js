@@ -15,7 +15,7 @@ export default function AuthGate({ children }) {
       <View style={{ flex: 1, backgroundColor: C.appBg, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
         <ActivityIndicator size="large" color={C.goldL} />
         <Text style={{ color: C.dim, fontSize: 12, marginTop: 16, textAlign: 'center' }}>
-          First load can take 1–2 min after cache clear.{'\n'}Subsequent opens are much faster.
+          Loading…
         </Text>
       </View>
     );

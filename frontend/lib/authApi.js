@@ -55,6 +55,13 @@ export function friendlyAuthError(error, fallback = 'Something went wrong') {
   return error;
 }
 
+/** True when auth API failed due to network/timeout — session should be kept. */
+export function isAuthNetworkError(res) {
+  if (!res || res.ok) return false;
+  if (res.status === 0) return true;
+  return /network|timed out|abort|fetch|failed to fetch|econnrefused|cannot reach/i.test(res.error || '');
+}
+
 export async function apiRegister(payload) {
   return authFetch('/v1/auth/register', { method: 'POST', body: payload });
 }
@@ -95,8 +102,8 @@ export async function apiLogout(accessToken, refreshToken, allDevices = false) {
   });
 }
 
-export async function apiMe(accessToken) {
-  return authFetch('/v1/auth/me', { accessToken });
+export async function apiMe(accessToken, timeoutMs = 5000) {
+  return authFetch('/v1/auth/me', { accessToken, timeoutMs });
 }
 
 export async function apiUpdateProfile(accessToken, patch) {

@@ -8,6 +8,7 @@ import { Platform } from 'react-native';
 export const STORAGE_AUTH_ACCESS = '@bilshenz_v1/authAccessToken';
 export const STORAGE_AUTH_REFRESH = '@bilshenz_v1/authRefreshToken';
 export const STORAGE_AUTH_USER = '@bilshenz_v1/authUser';
+export const STORAGE_AUTH_LOGGED_IN = '@bilshenz_v1/authLoggedIn';
 export const STORAGE_AUTH_BIOMETRIC = '@bilshenz_v1/authBiometricEnabled';
 export const SECURE_REFRESH_KEY = 'bilshenz.auth.refreshToken';
 
@@ -20,16 +21,21 @@ export async function saveAuthSession({ accessToken, refreshToken, user, expires
     [STORAGE_AUTH_ACCESS, accessToken || ''],
     [STORAGE_AUTH_USER, JSON.stringify(user || null)],
     [STORAGE_AUTH_BIOMETRIC, await AsyncStorage.getItem(STORAGE_AUTH_BIOMETRIC).then((v) => v || '0')],
+    [STORAGE_AUTH_REFRESH, refreshToken || ''],
+    [STORAGE_AUTH_LOGGED_IN, accessToken && user ? '1' : '0'],
   ]);
   if (canUseSecureStore() && refreshToken) {
     await SecureStore.setItemAsync(SECURE_REFRESH_KEY, refreshToken);
-  } else {
-    await AsyncStorage.setItem(STORAGE_AUTH_REFRESH, refreshToken || '');
   }
 }
 
 export async function loadAuthSession() {
-  const pairs = await AsyncStorage.multiGet([STORAGE_AUTH_ACCESS, STORAGE_AUTH_USER, STORAGE_AUTH_REFRESH]);
+  const pairs = await AsyncStorage.multiGet([
+    STORAGE_AUTH_ACCESS,
+    STORAGE_AUTH_USER,
+    STORAGE_AUTH_REFRESH,
+    STORAGE_AUTH_LOGGED_IN,
+  ]);
   const m = Object.fromEntries(pairs);
   let refreshToken = '';
   if (canUseSecureStore()) {
@@ -50,11 +56,17 @@ export async function loadAuthSession() {
     accessToken: m[STORAGE_AUTH_ACCESS] || '',
     refreshToken,
     user,
+    loggedIn: m[STORAGE_AUTH_LOGGED_IN] === '1',
   };
 }
 
 export async function clearAuthSession() {
-  await AsyncStorage.multiRemove([STORAGE_AUTH_ACCESS, STORAGE_AUTH_REFRESH, STORAGE_AUTH_USER]);
+  await AsyncStorage.multiRemove([
+    STORAGE_AUTH_ACCESS,
+    STORAGE_AUTH_REFRESH,
+    STORAGE_AUTH_USER,
+    STORAGE_AUTH_LOGGED_IN,
+  ]);
   if (canUseSecureStore()) {
     try {
       await SecureStore.deleteItemAsync(SECURE_REFRESH_KEY);

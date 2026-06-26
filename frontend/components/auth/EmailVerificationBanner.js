@@ -8,7 +8,8 @@ import { createAuthStyles } from '../../theme/authStyles';
 import { elevation, motion, radius } from '../../theme/designTokens';
 
 const DISMISS_KEY = '@bilshenz_v1/emailVerifyToastDismissed';
-const VISIBLE_MS = 5500;
+const VISIBLE_MS = 3000;
+const SUCCESS_VISIBLE_MS = 3000;
 
 /** Brief home-tab toast when account email is not verified yet. */
 export default function EmailVerificationBanner({ active = false, onOpenProfile }) {
@@ -28,10 +29,6 @@ export default function EmailVerificationBanner({ active = false, onOpenProfile 
 
   const shouldShow = Boolean(active && user && !user.emailVerified && !sessionDismissed);
 
-  const persistDismiss = useCallback(async () => {
-    if (user?.id) await AsyncStorage.setItem(`${DISMISS_KEY}:${user.id}`, '1');
-  }, [user?.id]);
-
   const animateOut = useCallback(
     (onDone) => {
       Animated.parallel([
@@ -48,13 +45,10 @@ export default function EmailVerificationBanner({ active = false, onOpenProfile 
     [opacity, translateY],
   );
 
-  const dismiss = useCallback(() => {
+  const autoHide = useCallback(() => {
     if (hideTimer.current) clearTimeout(hideTimer.current);
-    animateOut(() => {
-      setSessionDismissed(true);
-      void persistDismiss();
-    });
-  }, [animateOut, persistDismiss]);
+    animateOut(() => setSessionDismissed(true));
+  }, [animateOut]);
 
   const animateIn = useCallback(() => {
     setMounted(true);
@@ -99,12 +93,12 @@ export default function EmailVerificationBanner({ active = false, onOpenProfile 
     }
     animateIn();
     hideTimer.current = setTimeout(() => {
-      if (!expanded) dismiss();
+      if (!expanded) autoHide();
     }, VISIBLE_MS);
     return () => {
       if (hideTimer.current) clearTimeout(hideTimer.current);
     };
-  }, [shouldShow, active, animateIn, animateOut, dismiss, expanded]);
+  }, [shouldShow, active, animateIn, animateOut, autoHide, expanded]);
 
   const onVerify = async () => {
     setErr('');
@@ -114,7 +108,7 @@ export default function EmailVerificationBanner({ active = false, onOpenProfile 
     else {
       setMsg('Email verified — you are fully activated.');
       if (hideTimer.current) clearTimeout(hideTimer.current);
-      verifyDismissTimer.current = setTimeout(() => dismiss(), 1200);
+      verifyDismissTimer.current = setTimeout(() => autoHide(), SUCCESS_VISIBLE_MS);
     }
   };
 
@@ -157,21 +151,8 @@ export default function EmailVerificationBanner({ active = false, onOpenProfile 
             </Text>
             <Text style={{ color: C.dim, fontSize: 10, marginTop: 4 }}>{user.email}</Text>
             <Text style={{ color: C.dim2, fontSize: 10, marginTop: 4 }}>
-              {expanded ? 'Enter token below' : 'Tap to verify · auto-hides shortly'}
+              {expanded ? 'Enter token below' : 'Closes in 3 seconds · tap to verify now'}
             </Text>
-          </Pressable>
-          <Pressable
-            onPress={dismiss}
-            hitSlop={10}
-            style={{
-              width: 24,
-              height: 24,
-              borderRadius: 12,
-              alignItems: 'center',
-              justifyContent: 'center',
-              backgroundColor: 'rgba(255,255,255,0.06)',
-            }}>
-            <Text style={{ color: C.dim, fontSize: 12, fontWeight: '700' }}>×</Text>
           </Pressable>
         </View>
 

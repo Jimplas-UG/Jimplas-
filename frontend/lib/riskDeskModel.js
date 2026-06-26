@@ -150,8 +150,10 @@ export function evaluateRiskDeskGate(config, metrics, positions) {
   if (config.autoStopDrawdown && metrics.drawdownPct >= config.maxDrawdownPct) {
     return { ok: false, reason: 'RISK_DRAWDOWN_LIMIT' };
   }
-  const posCount = metrics.positionCount ?? (positions?.length ?? 0);
-  if (posCount >= config.maxOpenPositions) {
+  const posRows = Array.isArray(positions) ? positions : [];
+  const distinctSymbols = new Set(posRows.map((p) => String(p.symbol || '').toUpperCase()).filter(Boolean));
+  // Binance one-way mode merges adds into one row per symbol — gate on distinct symbols, not row count.
+  if (distinctSymbols.size >= config.maxOpenPositions) {
     return { ok: false, reason: 'RISK_MAX_OPEN_POSITIONS' };
   }
   if (metrics.assetExposurePct > config.maxExposurePerAssetPct) {
@@ -164,7 +166,7 @@ export function evaluateRiskDeskGate(config, metrics, positions) {
   if (lev > config.defaultLeverage) {
     return { ok: false, reason: 'RISK_LEVERAGE_CAP' };
   }
-  if (metrics.availableTradingCapital <= 0) {
+  if (metrics.availableTradingCapital <= 0 && metrics.freeMargin <= 0) {
     return { ok: false, reason: 'RISK_NO_AVAILABLE_CAPITAL' };
   }
   return { ok: true };

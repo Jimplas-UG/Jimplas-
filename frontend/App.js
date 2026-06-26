@@ -3006,6 +3006,27 @@ function AppContent({ onEngineReady }) {
     pollTicks: runMode === 'live',
   });
 
+  const [deskUnlocked, setDeskUnlocked] = useState(() => mockApi);
+
+  useEffect(() => {
+    if (mockApi || deskUnlocked) return;
+    if (!brokerFeedEnabled) {
+      setDeskUnlocked(true);
+      return;
+    }
+    const hasBars = (brokerFeed.marketBundle?.m30?.length ?? 0) >= 16;
+    if (brokerFeed.feedReady || hasBars || brokerFeed.feedError) {
+      setDeskUnlocked(true);
+    }
+  }, [
+    mockApi,
+    deskUnlocked,
+    brokerFeedEnabled,
+    brokerFeed.feedReady,
+    brokerFeed.marketBundle,
+    brokerFeed.feedError,
+  ]);
+
   const useLiveQuotes =
     !mockApi && runMode === 'live' && (useBrokerSession || brokerFeed.feedReady);
   const brokerBarsReady = brokerFeed.feedReady;
@@ -3304,7 +3325,6 @@ function AppContent({ onEngineReady }) {
           setLastBrokerMsg(`Auto: skipped (${gate.reason})`);
           const { logForwardMissed } = await import('./utils/forwardDemoLog');
           void logForwardMissed({ reason: gate.reason, barTimeMs: bar.t });
-          autoHookDoneBarRef.current = bar.t;
           return;
         }
 
@@ -3367,6 +3387,9 @@ function AppContent({ onEngineReady }) {
     bilshenzEngine.bundle?.m30?.length
       ? bilshenzEngine.bundle.m30[bilshenzEngine.bundle.m30.length - 1].t
       : null,
+    brokerFeed.positions?.length,
+    bzSnapshot.trade?.allowed,
+    riskDesk.config.maxOpenPositions,
     bzSnapshot.signals?.anyBuy,
     bzSnapshot.signals?.anySell,
     bzSnapshot.trade,
@@ -3774,10 +3797,15 @@ function AppContent({ onEngineReady }) {
   ]);
 
   const brokerBarsOk =
-    mockApi || !useBrokerForEngine || brokerFeed.feedReady || !!brokerFeed.feedError;
-  const engineOk = bundleReady || (brokerFeed.marketBundle?.m30?.length ?? 0) >= 32;
+    mockApi ||
+    !useBrokerForEngine ||
+    deskUnlocked ||
+    brokerFeed.feedReady ||
+    !!brokerFeed.feedError;
+  const engineOk =
+    deskUnlocked || bundleReady || (brokerFeed.marketBundle?.m30?.length ?? 0) >= 16;
 
-  if (!brokerBarsOk || !engineOk) {
+  if (!deskUnlocked && (!brokerBarsOk || !engineOk)) {
     return (
       <View style={[styles.safeRoot, { alignItems: 'center', justifyContent: 'center', padding: 24 }]}>
         {mockApi ? (

@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, Text, TextInput, View } from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Pressable, Text, TextInput, View } from 'react-native';
 import { useAuth } from '../../contexts/AuthContext';
 import { useBilshenzTheme } from '../../contexts/ThemeContext';
 import { createAuthStyles } from '../../theme/authStyles';
@@ -19,6 +19,13 @@ export default function RegisterScreen({ onLogin }) {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [terms, setTerms] = useState(false);
   const [localErr, setLocalErr] = useState('');
+  const [notice, setNotice] = useState('');
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    const t = setTimeout(() => setNotice(''), 3000);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   const showErr = localErr || error;
 
@@ -38,9 +45,9 @@ export default function RegisterScreen({ onLogin }) {
       return;
     }
     if (res.dev?.devLink) {
-      Alert.alert('Dev verification', res.dev.devLink);
+      setNotice(`Dev verification link: ${res.dev.devLink}`);
     } else {
-      Alert.alert('Verify email', 'Check your inbox for a verification link to activate your account.');
+      setNotice('Check your inbox for a verification link to activate your account.');
     }
   };
 
@@ -104,6 +111,12 @@ export default function RegisterScreen({ onLogin }) {
         {showErr ? (
           <View style={st.errorBox}>
             <Text style={st.errorTxt}>{showErr}</Text>
+          </View>
+        ) : null}
+
+        {notice ? (
+          <View style={[st.errorBox, { borderColor: 'rgba(255,179,0,0.35)', backgroundColor: 'rgba(255,179,0,0.08)' }]}>
+            <Text style={[st.errorTxt, { color: C.amber }]}>{notice}</Text>
           </View>
         ) : null}
 

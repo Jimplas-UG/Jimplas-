@@ -13,6 +13,7 @@ import {
   apiVerifyOtp,
   extractAuthPayload,
   friendlyAuthError,
+  isAuthNetworkError,
 } from '../lib/authApi';
 import {
   clearAuthSession,
@@ -46,6 +47,7 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [accessToken, setAccessToken] = useState('');
   const [refreshToken, setRefreshToken] = useState('');
+  const [sessionPinned, setSessionPinned] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -58,6 +60,7 @@ export function AuthProvider({ children }) {
     setUser(payload.user);
     setAccessToken(payload.accessToken);
     setRefreshToken(payload.refreshToken);
+    setSessionPinned(true);
     setError('');
     await saveAuthSession({
       accessToken: payload.accessToken,
@@ -80,6 +83,7 @@ export function AuthProvider({ children }) {
     setUser(null);
     setAccessToken('');
     setRefreshToken('');
+    setSessionPinned(false);
     setError('');
     await clearAuthSession();
   }, [accessToken, refreshToken]);
@@ -93,6 +97,23 @@ export function AuthProvider({ children }) {
     await applySession(payload);
     return true;
   }, [applySession, refreshToken]);
+
+  const tryRefreshToken = useCallback(
+    async (token = refreshToken, timeoutMs = 20000) => {
+      if (!token) return { ok: false, status: 0, network: true };
+      const res = await apiRefresh(token, timeoutMs);
+      if (res.ok) {
+        const payload = extractAuthPayload(res.data);
+        if (payload) {
+          await applySession(payload);
+          return { ok: true, status: res.status, network: false };
+        }
+        return { ok: false, status: res.status, network: false };
+      }
+      return { ok: false, status: res.status, network: isAuthNetworkError(res) };
+    },
+    [applySession, refreshToken],
+  );
 
   const scheduleRefresh = useCallback(
     (expiresInSec = 14 * 60) => {
@@ -288,74 +309,90 @@ export function AuthProvider({ children }) {
 
   const refreshProfile = useCallback(async () => {
     if (!accessToken) return;
-    const res = await apiMe(accessToken);
+    const res = await apiMe(accessToken, 5000);
     if (res.ok && res.data?.user) {
       setUser(res.data.user);
       await saveAuthSession({ accessToken, refreshToken, user: res.data.user });
-    } else if (res.status === 401) {
-      const ok = await refreshAccess();
-      if (!ok) await clearSession(false);
+      return;
     }
-  }, [accessToken, clearSession, refreshAccess, refreshToken]);
+    if (res.status === 401 && refreshToken) {
+      await tryRefreshToken(refreshToken, 5000);
+    }
+  }, [accessToken, refreshToken, tryRefreshToken]);
 
   useEffect(() => {
     let cancelled = false;
-    const BOOT_SPINNER_MS = 3500;
-    const BOOT_REFRESH_MS = 6000;
-    const spinnerCap = setTimeout(() => {
-      if (!cancelled) setHydrated(true);
-    }, BOOT_SPINNER_MS);
 
-    (async () => {
+    const hydrateLocal = async () => {
       try {
-        const { hw, enrolled } = await probeBiometricHardware();
-        if (!cancelled) setBiometricAvailable(hw && enrolled);
-        const bioOn = await isBiometricEnabled();
-        if (!cancelled) setBiometricEnabled(bioOn);
-
-        const stored = await loadAuthSession();
-        if (stored.refreshToken) {
-          const ok = await refreshAccess(stored.refreshToken, BOOT_REFRESH_MS);
-          if (!ok && bioOn && hw && enrolled) {
-            /* wait for explicit biometric tap */
-          } else if (!ok) {
-            await clearAuthSession();
-          } else {
-            scheduleRefresh();
-          }
-        } else if (stored.accessToken && stored.user) {
-          setAccessToken(stored.accessToken);
+        const [{ hw, enrolled }, bioOn, stored] = await Promise.all([
+          probeBiometricHardware(),
+          isBiometricEnabled(),
+          loadAuthSession(),
+        ]);
+        if (cancelled) return;
+        setBiometricAvailable(hw && enrolled);
+        setBiometricEnabled(bioOn);
+        if (stored.refreshToken) setRefreshToken(stored.refreshToken);
+        if (stored.user) {
           setUser(stored.user);
-          const me = await apiMe(stored.accessToken);
-          if (me.ok) setUser(me.data.user);
-          else await clearAuthSession();
+          if (stored.accessToken) setAccessToken(stored.accessToken);
+          if (stored.loggedIn || stored.accessToken || stored.refreshToken) {
+            setSessionPinned(true);
+          }
         }
       } catch {
         /* ignore */
       } finally {
-        clearTimeout(spinnerCap);
         if (!cancelled) setHydrated(true);
       }
-    })();
+    };
+
+    const restoreRemote = async () => {
+      try {
+        const stored = await loadAuthSession();
+        if (cancelled) return;
+
+        if (stored.refreshToken) {
+          const refreshed = await tryRefreshToken(stored.refreshToken, 12000);
+          if (!cancelled && refreshed.ok) scheduleRefresh();
+          return;
+        }
+
+        if (stored.accessToken && stored.user) {
+          const me = await apiMe(stored.accessToken, 5000);
+          if (!cancelled && me.ok) setUser(me.data.user);
+        }
+      } catch {
+        /* keep pinned local session */
+      }
+    };
+
+    void hydrateLocal();
+    void restoreRemote();
+
     return () => {
       cancelled = true;
-      clearTimeout(spinnerCap);
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
     };
-  }, [refreshAccess, scheduleRefresh]);
+  }, [tryRefreshToken, scheduleRefresh]);
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active' && accessToken) void refreshProfile();
+      if (state === 'active' && sessionPinned && refreshToken) {
+        void tryRefreshToken(refreshToken, 8000);
+      } else if (state === 'active' && accessToken) {
+        void refreshProfile();
+      }
     });
     return () => sub.remove();
-  }, [accessToken, refreshProfile]);
+  }, [accessToken, refreshProfile, refreshToken, sessionPinned, tryRefreshToken]);
 
   const value = useMemo(
     () => ({
       user,
       accessToken,
-      isAuthenticated: !!user && !!accessToken,
+      isAuthenticated: hydrated && sessionPinned && !!user,
       hydrated,
       busy,
       error,
@@ -378,6 +415,7 @@ export function AuthProvider({ children }) {
     [
       user,
       accessToken,
+      sessionPinned,
       hydrated,
       busy,
       error,
