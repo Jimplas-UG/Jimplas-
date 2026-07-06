@@ -3,19 +3,13 @@ import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
 import { useBrokerLiveFeed } from './useBrokerLiveFeed';
 import { useRiskDesk } from './useRiskDesk';
 import { postBinanceMarginMode } from '../broker/binanceFuturesApi';
-import {
-  enableScannerAutoExecOnConnect,
-  scannerExecAllowed,
-  syncScannerBridgeState,
-} from '../lib/scannerRiskSync';
+import { syncScannerBridgeState } from '../lib/scannerRiskSync';
 import { defaultSymbolForBroker } from '../lib/brokerMode';
 import { TRADING_SYMBOL } from '../lib/tradingSymbol';
 import { resolveAccountEquity } from '../utils/riskSizing';
 import { SIM_DESK_EQUITY } from '../security/deskConstants';
 
 const SCANNER_RISK_RESYNC_MS = 90000;
-const CONNECT_EXEC_BOOST_MS = 2500;
-const CONNECT_EXEC_BOOST_DURATION_MS = 20000;
 
 /**
  * Shared Binance session — live feed, risk desk metrics, margin mode handler.
@@ -51,40 +45,24 @@ export function useDeskSession() {
 
   const positions = useBrokerSession ? brokerFeed.positions : [];
 
-  const effectiveAutoExecute = useMemo(
-    () => scannerExecAllowed(riskDesk.config, riskDesk.metrics, positions, connected),
-    [riskDesk.config, riskDesk.metrics, positions, connected],
-  );
-
   const syncScannerRisk = useCallback(async () => {
-    if (!baseUrl?.trim() || !riskDesk.hydrated) return;
-    const execOn = scannerExecAllowed(riskDesk.config, riskDesk.metrics, positions, connected);
+    if (!baseUrl?.trim() || !riskDesk.hydrated || !connected) return;
     const syncKey = [
       baseUrl,
-      connected ? '1' : '0',
-      execOn ? '1' : '0',
       riskDesk.config.partitionUsd,
       riskDesk.config.shortPartitionPct,
       riskDesk.config.long1PartitionPct,
       riskDesk.config.long2PartitionPct,
-      riskDesk.config.emergencyStop ? '1' : '0',
-      riskDesk.config.pauseNewTrades ? '1' : '0',
-      Math.round(riskDesk.metrics.dailyLossPct * 10),
-      Math.round(riskDesk.metrics.drawdownPct * 10),
     ].join('|');
     if (syncKey === lastSyncKeyRef.current) return;
     lastSyncKeyRef.current = syncKey;
 
-    const r = await syncScannerBridgeState(
-      baseUrl,
-      { config: riskDesk.config, metrics: riskDesk.metrics, positions, connected },
-      { retries: connected ? 5 : 1, delayMs: 700 },
-    );
+    const r = await syncScannerBridgeState(baseUrl, { config: riskDesk.config }, { retries: 3, delayMs: 700 });
     if (!r.ok) {
       lastSyncKeyRef.current = '';
-      console.warn('[desk] scanner risk sync failed', r.exec?.error || r.risk?.error || r);
+      console.warn('[desk] scanner risk sync failed', r.risk?.error || r);
     }
-  }, [baseUrl, connected, positions, riskDesk.config, riskDesk.hydrated, riskDesk.metrics]);
+  }, [baseUrl, connected, riskDesk.config, riskDesk.hydrated]);
 
   const handleMarginModeChange = useCallback(
     async (mode) => {
@@ -106,32 +84,14 @@ export function useDeskSession() {
   );
 
   useEffect(() => {
-    if (!baseUrl?.trim() || !connected) return undefined;
-    lastSyncKeyRef.current = '';
-    void enableScannerAutoExecOnConnect(baseUrl);
-    return undefined;
-  }, [baseUrl, connected, sessionEpoch]);
-
-  useEffect(() => {
-    if (!baseUrl?.trim() || !connected || !riskDesk.hydrated) return undefined;
+    if (!baseUrl?.trim() || !riskDesk.hydrated || !connected) return undefined;
     lastSyncKeyRef.current = '';
     void syncScannerRisk();
-    const boostEnd = Date.now() + CONNECT_EXEC_BOOST_DURATION_MS;
-    const boostId = setInterval(() => {
-      if (Date.now() > boostEnd) {
-        clearInterval(boostId);
-        return;
-      }
-      lastSyncKeyRef.current = '';
-      void syncScannerRisk();
-    }, CONNECT_EXEC_BOOST_MS);
-    return () => clearInterval(boostId);
+    return undefined;
   }, [baseUrl, connected, sessionEpoch, riskDesk.hydrated, syncScannerRisk]);
 
   useEffect(() => {
     if (!baseUrl?.trim() || !riskDesk.hydrated || !connected) return undefined;
-    lastSyncKeyRef.current = '';
-    void syncScannerRisk();
     const id = setInterval(() => {
       lastSyncKeyRef.current = '';
       void syncScannerRisk();
@@ -142,16 +102,10 @@ export function useDeskSession() {
     connected,
     riskDesk.hydrated,
     syncScannerRisk,
-    riskDesk.config.emergencyStop,
-    riskDesk.config.pauseNewTrades,
     riskDesk.config.partitionUsd,
     riskDesk.config.shortPartitionPct,
     riskDesk.config.long1PartitionPct,
     riskDesk.config.long2PartitionPct,
-    riskDesk.metrics.dailyLossPct,
-    riskDesk.metrics.drawdownPct,
-    riskDesk.metrics.weeklyLossPct,
-    positions.length,
   ]);
 
   return {
@@ -164,6 +118,6 @@ export function useDeskSession() {
     lastBrokerMsg,
     setLastBrokerMsg,
     handleMarginModeChange,
-    effectiveAutoExecute,
   };
 }
+

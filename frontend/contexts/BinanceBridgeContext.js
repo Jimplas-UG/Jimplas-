@@ -2,7 +2,6 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getBinanceApiUrl } from '../lib/envConfig';
 import { fetchBinanceSession, pickReachableBinanceBridgeUrl, binanceFetch } from '../broker/binanceFuturesApi';
-import { enableScannerAutoExecOnConnect } from '../lib/scannerRiskSync';
 import { getDefaultBinanceBridgeUrl, resolveBridgeUrlForDevice } from '../utils/binanceApiUrl';
 import { isLocalhostApiUrl } from '../utils/bridgeLanUrl';
 import { getBrokerMode } from '../lib/brokerMode';
@@ -34,11 +33,22 @@ function resolveStoredUrl(storedUrl, urlRev) {
   return resolved;
 }
 
+function execFromBridgeSession(session) {
+  if (!session?.ok) {
+    return { canExecute: false, block: session?.exec_block || session?.error || null };
+  }
+  const block = session.exec_block || null;
+  const envHalt = block === 'SCANNER_EXEC=0' || block === 'FORWARD_DRY_RUN';
+  const canExecute = !envHalt && session.can_execute !== false;
+  return { canExecute, block };
+}
+
 export function BinanceBridgeProvider({ children }) {
   const [baseUrl, setBaseUrlState] = useState(() => canonicalBinanceUrl());
   const [connected, setConnected] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [sessionEpoch, setSessionEpoch] = useState(0);
+  const [sessionExec, setSessionExec] = useState({ canExecute: false, block: null });
 
   useEffect(() => {
     let cancelled = false;
@@ -74,6 +84,7 @@ export function BinanceBridgeProvider({ children }) {
           await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '0');
           return;
         }
+        setSessionExec(execFromBridgeSession(session));
         setConnected(true);
         setSessionEpoch((n) => n + 1);
         await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '1');
@@ -102,6 +113,7 @@ export function BinanceBridgeProvider({ children }) {
       ]);
       setConnected(true);
       setSessionEpoch((n) => n + 1);
+      if (restored.session) setSessionExec(execFromBridgeSession(restored.session));
     };
 
     (async () => {
@@ -140,17 +152,20 @@ export function BinanceBridgeProvider({ children }) {
     ]).catch(() => {});
   }, []);
 
-  const markConnected = useCallback((isConnected) => {
-    setConnected(!!isConnected);
-    if (isConnected) setSessionEpoch((n) => n + 1);
-    AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, isConnected ? '1' : '0').catch(() => {});
+  const applyBridgeSession = useCallback((session) => {
+    setSessionExec(execFromBridgeSession(session));
   }, []);
 
-  useEffect(() => {
-    if (!baseUrl?.trim() || !connected) return undefined;
-    void enableScannerAutoExecOnConnect(baseUrl, { retries: 3, delayMs: 400 });
-    return undefined;
-  }, [baseUrl, connected, sessionEpoch]);
+  const markConnected = useCallback((isConnected, session = null) => {
+    setConnected(!!isConnected);
+    if (isConnected) {
+      if (session) setSessionExec(execFromBridgeSession(session));
+      setSessionEpoch((n) => n + 1);
+    } else {
+      setSessionExec({ canExecute: false, block: null });
+    }
+    AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, isConnected ? '1' : '0').catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!hydrated || !connected || !baseUrl) return;
@@ -165,7 +180,10 @@ export function BinanceBridgeProvider({ children }) {
 
       const session = await fetchBinanceSession(baseUrl, 8000, 1);
       if (cancelled) return;
-      if (session.ok) return;
+      if (session.ok) {
+        setSessionExec(execFromBridgeSession(session));
+        return;
+      }
 
       if (isHardBinanceAuthFailure(session.error)) {
         markConnected(false);
@@ -176,8 +194,7 @@ export function BinanceBridgeProvider({ children }) {
       if (cancelled) return;
       if (restored.ok && restored.session) {
         if (restored.url && restored.url !== baseUrl) setBaseUrlState(restored.url);
-        markConnected(true);
-        setSessionEpoch((n) => n + 1);
+        markConnected(true, restored.session);
         return;
       }
       if (restored.hardFail) markConnected(false);
@@ -193,8 +210,17 @@ export function BinanceBridgeProvider({ children }) {
   }, [hydrated, connected, baseUrl, markConnected]);
 
   const value = useMemo(
-    () => ({ baseUrl, setBaseUrl, connected, setConnected: markConnected, hydrated, sessionEpoch }),
-    [baseUrl, setBaseUrl, connected, markConnected, hydrated, sessionEpoch],
+    () => ({
+      baseUrl,
+      setBaseUrl,
+      connected,
+      setConnected: markConnected,
+      applyBridgeSession,
+      sessionExec,
+      hydrated,
+      sessionEpoch,
+    }),
+    [baseUrl, setBaseUrl, connected, markConnected, applyBridgeSession, sessionExec, hydrated, sessionEpoch],
   );
 
   return <BinanceBridgeContext.Provider value={value}>{children}</BinanceBridgeContext.Provider>;

@@ -41,7 +41,7 @@ function loadEnvLocal() {
 loadEnvLocal();
 
 const raw = process.argv.slice(2);
-const forceLan = raw.includes('--lan');
+let forceLan = raw.includes('--lan');
 const forceUsb = raw.includes('--usb');
 const forceTunnelFlag = raw.includes('--tunnel');
 
@@ -62,10 +62,12 @@ let useTunnel =
   !forceLan &&
   (forceTunnelFlag || process.env.EXPO_FORCE_TUNNEL === '1' || process.env.EXPO_FORCE_TUNNEL === 'true');
 
+// Windows without USB: prefer LAN (tunnel/ngrok is often blocked and causes IOException on phone).
 if (!useTunnel && !forceLan && !forceUsb && process.platform === 'win32' && !hasAdbDevice) {
-  useTunnel = true;
-  console.log('[expo-go] No USB device — using TUNNEL mode (avoids Expo Go download fatal errors).');
-  console.log('[expo-go] Same Wi‑Fi LAN: npm run start:lan  |  USB: npm run start:usb');
+  forceLan = true;
+  console.log('[expo-go] No USB device — using LAN mode (same Wi‑Fi as this PC).');
+  console.log('[expo-go] If phone shows IOException: run START-EXPO-ADMIN.cmd as Administrator once.');
+  console.log('[expo-go] USB bypass: npm run start:usb  |  Tunnel: npm run start:tunnel');
   console.log('');
 }
 
@@ -76,11 +78,8 @@ const usbReverseOk =
   hasAdbDevice &&
   adbReverseTcp(metroPort);
 
-if (!useTunnel && !usbReverseOk && process.platform === 'win32' && !ensureMetroFirewall()) {
-  useTunnel = true;
-  console.log('[expo-go] LAN blocked by firewall — switching to TUNNEL so Expo Go can connect.');
-  console.log('[expo-go] For Wi‑Fi LAN later: Admin → npm run fix:metro-firewall → npm run start:lan');
-  console.log('');
+if (!useTunnel && !usbReverseOk && process.platform === 'win32' && forceLan) {
+  ensureMetroFirewall({ waitForUacMs: 0 });
 }
 
 function isLikelyVirtualInterface(name) {
@@ -137,38 +136,24 @@ function pickLanIp() {
 
 const portArgs = passThru.includes('--port') ? [] : ['--port', String(metroPort)];
 
-let expoArgs;
+const expoCli = path.join(__dirname, '..', 'node_modules', 'expo', 'bin', 'cli');
 
-if (useTunnel) {
-  expoArgs = ['expo', 'start', '--tunnel', '--go', ...portArgs, ...passThru];
-  console.log('');
-  console.log('[expo-go] Mode: TUNNEL — scan the QR / exp URL from THIS terminal in Expo Go 52.');
-  console.log('[expo-go] Requires outbound internet (ngrok). If tunnel fails, try USB + npm run start:usb.');
-  console.log('');
-} else if (usbReverseOk) {
-  expoArgs = ['expo', 'start', '--localhost', '--go', ...portArgs, ...passThru];
-  const adbPath = resolveAdbPath() || 'adb';
-  console.log('');
-  console.log('[expo-go] Mode: USB / adb reverse tcp:' + metroPort + ' → Metro on localhost');
-  console.log('[expo-go] adb:', adbPath);
-  console.log('[expo-go] In Expo Go, use the QR from THIS terminal (often exp://127.0.0.1:' + metroPort + ').');
-  console.log('');
-} else {
-  if (forceUsb) {
-    console.error('');
-    console.error('[expo-go] --usb failed: need adb in PATH + phone USB debugging + device listed as "device" in adb devices.');
-    console.error('');
-    process.exit(1);
-  }
+function buildLanExpoArgs() {
   const ip = pickLanIp();
   process.env.REACT_NATIVE_PACKAGER_HOSTNAME = ip;
   process.env.EXPO_PACKAGER_HOSTNAME = ip;
   process.env.EXPO_PACKAGER_PINNED = ip;
   applyPhoneApiUrls(process.env, ip);
-  expoArgs = ['expo', 'start', '--lan', '--go', ...portArgs, ...passThru];
+  return {
+    args: ['start', '--lan', '--go', ...portArgs, ...passThru],
+    ip,
+  };
+}
+
+function printLanInstructions(ip) {
   console.log('');
   console.log('[expo-go] Mode: LAN  REACT_NATIVE_PACKAGER_HOSTNAME=' + ip);
-  console.log('[expo-go] After Metro starts, open: exp://' + ip + ':' + metroPort);
+  console.log('[expo-go] In Expo Go 52, open: exp://' + ip + ':' + metroPort);
   try {
     spawnSync(process.execPath, [path.join(__dirname, 'make-expo-qr.js')], {
       stdio: 'inherit',
@@ -181,12 +166,38 @@ if (useTunnel) {
   console.log('[expo-go] Open frontend/expo-go-qr.html in your browser to scan.');
   if (process.platform === 'win32') {
     console.log('');
-    console.log('[expo-go] If Expo Go 52 shows "Failed to download remote update" on same Wi‑Fi:');
-    console.log('[expo-go]   A) Admin PowerShell in frontend: npm run fix:metro-firewall  (allows TCP ' + metroPort + ' inbound)');
-    console.log('[expo-go]   B) Plug USB + adb in PATH → npm run start:usb → open exp://127.0.0.1:' + metroPort + ' from this terminal');
-    console.log('[expo-go]   C) Works through most Wi‑Fi blocks: npm run start:tunnel  (uses ngrok via @expo/ngrok)');
-    console.log('[expo-go]   D) Some routers isolate clients (guest/AP isolation) → use USB or tunnel, not LAN.');
+    console.log('[expo-go] IOException on phone? Run START-EXPO-ADMIN.cmd as Administrator (opens firewall).');
+    console.log('[expo-go] Phone: same Wi‑Fi, mobile data OFF, Expo Go SDK 52.');
   }
+  console.log('');
+}
+
+let lanIpForRetry = null;
+let expoArgs;
+if (!useTunnel && !usbReverseOk) {
+  if (forceUsb) {
+    console.error('');
+    console.error('[expo-go] --usb failed: need adb + phone USB debugging + device in adb devices.');
+    console.error('');
+    process.exit(1);
+  }
+  const lan = buildLanExpoArgs();
+  lanIpForRetry = lan.ip;
+  expoArgs = ['expo', ...lan.args];
+  printLanInstructions(lan.ip);
+} else if (useTunnel) {
+  expoArgs = ['expo', 'start', '--tunnel', '--go', ...portArgs, ...passThru];
+  console.log('');
+  console.log('[expo-go] Mode: TUNNEL — scan the QR / exp URL from THIS terminal in Expo Go 52.');
+  console.log('[expo-go] Requires outbound internet (ngrok). If tunnel fails, LAN is retried automatically.');
+  console.log('');
+} else if (usbReverseOk) {
+  expoArgs = ['expo', 'start', '--localhost', '--go', ...portArgs, ...passThru];
+  const adbPath = resolveAdbPath() || 'adb';
+  console.log('');
+  console.log('[expo-go] Mode: USB / adb reverse tcp:' + metroPort + ' → Metro on localhost');
+  console.log('[expo-go] adb:', adbPath);
+  console.log('[expo-go] In Expo Go, use the QR from THIS terminal (often exp://127.0.0.1:' + metroPort + ').');
   console.log('');
 }
 
@@ -218,16 +229,48 @@ if (childEnv.CI === '1' || childEnv.CI === 'true') {
   childEnv.CI = 'false';
 }
 
-const expoCli = path.join(__dirname, '..', 'node_modules', 'expo', 'bin', 'cli');
 const cliArgs = expoArgs[0] === 'expo' ? expoArgs.slice(1) : expoArgs;
-const child = spawn(process.execPath, [expoCli, ...cliArgs], {
-  stdio: 'inherit',
-  shell: false,
-  env: childEnv,
-  cwd: path.join(__dirname, '..'),
-});
 
-child.on('exit', (code, signal) => {
-  if (signal) process.kill(process.pid, signal);
-  process.exit(code == null ? 1 : code);
-});
+function runExpo(args, env, { tunnelAttempt = false } = {}) {
+  const child = spawn(process.execPath, [expoCli, ...args], {
+    stdio: 'inherit',
+    shell: false,
+    env,
+    cwd: path.join(__dirname, '..'),
+  });
+
+  const warmScript = path.join(__dirname, 'warm-metro-bundle.js');
+  setTimeout(() => {
+    spawn(process.execPath, [warmScript, metroPort], {
+      stdio: 'inherit',
+      cwd: frontendRoot,
+      env,
+    });
+  }, 10000);
+
+  child.on('exit', (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    if (code === 0 || signal) {
+      process.exit(code == null ? 1 : code);
+      return;
+    }
+    if (tunnelAttempt && process.platform === 'win32') {
+      console.log('');
+      console.log('[expo-go] Tunnel failed — retrying with LAN…');
+      ensureMetroFirewall({ waitForUacMs: 20000 });
+      const lan = buildLanExpoArgs();
+      lanIpForRetry = lan.ip;
+      env.REACT_NATIVE_PACKAGER_HOSTNAME = lan.ip;
+      env.EXPO_PACKAGER_HOSTNAME = lan.ip;
+      env.EXPO_PACKAGER_PINNED = lan.ip;
+      applyPhoneApiUrls(env, lan.ip);
+      delete env.EXPO_FORCE_TUNNEL;
+      printLanInstructions(lan.ip);
+      runExpo(lan.args, env, { tunnelAttempt: false });
+      return;
+    }
+    process.exit(code == null ? 1 : code);
+  });
+}
+
+runExpo(cliArgs, childEnv, { tunnelAttempt: useTunnel });

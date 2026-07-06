@@ -86,7 +86,9 @@ credentials.json
 secrets.json
 **/safety-state.json
 
-# VPS runtime logs and state (outside repo, listed for safety)
+# Runtime logs (local dev)
+logs/
+binance_trading_system/python/logs/
 # C:\logs\tradingbot\
 
 # Forward-demo runtime artifacts (regenerated on VPS)

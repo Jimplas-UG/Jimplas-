@@ -1,6 +1,5 @@
 #!/bin/bash
-# Bilshenz production install on Ubuntu 22.04+ (DigitalOcean)
-# MT5 terminal MUST run on Windows — set MT5_API_URL to that host in .env
+# Bilshenz production install — Ubuntu 24.04 LTS (DigitalOcean 1 vCPU / 2 GB)
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/bilshenz}"
@@ -9,7 +8,7 @@ BRANCH="${BRANCH:-main}"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq git curl ca-certificates ufw
+apt-get install -y -qq git curl ca-certificates ufw python3 python3-venv python3-pip
 
 # Node 20 LTS
 if ! command -v node &>/dev/null || [[ "$(node -v)" != v20* ]]; then
@@ -17,7 +16,7 @@ if ! command -v node &>/dev/null || [[ "$(node -v)" != v20* ]]; then
   apt-get install -y -qq nodejs
 fi
 
-mkdir -p "$APP_DIR"
+mkdir -p "$APP_DIR" /var/log/bilshenz
 if [[ ! -d "$APP_DIR/.git" ]]; then
   git clone --depth 1 -b "$BRANCH" "$REPO" "$APP_DIR"
 else
@@ -27,34 +26,33 @@ fi
 cd "$APP_DIR/backend"
 npm ci 2>/dev/null || npm install
 
-mkdir -p /var/log/bilshenz
+cd "$APP_DIR/binance_trading_system/python"
+python3 -m venv .venv
+.venv/bin/pip install -q -U pip
+.venv/bin/pip install -q -r requirements.txt
+
 mkdir -p "$APP_DIR/backend/validation/data"
 
 if [[ ! -f /etc/bilshenz.env ]]; then
-  cp "$APP_DIR/deploy/bilshenz.env.example" /etc/bilshenz.env
+  cp "$APP_DIR/.env.example" /etc/bilshenz.env
   chmod 600 /etc/bilshenz.env
-  echo "EDIT /etc/bilshenz.env — set DESK_API_KEY and MT5_API_URL (Windows host)"
+  echo "EDIT /etc/bilshenz.env — set BINANCE_API_KEY, BINANCE_API_SECRET, BRIDGE_TOKEN, DESK_API_KEY"
 fi
 
-npm run strategy:freeze || true
+npm run strategy:freeze --prefix "$APP_DIR/backend" || true
 
-DEPLOY_SRC="/tmp/bilshenz-deploy"
-if [[ -d "$DEPLOY_SRC" ]]; then
-  mkdir -p "$APP_DIR/deploy"
-  cp -f "$DEPLOY_SRC"/*.service /etc/systemd/system/ 2>/dev/null || true
-  cp -f "$DEPLOY_SRC/watchdog.ts" "$APP_DIR/deploy/" 2>/dev/null || true
-  cp -f "$DEPLOY_SRC/bilshenz.env.example" "$APP_DIR/deploy/" 2>/dev/null || true
-fi
-if [[ -d "$APP_DIR/deploy/systemd" ]]; then
-  cp -f "$APP_DIR/deploy/systemd/"*.service /etc/systemd/system/
-fi
+cp -f "$APP_DIR/deploy/systemd/"*.service /etc/systemd/system/
+cp -f "$APP_DIR/deploy/logrotate/tradingbot" /etc/logrotate.d/bilshenz 2>/dev/null || true
 systemctl daemon-reload
-systemctl enable bilshenz-desk-api bilshenz-forward-bot bilshenz-watchdog
+systemctl enable bilshenz-binance-api bilshenz-desk-api bilshenz-forward-bot bilshenz-watchdog 2>/dev/null || \
+  systemctl enable bilshenz-binance-api bilshenz-desk-api
 
 ufw allow OpenSSH
+ufw allow 8766/tcp comment 'bilshenz-binance-api'
 ufw allow 8791/tcp comment 'bilshenz-desk-api'
 ufw --force enable || true
 
-systemctl restart bilshenz-desk-api bilshenz-forward-bot bilshenz-watchdog
+systemctl restart bilshenz-binance-api bilshenz-desk-api 2>/dev/null || true
 
-echo "Install done. Check: systemctl status bilshenz-desk-api"
+echo "Install done. Edit /etc/bilshenz.env then: systemctl restart bilshenz-binance-api"
+echo "Health: curl -s http://127.0.0.1:8766/health | head"

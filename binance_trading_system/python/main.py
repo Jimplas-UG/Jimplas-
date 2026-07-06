@@ -26,11 +26,15 @@ from position_manager import PositionManager
 from tick_stream import BinanceTickStream
 from momentum_scanner import MomentumScanner
 from scanner_stream import BinanceScannerStream
+from app_config import ensure_valid_or_exit, load_settings
+from logging_setup import setup_logging
 
-logging.basicConfig(level=logging.INFO)
+_settings = load_settings()
+setup_logging(_settings.log_dir, os.environ.get("LOG_LEVEL", "INFO"))
 log = logging.getLogger("binance_api")
+log.info("Bilshenz env=%s paper=%s testnet=%s", _settings.env, _settings.paper, _settings.testnet)
 
-BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN", "").strip()
+BRIDGE_TOKEN = _settings.bridge_token or os.environ.get("BRIDGE_TOKEN", "").strip()
 _PUBLIC_PATHS = frozenset({"/health", "/ping", "/docs", "/openapi.json"})
 # Unsigned Binance market data — safe without bridge token (home M30 feed).
 _PUBLIC_QUOTE_PREFIXES = ("/api/tick/", "/api/bars/", "/api/symbol/", "/api/scanner/")
@@ -101,6 +105,7 @@ tick_stream = BinanceTickStream(
 )
 
 _scanner_payload: dict = {}
+_app_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _on_scanner_snapshot(payload: dict | list) -> None:
@@ -115,6 +120,24 @@ def _on_scanner_snapshot(payload: dict | list) -> None:
         pass
 
 
+def _flush_scanner_snapshot() -> None:
+    """Push fresh exec/session state to REST cache + all scanner WS clients immediately."""
+    momentum_scanner.invalidate_session_cache()
+    payload = momentum_scanner.full_snapshot()
+    global _scanner_payload
+    _scanner_payload = payload
+    scanner_stream.set_snapshot(payload)
+    momentum_scanner._last_broadcast = time.time()
+    if _app_loop and _app_loop.is_running():
+        asyncio.run_coroutine_threadsafe(scanner_stream.broadcast_snapshot(payload), _app_loop)
+    else:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(scanner_stream.broadcast_snapshot(payload))
+        except RuntimeError:
+            pass
+
+
 momentum_scanner = MomentumScanner(
     connector=connector,
     get_testnet=lambda: connector.cfg.testnet,
@@ -125,11 +148,14 @@ scanner_stream = BinanceScannerStream(
     get_testnet=lambda: connector.cfg.testnet,
     on_tick=lambda sym, price, ts, pct_24h=None: momentum_scanner.on_tick(sym, price, ts, pct_24h),
     load_symbols=lambda: connector.list_usdt_perpetual_symbols(),
+    get_snapshot=lambda: momentum_scanner.full_snapshot(),
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _app_loop
+    _app_loop = asyncio.get_running_loop()
     await tick_stream.start()
 
     async def load_scanner_symbols() -> None:
@@ -151,8 +177,12 @@ async def lifespan(app: FastAPI):
     try:
         snap = connector.status_snapshot(skip_ping=False)
         if snap.get("connected"):
-            momentum_scanner.set_exec_enabled(True)
-            log.info("scanner exec enabled for active bridge session")
+            log.info("scanner ready for execution (Binance session active)")
+            _flush_scanner_snapshot()
+            # Recover position/order state after restart
+            pos = connector.positions()
+            orders = connector.open_orders()
+            log.info("startup recovery: %s open positions, %s open orders", len(pos), len(orders))
     except Exception as e:
         log.warning("scanner exec restore on startup skipped: %s", e)
     log.info("Binance tick WebSocket stream started")
@@ -276,11 +306,54 @@ def ping():
 
 @app.get("/health")
 def health():
+    import shutil
+
     mode = "paper" if connector.cfg.paper else ("testnet" if connector.cfg.testnet else "live")
+    st = connector.status_snapshot(skip_ping=True)
+    positions = []
+    try:
+        if st.get("connected"):
+            positions = connector.positions()
+    except Exception:
+        pass
+    disk = shutil.disk_usage("/")
+    mem: dict = {}
+    try:
+        import resource
+
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        mem = {"rss_mb": round(usage.ru_maxrss / 1024, 1)}
+    except Exception:
+        pass
+    try:
+        import psutil  # optional
+
+        vm = psutil.virtual_memory()
+        mem = {
+            "ram_used_mb": round(vm.used / 1024 / 1024),
+            "ram_total_mb": round(vm.total / 1024 / 1024),
+            "ram_pct": vm.percent,
+        }
+    except Exception:
+        pass
+    latency_ms = None
+    try:
+        t0 = time.perf_counter()
+        connector.ping()
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+    except Exception:
+        pass
     return {
         "ok": True,
         "service": "bilshenz-binance-bridge",
+        "env": _settings.env,
         "mode": mode,
+        "connected": bool(st.get("connected")),
+        "hedge_mode": connector.is_hedge_mode() if st.get("connected") else None,
+        "open_positions": len(positions),
+        "binance_latency_ms": latency_ms,
+        "disk_free_gb": round(disk.free / 1024**3, 2),
+        "memory": mem,
         "tick_stream": tick_stream.status(),
         "scanner_stream": scanner_stream.status(),
         "scanner": momentum_scanner.status(),
@@ -289,6 +362,7 @@ def health():
 
 @app.get("/api/scanner/snapshot")
 def api_scanner_snapshot():
+    momentum_scanner.invalidate_session_cache()
     payload = momentum_scanner.full_snapshot()
     return {"ok": True, **payload}
 
@@ -314,9 +388,16 @@ def api_scanner_close(body: ScannerCloseBody):
 
 
 @app.post("/api/scanner/exec")
-def api_scanner_exec(body: ScannerExecBody):
-    momentum_scanner.set_exec_enabled(body.enabled)
-    return {"ok": True, "exec_enabled": momentum_scanner.status().get("exec_enabled")}
+def api_scanner_exec(_body: ScannerExecBody | None = None):
+    """Execution arms automatically when Binance is linked. Halt via SCANNER_EXEC=0 or FORWARD_DRY_RUN=1."""
+    st = momentum_scanner.status()
+    return {
+        "ok": True,
+        "exec_enabled": st.get("exec_enabled"),
+        "can_execute": st.get("can_execute"),
+        "exec_block": st.get("exec_block"),
+        "env_controlled": True,
+    }
 
 
 @app.post("/api/scanner/risk")
@@ -354,6 +435,8 @@ def _attempt_binance_login(api_key: str, api_secret: str, testnet: bool) -> tupl
     try:
         acct = connector.account_info()
         connector._connected = acct is not None
+        if acct is not None:
+            momentum_scanner.invalidate_session_cache()
         return acct, None
     except Exception as e:
         connector._connected = False
@@ -382,15 +465,18 @@ def api_login(body: LoginBody):
             detail=_login_error_detail(err or "Binance login failed", resolved_testnet),
         )
 
-    momentum_scanner.set_exec_enabled(True)
     threading.Thread(target=connector.warm_order_cache, daemon=True).start()
+    _flush_scanner_snapshot()
+    st = momentum_scanner.status()
     return {
         "ok": True,
         "account": acct,
         "mode": "testnet" if resolved_testnet else "live",
         "testnet": resolved_testnet,
         "auto_detected": auto_detected,
-        "exec_enabled": True,
+        "exec_enabled": st.get("exec_enabled"),
+        "can_execute": st.get("can_execute"),
+        "exec_block": st.get("exec_block"),
     }
 
 
@@ -409,8 +495,16 @@ def api_attach():
             status_code=401,
             detail="Binance not configured — set BINANCE_API_KEY/SECRET or POST /api/login",
         )
-    momentum_scanner.set_exec_enabled(True)
-    return {"ok": True, "account": snap.get("account"), "mode": snap.get("mode", "env")}
+    st = momentum_scanner.status()
+    _flush_scanner_snapshot()
+    return {
+        "ok": True,
+        "account": snap.get("account"),
+        "mode": snap.get("mode", "env"),
+        "exec_enabled": st.get("exec_enabled"),
+        "can_execute": st.get("can_execute"),
+        "exec_block": st.get("exec_block"),
+    }
 
 
 @app.post("/api/logout")
@@ -418,13 +512,22 @@ def api_logout():
     prev_testnet = connector.cfg.testnet
     connector.cfg.paper = _truthy(os.environ.get("BINANCE_PAPER", "0"))
     connector.configure("", "", prev_testnet)
-    momentum_scanner.set_exec_enabled(False)
+    connector._connected = False
+    momentum_scanner.invalidate_session_cache()
+    _flush_scanner_snapshot()
     return {"ok": True}
 
 
 @app.get("/api/status")
 def api_status():
-    return connector.status_snapshot(skip_ping=connector._connected)
+    snap = connector.status_snapshot(skip_ping=connector._connected)
+    st = momentum_scanner.status()
+    return {
+        **snap,
+        "exec_enabled": st.get("exec_enabled"),
+        "can_execute": st.get("can_execute"),
+        "exec_block": st.get("exec_block"),
+    }
 
 
 @app.get("/api/symbol/{symbol}")
@@ -592,6 +695,5 @@ def api_logs(limit: int = 50):
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.environ.get("PORT", "8766"))
-    host = os.environ.get("HOST", "127.0.0.1")
-    uvicorn.run(app, host=host, port=port)
+    settings = ensure_valid_or_exit()
+    uvicorn.run(app, host=settings.host, port=settings.port)

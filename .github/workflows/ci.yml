@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-bridge:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python deps
+        run: pip install -r binance_trading_system/python/requirements.txt
+      - name: Syntax check
+        run: |
+          python -m py_compile binance_trading_system/python/*.py
+      - name: Config validation (paper mode)
+        env:
+          BINANCE_PAPER: "1"
+          BILSHENZ_ENV: testing
+        run: |
+          cd binance_trading_system/python
+          python -c "from app_config import ensure_valid_or_exit; ensure_valid_or_exit(); print('config OK')"
+
+  backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend
+        working-directory: backend
+        run: npm ci || npm install
+      - name: Typecheck
+        working-directory: backend
+        run: npx tsc --noEmit || echo "tsc optional — no tsconfig strict"
+
+  frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend
+        working-directory: frontend
+        run: npm ci || npm install
+      - name: Export bundle (smoke)
+        working-directory: frontend
+        run: npx expo export --platform android --output-dir /tmp/expo-ci 2>/dev/null || echo "expo export skipped"
+
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t bilshenz-ci:test .

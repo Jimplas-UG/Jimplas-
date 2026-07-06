@@ -15,7 +15,6 @@ import { PilotCard } from './pilot/PilotUI';
 import StaticHexLogo from './logo/StaticHexLogo';
 import ErrorState from './ui/ErrorState';
 import { TRADING_SYMBOL } from '../lib/tradingSymbol';
-import { postScannerExecEnable } from '../broker/binanceScannerApi';
 import {
   binanceFetch,
   fetchBinancePositions,
@@ -116,7 +115,15 @@ export default function BinanceBridgePanel() {
       const acct = session?.account;
       if (acct && typeof acct === 'object') {
         graceUntilRef.current = Date.now() + 300000;
-        setConnected(true);
+        const bridgeSession = {
+          ok: true,
+          account: acct,
+          mode: session.mode,
+          testnet: session.testnet,
+          can_execute: session.can_execute,
+          exec_block: session.exec_block,
+        };
+        setConnected(true, bridgeSession);
         setAccount(acct);
         setBridgeMode(session.mode ?? null);
         setErr('');
@@ -437,7 +444,6 @@ export default function BinanceBridgePanel() {
     try {
       if (baseUrl) {
         await binanceFetch(baseUrl, '/api/logout', { method: 'POST' }, 8000);
-        void postScannerExecEnable(baseUrl, false);
       }
     } catch {
       /* ignore */

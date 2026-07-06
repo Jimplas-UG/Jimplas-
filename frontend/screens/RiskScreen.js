@@ -5,8 +5,7 @@ import { useBilshenzTheme } from '../contexts/ThemeContext';
 
 export default function RiskScreen({ pad, desk, onOpenProfile }) {
   const { colors: C, styles } = useBilshenzTheme();
-  const { baseUrl, connected, brokerFeed, riskDesk, useBrokerSession, handleMarginModeChange, effectiveAutoExecute } =
-    desk;
+  const { baseUrl, connected, brokerFeed, riskDesk, useBrokerSession, handleMarginModeChange } = desk;
 
   return (
     <ScrollView
@@ -34,7 +33,6 @@ export default function RiskScreen({ pad, desk, onOpenProfile }) {
         onBrokerCloseMsg={(msg) => desk.setLastBrokerMsg(`Close: ${msg}`)}
         feedReady={brokerFeed.feedReady}
         feedError={brokerFeed.feedError}
-        autoExecute={effectiveAutoExecute}
         onOpenProfile={onOpenProfile}
       />
     </ScrollView>

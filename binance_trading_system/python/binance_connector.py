@@ -69,6 +69,7 @@ class BinanceConnector:
         self._connected = False
         self._time_offset_ms = 0
         self._time_synced_at = 0.0
+        self._hedge_mode: bool | None = None
         if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper:
             self.sync_server_time(force=True)
 
@@ -163,14 +164,22 @@ class BinanceConnector:
                     self.sync_server_time(force=True)
                     last_err = RuntimeError(msg)
                     continue
-                if e.code == 429 and attempt < 2:
+                if e.code == 429 and attempt < 4:
                     retry_after = 1.0
                     try:
                         retry_after = float(e.headers.get("Retry-After", "1"))
                     except (TypeError, ValueError):
                         pass
-                    time.sleep(min(max(retry_after, 0.5), 30.0))
+                    wait = min(max(retry_after, 0.5), 30.0)
+                    log.warning("Binance 429 rate limit — retry in %.1fs", wait)
+                    time.sleep(wait)
                     last_err = RuntimeError(detail.get("msg") or detail.get("detail") or body)
+                    continue
+                if e.code == 418 and attempt < 4:
+                    wait = min(60.0 * (attempt + 1), 300.0)
+                    log.error("Binance 418 IP ban — backing off %.0fs", wait)
+                    time.sleep(wait)
+                    last_err = RuntimeError("IP banned by Binance (418) — reduce request rate")
                     continue
                 raise RuntimeError(detail.get("msg") or detail.get("detail") or body) from e
             except urllib.error.URLError as e:
@@ -200,6 +209,8 @@ class BinanceConnector:
                 filters = {f["filterType"]: f for f in s.get("filters", [])}
                 lot = filters.get("LOT_SIZE", {})
                 price_f = filters.get("PRICE_FILTER", {})
+                min_notional_f = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL", {})
+                min_notional = float(min_notional_f.get("notional", min_notional_f.get("minNotional", "5")))
                 self._symbol_info = {
                     "symbol": sym,
                     "status": s.get("status"),
@@ -209,6 +220,7 @@ class BinanceConnector:
                     "stepSize": float(lot.get("stepSize", "0.001")),
                     "minQty": float(lot.get("minQty", "0.001")),
                     "maxQty": float(lot.get("maxQty", "1000")),
+                    "minNotional": min_notional,
                     "contractType": s.get("contractType"),
                 }
                 return self._symbol_info
@@ -239,6 +251,7 @@ class BinanceConnector:
             "step_size": info["stepSize"],
             "min_qty": info["minQty"],
             "max_qty": info["maxQty"],
+            "min_notional": info.get("minNotional", 5.0),
             "strategy_tick_size": pip,
             "pip_size": pip,
             "usd_per_tick_per_contract": None,
@@ -277,8 +290,45 @@ class BinanceConnector:
         self._ensure_margin_setup()
         try:
             self.exchange_info()
+            self.is_hedge_mode()
         except Exception as e:
             log.warning("warm_order_cache: %s", e)
+
+    def is_hedge_mode(self) -> bool:
+        """True when account uses dual-side (hedge) position mode."""
+        if self.cfg.paper:
+            return False
+        if self._hedge_mode is not None:
+            return self._hedge_mode
+        try:
+            data = self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
+            self._hedge_mode = bool(data.get("dualSidePosition"))
+        except RuntimeError as e:
+            log.warning("positionSide/dual: %s", e)
+            self._hedge_mode = False
+        return bool(self._hedge_mode)
+
+    def _position_side_param(self, side: str, *, reduce: bool = False) -> dict[str, str]:
+        """Hedge mode requires positionSide on orders; one-way mode omits it."""
+        if not self.is_hedge_mode():
+            return {}
+        side_u = side.upper()
+        if reduce:
+            # Closing LONG → SELL + LONG; closing SHORT → BUY + SHORT
+            pos = "LONG" if side_u == "SELL" else "SHORT"
+        else:
+            pos = "LONG" if side_u == "BUY" else "SHORT"
+        return {"positionSide": pos}
+
+    def _validate_order_qty(self, qty: float, price: float, info: dict[str, Any]) -> tuple[float, str | None]:
+        qty = round_to_step(qty, info["stepSize"])
+        if qty < info["minQty"]:
+            qty = info["minQty"]
+        notional = qty * price
+        min_n = float(info.get("minNotional", info.get("min_notional", 5.0)))
+        if notional < min_n:
+            return qty, f"notional {notional:.4f} below min {min_n} USDT"
+        return qty, None
 
     def symbol_margin_type(self, symbol: str | None = None) -> str:
         sym = (symbol or self.cfg.symbol).upper()
@@ -580,6 +630,7 @@ class BinanceConnector:
             "workingType": "MARK_PRICE",
             "newClientOrderId": client_id,
         }
+        params.update(self._position_side_param(side, reduce=True))
         return self._request("POST", "/fapi/v1/order", params, signed=True)
 
     def order_market(
@@ -619,8 +670,9 @@ class BinanceConnector:
         pip = self.cfg.pip_size
         spread_pips = spread_price / pip if pip > 0 else 0.0
         qty = round_to_step(volume, info["stepSize"])
-        if qty < info["minQty"]:
-            qty = info["minQty"]
+        qty, qty_err = self._validate_order_qty(qty, intended, info)
+        if qty_err:
+            return {"ok": False, "error": qty_err}
 
         safe, reason = self._liquidation_safe(side_u, intended, sl)
         if not safe:
@@ -641,6 +693,7 @@ class BinanceConnector:
             "quantity": qty,
             "newClientOrderId": cid,
         }
+        params.update(self._position_side_param(side_u))
         t0 = _time.perf_counter()
         try:
             entry_resp = self._request("POST", "/fapi/v1/order", params, signed=True)
@@ -750,6 +803,7 @@ class BinanceConnector:
                 "reduceOnly": "true",
                 "newClientOrderId": cid,
             }
+            params.update(self._position_side_param(pos_side, reduce=True))
             try:
                 resp = self._request("POST", "/fapi/v1/order", params, signed=True)
             except RuntimeError as e:
@@ -845,8 +899,9 @@ class BinanceConnector:
         intended = tick["ask"] if side_u == "BUY" else tick["bid"]
         info = self.symbol_spec(sym)
         qty = round_to_step(volume, info["stepSize"])
-        if qty < info["minQty"]:
-            qty = info["minQty"]
+        qty, qty_err = self._validate_order_qty(qty, intended, info)
+        if qty_err:
+            return {"ok": False, "error": qty_err}
 
         cid = f"{CLIENT_ID_PREFIX}_SC_{leg or magic}_{int(_time.time())}"[:36]
         params: dict[str, Any] = {
@@ -856,6 +911,7 @@ class BinanceConnector:
             "quantity": qty,
             "newClientOrderId": cid,
         }
+        params.update(self._position_side_param(side_u))
         t0 = _time.perf_counter()
         try:
             entry_resp = self._request("POST", "/fapi/v1/order", params, signed=True)

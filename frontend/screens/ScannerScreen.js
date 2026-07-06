@@ -7,9 +7,9 @@ import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { fetchBinanceSession } from '../broker/binanceFuturesApi';
 import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
 
-export default function ScannerScreen({ pad, scanner, onOpenProfile, connected: connectedProp, autoExecute }) {
+export default function ScannerScreen({ pad, scanner, onOpenProfile, connected: connectedProp }) {
   const { colors: C, styles } = useBilshenzTheme();
-  const { baseUrl, connected: bridgeConnected } = useBinanceBridge();
+  const { baseUrl, connected: bridgeConnected, sessionExec } = useBinanceBridge();
   const connected = connectedProp ?? bridgeConnected;
   const [account, setAccount] = useState(null);
 
@@ -44,9 +44,8 @@ export default function ScannerScreen({ pad, scanner, onOpenProfile, connected: 
         scannerReady={scanner.ready}
         scannerError={scanner.error}
         connected={connected}
-        execEnabled={autoExecute ?? scanner.scannerMeta?.exec_enabled !== false}
-        autoExecute={autoExecute}
-        execBlock={scanner.scannerMeta?.exec_block}
+        execReady={sessionExec.canExecute === true || scanner.scannerMeta?.can_execute === true}
+        execBlock={sessionExec.block || scanner.scannerMeta?.exec_block}
         lastExecError={scanner.scannerMeta?.last_exec_error}
         onPressConnect={onOpenProfile}
         style={{ marginBottom: 12 }}
@@ -58,7 +57,7 @@ export default function ScannerScreen({ pad, scanner, onOpenProfile, connected: 
         error={scanner.error}
         scannerMeta={scanner.scannerMeta}
         connected={connected}
-        autoExecute={autoExecute}
+        sessionExec={sessionExec}
       />
     </ScrollView>
   );

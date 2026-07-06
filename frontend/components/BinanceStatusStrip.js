@@ -16,7 +16,7 @@ function StatusChip({ label, ok, warn, accent, onPress }) {
 }
 
 /**
- * Compact desk status — tick scanner feed, bridge account, execution mode.
+ * Compact desk status — tick scanner feed, bridge account, execution readiness.
  */
 export default function BinanceStatusStrip({
   scannerReady,
@@ -24,8 +24,7 @@ export default function BinanceStatusStrip({
   feedReady,
   feedError,
   connected,
-  execEnabled,
-  autoExecute,
+  execReady,
   execBlock,
   lastExecError,
   onPressConnect,
@@ -34,18 +33,21 @@ export default function BinanceStatusStrip({
   const { colors: C } = useBilshenzTheme();
   const ready = scannerReady ?? feedReady;
   const err = scannerError ?? feedError;
-  const execOn = execEnabled ?? autoExecute;
   const blockHint = execBlock || (lastExecError ? String(lastExecError).slice(0, 48) : '');
+  const envHalt = blockHint === 'SCANNER_EXEC=0' || blockHint === 'FORWARD_DRY_RUN';
+  const armed = connected && execReady === true && !envHalt;
 
   const scannerOk = !!ready;
   const scannerWarn = !scannerOk && !err;
   const scannerLabel = scannerOk ? 'Scanner live' : err ? 'Scanner offline' : 'Connecting…';
   const acctLabel = connected ? 'Account linked' : 'Tap to connect';
-  let execLabel = connected ? (execOn ? 'Auto exec ON' : 'Exec OFF') : 'Exec —';
-  if (connected && execOn && blockHint) {
-    execLabel = 'Exec blocked';
-  } else if (connected && !execOn && blockHint && execBlock === 'exec_disabled') {
-    execLabel = 'Exec OFF';
+
+  let execLabel = 'Exec —';
+  if (connected) {
+    if (envHalt) execLabel = 'Halted (env)';
+    else if (armed) execLabel = 'Exec ready';
+    else if (execReady === false) execLabel = 'Not armed';
+    else execLabel = 'Arming…';
   }
 
   return (
@@ -61,9 +63,9 @@ export default function BinanceStatusStrip({
         />
         <StatusChip
           label={execLabel}
-          ok={connected && execOn && !blockHint}
-          accent={connected && execOn && !blockHint}
-          warn={connected && (!execOn || !!blockHint)}
+          ok={armed}
+          accent={armed}
+          warn={connected && !armed}
         />
       </View>
       {connected && blockHint ? (

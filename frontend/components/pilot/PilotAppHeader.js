@@ -28,9 +28,9 @@ export default function PilotAppHeader({ tab, execOn, connected }) {
       </View>
       <View style={{ alignItems: 'flex-end', gap: 6 }}>
         {execOn ? (
-          <PilotPill label="Auto exec ON" ok accent />
+          <PilotPill label="Exec armed" ok accent />
         ) : connected ? (
-          <PilotPill label="Manual" warn />
+          <PilotPill label="Env halt" warn />
         ) : (
           <PilotPill label="Offline" warn />
         )}

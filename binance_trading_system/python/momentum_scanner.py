@@ -21,6 +21,7 @@ SHORT_TP_PCT = float(os.environ.get("SCANNER_SHORT_TP_PCT", "2.5"))
 LONG1_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG1_PCT", "2.0"))
 LONG2_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG2_PCT", "4.0"))
 LONG_TP_PCT = float(os.environ.get("SCANNER_LONG_TP_PCT", "2.5"))
+LONG_BOTH_PULLBACK_PCT = float(os.environ.get("SCANNER_LONG_PULLBACK_PCT", "0.5"))
 SMART_EXIT_NET_PCT = float(os.environ.get("SCANNER_SMART_EXIT_PCT", "1.0"))
 SHORT_LEVERAGE = int(os.environ.get("SCANNER_SHORT_LEV", "5"))
 LONG1_LEVERAGE = int(os.environ.get("SCANNER_LONG1_LEV", "10"))
@@ -33,7 +34,7 @@ MAX_WATCHLIST = int(os.environ.get("SCANNER_MAX_WATCH", "80"))
 ONE_TRADE_AT_A_TIME = os.environ.get("SCANNER_ONE_TRADE", "1").strip().lower() not in ("0", "false", "off")
 PENDING_STALE_MS = int(os.environ.get("SCANNER_PENDING_STALE_MS", "120000"))
 PENDING_QUEUE_MS = int(os.environ.get("SCANNER_PENDING_QUEUE_MS", "1800000"))
-SIGNALS_PER_TF = int(os.environ.get("SCANNER_SIGNALS_PER_TF", "2"))
+SIGNALS_PER_TF = int(os.environ.get("SCANNER_SIGNALS_PER_TF", "5"))
 SIGNAL_WINDOW_SEC = {"3m": 180, "5m": 300, "15m": 900}
 TIMEFRAMES_MIN = (3, 5, 15)
 
@@ -48,6 +49,20 @@ STATUS_SHORT = "Short"
 STATUS_LONG1 = "Long 1"
 STATUS_LONG2 = "Long 2"
 STATUS_CLOSED = "Closed"
+
+
+def _env_truthy(name: str, default: str = "") -> bool:
+    v = os.environ.get(name, default).strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _exec_env_blocked() -> tuple[bool, str]:
+    """Server env kill-switches — only way to halt scanner orders (not the mobile app)."""
+    if os.environ.get("SCANNER_EXEC", "1").strip().lower() in ("0", "false", "off"):
+        return True, "SCANNER_EXEC=0"
+    if _env_truthy("FORWARD_DRY_RUN"):
+        return True, "FORWARD_DRY_RUN"
+    return False, ""
 
 
 @dataclass
@@ -84,6 +99,7 @@ class CoinStrategy:
     long1: LegPosition | None = None
     long2: LegPosition | None = None
     long1_was_closed: bool = False
+    recovery_peak_price: float | None = None
     unrealized_pnl: float = 0.0
     last_update_ms: int = 0
     _history: deque[PricePoint] = field(default_factory=lambda: deque(maxlen=2500))
@@ -109,7 +125,6 @@ class MomentumScanner:
         self._in_flight: set[str] = set()
         self._last_broadcast = 0.0
         self._enabled = os.environ.get("SCANNER_ENABLED", "1").strip().lower() not in ("0", "false", "off")
-        self._exec_enabled = os.environ.get("SCANNER_EXEC", "1").strip().lower() not in ("0", "false", "off")
         self._one_at_a_time = ONE_TRADE_AT_A_TIME
         self._trades_closed_today = 0
         self._trades_day_key = self._utc_day_key()
@@ -117,8 +132,9 @@ class MomentumScanner:
         self._short_pct = SHORT_PARTITION_PCT
         self._long1_pct = LONG1_PARTITION_PCT
         self._long2_pct = LONG2_PARTITION_PCT
-        self._recent_signals: deque[dict[str, Any]] = deque(maxlen=24)
+        self._recent_signals: deque[dict[str, Any]] = deque(maxlen=48)
         self._last_exec_error: str | None = None
+        self._session_ok_cache: tuple[float, tuple[bool, str]] | None = None
         self._tf_emit_times: dict[str, deque[float]] = {
             "3m": deque(maxlen=SIGNALS_PER_TF + 2),
             "5m": deque(maxlen=SIGNALS_PER_TF + 2),
@@ -126,21 +142,55 @@ class MomentumScanner:
         }
 
     def set_exec_enabled(self, enabled: bool) -> None:
-        self._exec_enabled = bool(enabled)
-        if self._exec_enabled:
-            self._last_exec_error = None
-        log.info("scanner exec_enabled=%s", self._exec_enabled)
+        """No-op — execution is armed on Binance connect; halt via SCANNER_EXEC or FORWARD_DRY_RUN env."""
+        can_exec, block = self._order_session_ok()
+        log.info(
+            "scanner set_exec_enabled(%s) ignored (env_controlled) can_execute=%s block=%s",
+            enabled,
+            can_exec,
+            block or "none",
+        )
 
-    def _order_session_ok(self) -> tuple[bool, str]:
-        if not self._exec_enabled:
-            return False, "exec_disabled"
+    def invalidate_session_cache(self) -> None:
+        self._session_ok_cache = None
+
+    def push_snapshot_now(self) -> None:
+        """Force immediate WS/REST snapshot — call right after Binance login so exec shows armed."""
+        self.invalidate_session_cache()
+        self._last_broadcast = 0.0
+        self._maybe_broadcast()
+
+    def _session_connected(self) -> tuple[bool, str]:
         if getattr(self._connector.cfg, "paper", False):
             return True, ""
         if not self._connector.cfg.api_key:
             return False, "api_key_missing"
-        if not getattr(self._connector, "_connected", False):
-            return False, "binance_not_logged_in"
-        return True, ""
+        if getattr(self._connector, "_connected", False):
+            return True, ""
+        # Keys configured but flag stale — one lightweight refresh (skip ping).
+        try:
+            snap = self._connector.status_snapshot(skip_ping=True)
+            if snap.get("connected"):
+                self._connector._connected = True
+                return True, ""
+            err = snap.get("error")
+            if err:
+                return False, str(err)[:120]
+        except Exception as e:
+            log.warning("session_connected status check: %s", e)
+        return False, "binance_not_logged_in"
+
+    def _order_session_ok(self) -> tuple[bool, str]:
+        now = time.time()
+        if self._session_ok_cache and now - self._session_ok_cache[0] < 0.05:
+            return self._session_ok_cache[1]
+        blocked, reason = _exec_env_blocked()
+        if blocked:
+            result = (False, reason)
+        else:
+            result = self._session_connected()
+        self._session_ok_cache = (now, result)
+        return result
 
     def set_risk_config(
         self,
@@ -193,6 +243,7 @@ class MomentumScanner:
         tf = coin.best_tf or "5m"
         if event == "watch" and not self._can_emit_tf_signal(tf):
             return
+        # Always surface pending/entry events — do not throttle execution-critical signals.
         sig = {
             "id": f"{coin.symbol}-{event}-{int(time.time() * 1000)}",
             "symbol": coin.symbol,
@@ -292,6 +343,9 @@ class MomentumScanner:
                 continue
             if coin.retrace_pct < RETRACE_ENTRY_PCT:
                 continue
+            gain = max(coin.qualifying_pct or 0.0, coin.best_pct)
+            if gain < GAIN_THRESHOLD_PCT:
+                continue
             stale_ms = PENDING_QUEUE_MS if self._has_open_strategy() else PENDING_STALE_MS
             if stale_ms > 0 and coin.last_update_ms and now_ms - coin.last_update_ms > stale_ms:
                 coin.status = STATUS_WATCHING
@@ -304,7 +358,7 @@ class MomentumScanner:
         """One open strategy at a time — best qualifier enters; rest stay queued until close."""
         ok, reason = self._order_session_ok()
         if not ok:
-            if reason not in ("exec_disabled",):
+            if reason not in ("SCANNER_EXEC=0", "FORWARD_DRY_RUN"):
                 self._last_exec_error = reason
             return
         if self._one_at_a_time and self._has_open_strategy():
@@ -321,9 +375,10 @@ class MomentumScanner:
         can_exec, block_reason = self._order_session_ok()
         return {
             "enabled": self._enabled,
-            "exec_enabled": self._exec_enabled,
+            "exec_enabled": can_exec,
             "can_execute": can_exec,
             "exec_block": block_reason or None,
+            "exec_env_controlled": True,
             "last_exec_error": self._last_exec_error,
             "one_trade_at_a_time": self._one_at_a_time,
             "daily_limit": None,
@@ -338,6 +393,7 @@ class MomentumScanner:
             "short_partition_pct": self._short_pct,
             "long1_partition_pct": self._long1_pct,
             "long2_partition_pct": self._long2_pct,
+            "long_pullback_pct": LONG_BOTH_PULLBACK_PCT,
         }
 
     def load_symbols(self, symbols: list[str]) -> None:
@@ -397,14 +453,14 @@ class MomentumScanner:
             elif coin.retrace_pct >= RETRACE_ENTRY_PCT and coin.status != STATUS_PENDING:
                 coin.status = STATUS_PENDING
                 self._emit_signal(coin, "pending")
-                if self._exec_enabled and sym not in self._in_flight and not coin.short:
+                if self._order_session_ok()[0] and sym not in self._in_flight and not coin.short:
                     if self._one_at_a_time:
                         self._maybe_execute_best_pending()
                     else:
                         self._try_open_short(coin)
             elif (
                 coin.status == STATUS_PENDING
-                and self._exec_enabled
+                and self._order_session_ok()[0]
                 and self._one_at_a_time
                 and sym not in self._in_flight
                 and not coin.short
@@ -415,7 +471,7 @@ class MomentumScanner:
         if coin.short or coin.long1 or coin.long2:
             self._manage_positions(coin)
 
-        if self._one_at_a_time and self._exec_enabled and not self._has_open_strategy():
+        if self._one_at_a_time and self._order_session_ok()[0] and not self._has_open_strategy():
             self._maybe_execute_best_pending()
 
         self._maybe_broadcast()
@@ -518,6 +574,7 @@ class MomentumScanner:
                 coin.short = LegPosition("SELL", fill, qty, SHORT_LEVERAGE, MAGIC_SHORT, tp)
                 coin.status = STATUS_SHORT
                 coin.long1_was_closed = False
+                coin.recovery_peak_price = None
                 self._last_exec_error = None
                 self._emit_signal(coin, "entered")
                 log.info("scanner SHORT %s qty=%s @ %s", sym, qty, fill)
@@ -554,7 +611,14 @@ class MomentumScanner:
                 else:
                     coin.long2 = pos
                     coin.status = STATUS_LONG2
+                    coin.recovery_peak_price = fill
+                self._last_exec_error = None
+                self._emit_signal(coin, f"long{leg}_entered")
                 log.info("scanner LONG%d %s qty=%s @ %s", leg, sym, qty, fill)
+            else:
+                err = str(r.get("error") or "order_failed")
+                self._last_exec_error = f"{sym} LONG{leg}: {err}"
+                log.warning("scanner LONG%d failed %s: %s", leg, sym, err)
         finally:
             self._in_flight.discard(sym)
 
@@ -577,11 +641,30 @@ class MomentumScanner:
 
         adverse_pct = ((price - short.entry) / short.entry) * 100.0 if short.entry > 0 else 0.0
 
-        if coin.long1 is None and coin.long2 is None:
-            if not coin.long1_was_closed and adverse_pct >= LONG1_ADVERSE_PCT:
+        # Long1 @ +2% adverse; Long2 @ +4% while Long1 still open (both legs can run together).
+        if coin.long2 is None:
+            if coin.long1 is None and adverse_pct >= LONG1_ADVERSE_PCT:
                 self._try_open_long(coin, 1)
-            elif coin.long1_was_closed and adverse_pct >= LONG2_ADVERSE_PCT:
+            elif coin.long1 is not None and adverse_pct >= LONG2_ADVERSE_PCT:
                 self._try_open_long(coin, 2)
+
+        # Both recovery longs filled — close all if price pulls back 0.5% from peak (no bullish continuation).
+        if coin.long1 and coin.long2 and short:
+            if coin.recovery_peak_price is None or price > coin.recovery_peak_price:
+                coin.recovery_peak_price = price
+            peak = coin.recovery_peak_price or price
+            if peak > 0:
+                pullback_pct = ((peak - price) / peak) * 100.0
+                if pullback_pct >= LONG_BOTH_PULLBACK_PCT:
+                    log.info(
+                        "scanner %s LONG_BOTH_PULLBACK %.2f%% (peak=%s price=%s)",
+                        coin.symbol,
+                        pullback_pct,
+                        peak,
+                        price,
+                    )
+                    self._close_all(coin, "LONG_BOTH_PULLBACK")
+                    return
 
         if short.tp_price and price <= short.tp_price:
             self._close_all(coin, "SHORT_TP")
@@ -633,6 +716,7 @@ class MomentumScanner:
         coin.long1 = None
         coin.long2 = None
         coin.long1_was_closed = False
+        coin.recovery_peak_price = None
         coin.status = STATUS_CLOSED
         coin.highest_price = None
         coin.qualifying_pct = 0.0

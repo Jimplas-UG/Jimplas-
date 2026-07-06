@@ -161,15 +161,14 @@ export default function TickScannerHome({
   ready,
   error,
   connected,
-  autoExecute,
+  sessionExec,
   scannerMeta,
 }) {
   const { colors: C } = useBilshenzTheme();
 
   const execOn =
     connected &&
-    (autoExecute ?? scannerMeta?.exec_enabled !== false) &&
-    scannerMeta?.exec_enabled !== false;
+    (sessionExec?.canExecute === true || (sessionExec?.canExecute !== false && scannerMeta?.can_execute !== false));
 
   const marketRows = useMemo(() => {
     return [...(rows || [])].sort((a, b) => activityScore(b) - activityScore(a)).slice(0, 24);

@@ -13,17 +13,16 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 
 if (-not $isAdmin) {
   Write-Host ""
-  Write-Host "Run PowerShell as Administrator, then:" -ForegroundColor Yellow
-  Write-Host "  cd $PSScriptRoot\.."
-  Write-Host "  npm run fix:metro-firewall"
-  Write-Host ""
-  exit 1
+  Write-Host "Requesting Administrator approval (UAC) to open firewall..." -ForegroundColor Yellow
+  Start-Process powershell.exe -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`""
+  exit 0
 }
 
 foreach ($port in $ports) {
-  $ruleName = "Bilshenz Expo LAN TCP $port"
-  netsh advfirewall firewall delete rule name="$ruleName" 2>$null | Out-Null
-  netsh advfirewall firewall add rule name="$ruleName" dir=in action=allow protocol=TCP localport=$port profile=any | Out-Null
+  foreach ($ruleName in @("Bilshenz Expo LAN TCP $port", "Expo Metro TCP $port", "Bilshenz Desk TCP $port")) {
+    netsh advfirewall firewall delete rule name="$ruleName" 2>$null | Out-Null
+    netsh advfirewall firewall add rule name="$ruleName" dir=in action=allow protocol=TCP localport=$port profile=any | Out-Null
+  }
 }
 
 Write-Host ""

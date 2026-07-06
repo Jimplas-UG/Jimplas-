@@ -19,16 +19,19 @@ import { BinanceBridgeProvider, useBinanceBridge } from './contexts/BinanceBridg
 import { DevPreviewProvider } from './contexts/DevPreviewContext';
 import { useTickScanner } from './hooks/useTickScanner';
 import { useDeskSession } from './hooks/useDeskSession';
-import { enableScannerAutoExecOnConnect } from './lib/scannerRiskSync';
 
 const AppOpeningSplashLazy = lazy(() => import('./components/AppOpeningSplash'));
 
 function AppContent() {
   const { colors: C, styles } = useBilshenzTheme();
   const insets = useSafeAreaInsets();
-  const { baseUrl, connected } = useBinanceBridge();
+  const { baseUrl, connected, sessionEpoch } = useBinanceBridge();
   const desk = useDeskSession();
-  const tickScanner = useTickScanner(baseUrl, { enabled: !!baseUrl?.trim() });
+  const tickScanner = useTickScanner(baseUrl, {
+    enabled: !!baseUrl?.trim(),
+    connected,
+    sessionEpoch,
+  });
   const { done: onboardingDone, markDone: markOnboardingDone } = useOnboardingDone();
   const [tab, setTab] = useState('scanner');
 
@@ -39,15 +42,6 @@ function AppContent() {
     hideBootSplash('app-content-ready');
   }, []);
 
-  // Bridge session can stay linked while exec was turned off on app boot — restore when risk allows.
-  useEffect(() => {
-    if (!connected || !baseUrl?.trim() || !tickScanner.scannerMeta) return undefined;
-    if (tickScanner.scannerMeta.exec_enabled !== false) return undefined;
-    if (!desk.effectiveAutoExecute) return undefined;
-    void enableScannerAutoExecOnConnect(baseUrl, { retries: 3, delayMs: 600 });
-    return undefined;
-  }, [connected, baseUrl, desk.effectiveAutoExecute, tickScanner.scannerMeta?.exec_enabled]);
-
   let body = null;
   if (tab === 'scanner') {
     body = (
@@ -56,7 +50,6 @@ function AppContent() {
         scanner={tickScanner}
         onOpenProfile={openProfile}
         connected={connected}
-        autoExecute={desk.effectiveAutoExecute}
       />
     );
   } else if (tab === 'risk') {

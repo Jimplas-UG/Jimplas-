@@ -1,4 +1,4 @@
-/var/log/tradingbot/*.jsonl /var/log/tradingbot/*.log /var/log/bilshenz/*.log {
+/var/log/tradingbot/*.jsonl /var/log/tradingbot/*.log /var/log/bilshenz/*.log /opt/bilshenz/binance_trading_system/python/logs/*.log {
   daily
   rotate 14
   compress

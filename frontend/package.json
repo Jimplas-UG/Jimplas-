@@ -21,6 +21,7 @@
     "restart:metro": "powershell -ExecutionPolicy Bypass -File ./scripts/restart-metro-clean.ps1",
     "fix:metro-firewall": "powershell -ExecutionPolicy Bypass -File ./scripts/allow-expo-metro-firewall.ps1",
     "connect:phone": "powershell -ExecutionPolicy Bypass -File ./scripts/elevate-expo-connect.ps1",
+    "connect:expo": "CONNECT-EXPO-GO.cmd",
     "connect:firewall": "powershell -ExecutionPolicy Bypass -File ./scripts/elevate-expo-connect.ps1 -NoMetro",
     "setup:adb": "node scripts/ensure-adb.js",
     "fix:binance-firewall": "powershell -ExecutionPolicy Bypass -File ./scripts/allow-binance-bridge-firewall.ps1",

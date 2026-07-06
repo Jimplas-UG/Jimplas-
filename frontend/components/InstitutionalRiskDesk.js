@@ -110,7 +110,6 @@ export default function InstitutionalRiskDesk({
   onBrokerCloseMsg,
   feedReady,
   feedError,
-  autoExecute,
   onOpenProfile,
 }) {
   const { colors: C } = useBilshenzTheme();
@@ -158,7 +157,6 @@ export default function InstitutionalRiskDesk({
           feedReady={feedReady}
           feedError={feedError}
           connected={brokerConnected}
-          autoExecute={autoExecute}
           onPressConnect={onOpenProfile}
         />
       </View>

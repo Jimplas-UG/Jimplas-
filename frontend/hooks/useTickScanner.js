@@ -2,20 +2,22 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchScannerSnapshot, subscribeScannerStream } from '../broker/binanceScannerApi';
 
 function applyPayload(setters, payload) {
-  if (!payload?.rows) return;
+  if (!payload) return;
+  if (payload.scanner) setters.setScannerMeta(payload.scanner);
+  if (!Array.isArray(payload.rows)) return;
   setters.setRows(payload.rows);
   setters.setReady(true);
   setters.setError('');
   if (payload.ts) setters.setLastTs(payload.ts);
-  if (payload.scanner) setters.setScannerMeta(payload.scanner);
   if (Array.isArray(payload.signals)) setters.setSignals(payload.signals);
   if (Array.isArray(payload.blocks)) setters.setBlocks(payload.blocks);
 }
 
 /**
  * Live tick momentum scanner feed — WebSocket primary, REST bootstrap + reconnect fallback.
+ * Pass sessionEpoch from BinanceBridgeContext to refresh exec state immediately after login.
  */
-export function useTickScanner(baseUrl, { enabled = true } = {}) {
+export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, connected = false } = {}) {
   const [rows, setRows] = useState([]);
   const [signals, setSignals] = useState([]);
   const [blocks, setBlocks] = useState([]);
@@ -32,6 +34,15 @@ export function useTickScanner(baseUrl, { enabled = true } = {}) {
     );
   }, []);
 
+  const refresh = useCallback(async () => {
+    if (!baseUrl?.trim()) return;
+    const snap = await fetchScannerSnapshot(baseUrl, 5000);
+    if (snap.ok) {
+      booted.current = true;
+      apply(snap);
+    }
+  }, [baseUrl, apply]);
+
   useEffect(() => {
     if (!enabled || !baseUrl?.trim()) {
       setRows([]);
@@ -45,7 +56,7 @@ export function useTickScanner(baseUrl, { enabled = true } = {}) {
     booted.current = false;
 
     void (async () => {
-      const snap = await fetchScannerSnapshot(baseUrl);
+      const snap = await fetchScannerSnapshot(baseUrl, 5000);
       if (cancelled) return;
       if (snap.ok) {
         apply(snap);
@@ -63,11 +74,12 @@ export function useTickScanner(baseUrl, { enabled = true } = {}) {
       },
       {
         onOpen: () => {
-          if (!booted.current) {
-            void fetchScannerSnapshot(baseUrl).then((snap) => {
-              if (!cancelled && snap.ok) apply(snap);
-            });
-          }
+          void fetchScannerSnapshot(baseUrl, 4000).then((snap) => {
+            if (!cancelled && snap.ok) {
+              booted.current = true;
+              apply(snap);
+            }
+          });
         },
         onError: (msg) => {
           if (!booted.current) setError(msg || 'Scanner WS error');
@@ -77,10 +89,10 @@ export function useTickScanner(baseUrl, { enabled = true } = {}) {
 
     const poll = setInterval(() => {
       if (booted.current) return;
-      void fetchScannerSnapshot(baseUrl).then((snap) => {
+      void fetchScannerSnapshot(baseUrl, 4000).then((snap) => {
         if (!cancelled && snap.ok) apply(snap);
       });
-    }, 8000);
+    }, 3000);
 
     return () => {
       cancelled = true;
@@ -89,11 +101,17 @@ export function useTickScanner(baseUrl, { enabled = true } = {}) {
     };
   }, [baseUrl, enabled, apply]);
 
-  const refresh = useCallback(async () => {
-    if (!baseUrl?.trim()) return;
-    const snap = await fetchScannerSnapshot(baseUrl);
-    if (snap.ok) apply(snap);
-  }, [baseUrl, apply]);
+  // Binance linked — pull fresh exec/session state without waiting for next tick broadcast.
+  useEffect(() => {
+    if (!enabled || !baseUrl?.trim() || !connected) return undefined;
+    void refresh();
+    const id = setInterval(() => void refresh(), 2000);
+    const stop = setTimeout(() => clearInterval(id), 8000);
+    return () => {
+      clearInterval(id);
+      clearTimeout(stop);
+    };
+  }, [baseUrl, connected, enabled, sessionEpoch, refresh]);
 
   return { rows, signals, blocks, ready, error, scannerMeta, lastTs, refresh };
 }

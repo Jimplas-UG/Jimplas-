@@ -235,14 +235,14 @@ export default function ScannerEngineVisual({ ready, execOn, connected, pulse = 
   const breathe = 0.5 + ((Math.sin((ms / 1200) * Math.PI * 2) + 1) / 2) * 0.5;
   const activity = Math.min(1, Math.max(0.15, pulse * breathe));
 
-  const statusLabel = !connected ? 'Link required' : !ready ? 'Indexing' : execOn ? 'Hunting' : 'Standby';
+  const statusLabel = !connected ? 'Link required' : !ready ? 'Indexing' : execOn ? 'Hunting' : 'Env halt';
   const statusOk = connected && ready && execOn;
 
   const huntLine = useMemo(() => {
     if (!connected) return 'Connect Binance to start scanning for entries';
     if (!ready) return 'Mapping USDT-M movers into the search field';
-    if (execOn) return 'Qualified bubbles surface · auto-entry armed';
-    return 'Live bubble scan · execution on standby';
+    if (execOn) return 'Qualified bubbles surface · execution armed on signal';
+    return 'Scanner live · set SCANNER_EXEC=1 on server to arm orders';
   }, [connected, ready, execOn]);
 
   const bubbles = useMemo(() => {
@@ -277,7 +277,7 @@ export default function ScannerEngineVisual({ ready, execOn, connected, pulse = 
           <View style={st.pills}>
             <PilotPill label={statusLabel} ok={statusOk} warn={connected && !statusOk} accent={statusOk} />
             {connected ? (
-              <PilotPill label={execOn ? 'Auto ON' : 'Auto OFF'} ok={execOn} warn={!execOn} accent={execOn} />
+              <PilotPill label={execOn ? 'Armed' : 'Halted'} ok={execOn} warn={!execOn} accent={execOn} />
             ) : null}
           </View>
         </View>

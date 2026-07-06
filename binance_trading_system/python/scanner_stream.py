@@ -48,10 +48,12 @@ class BinanceScannerStream:
         get_testnet: Callable[[], bool],
         on_tick: Callable[[str, float, int, float | None], None],
         load_symbols: Callable[[], list[str]] | None = None,
+        get_snapshot: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._get_testnet = get_testnet
         self._on_tick = on_tick
         self._load_symbols = load_symbols
+        self._get_snapshot = get_snapshot
         self._task: asyncio.Task | None = None
         self._running = False
         self._ws_connected = False
@@ -104,8 +106,16 @@ class BinanceScannerStream:
         await websocket.accept()
         async with self._lock:
             self._clients.add(websocket)
-        if self._last_snapshot:
-            await websocket.send_json({"type": "snapshot", **self._last_snapshot})
+        snap = None
+        if self._get_snapshot:
+            try:
+                snap = self._get_snapshot()
+            except Exception as e:
+                log.warning("fresh scanner snapshot on connect: %s", e)
+        if not snap and self._last_snapshot:
+            snap = self._last_snapshot
+        if snap:
+            await websocket.send_json({"type": "snapshot", **snap})
         try:
             while True:
                 await websocket.receive_text()

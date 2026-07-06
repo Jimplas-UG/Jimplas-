@@ -222,6 +222,8 @@ export async function connectBinanceBridge({
         account: verified.account,
         mode: verified.mode ?? modeLabel,
         testnet: verified.testnet ?? resolvedTestnet,
+        can_execute: verified.can_execute,
+        exec_block: verified.exec_block ?? null,
       },
       testnet: verified.testnet ?? resolvedTestnet,
       autoDetected,
@@ -233,7 +235,15 @@ export async function connectBinanceBridge({
   return {
     ok: true,
     url,
-    session: { ok: true, account, mode: modeLabel, testnet: resolvedTestnet },
+    session: {
+      ok: true,
+      account,
+      mode: modeLabel,
+      testnet: resolvedTestnet,
+      can_execute: login.can_execute !== false,
+      exec_enabled: login.exec_enabled !== false,
+      exec_block: login.exec_block ?? null,
+    },
     testnet: resolvedTestnet,
     autoDetected,
   };

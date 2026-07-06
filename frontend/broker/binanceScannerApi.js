@@ -65,34 +65,34 @@ export async function postScannerClose(baseUrl, symbol) {
   }
 }
 
-export async function postScannerExecEnable(baseUrl, enabled = true) {
+/** Read scanner execution status (env-controlled; client cannot disable). */
+export async function fetchScannerExecStatus(baseUrl) {
   const b = String(baseUrl || '').replace(/\/$/, '');
   if (!b) return { ok: false, error: 'no_base_url' };
   try {
     const res = await binanceFetch(
       b,
       '/api/scanner/exec',
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !!enabled }) },
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
       8000,
     );
     const data = await res.json().catch(() => ({}));
-    return { ok: res.ok, exec_enabled: data.exec_enabled, status: res.status };
+    return {
+      ok: res.ok,
+      exec_enabled: data.exec_enabled,
+      can_execute: data.can_execute,
+      exec_block: data.exec_block,
+      env_controlled: data.env_controlled,
+      status: res.status,
+    };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
-/** Turn scanner auto-exec ON after Binance link — retries until bridge is ready. */
-export async function enableScannerAutoExec(baseUrl, { retries = 4, delayMs = 1200 } = {}) {
-  let last = { ok: false, error: 'no_attempt' };
-  for (let i = 0; i <= retries; i += 1) {
-    last = await postScannerExecEnable(baseUrl, true);
-    if (last.ok && last.exec_enabled !== false) return last;
-    if (i < retries) {
-      await new Promise((r) => setTimeout(r, delayMs * (i + 1)));
-    }
-  }
-  return last;
+/** @deprecated Use fetchScannerExecStatus — execution is env + connect driven. */
+export async function postScannerExecEnable(baseUrl) {
+  return fetchScannerExecStatus(baseUrl);
 }
 
 export async function postScannerRiskConfig(baseUrl, config) {

@@ -91,6 +91,9 @@ export async function fetchBinanceSession(apiBaseUrl, timeoutMs = 12000, retries
         account,
         mode: j.mode ?? null,
         testnet: j.testnet,
+        can_execute: j.can_execute,
+        exec_enabled: j.exec_enabled,
+        exec_block: j.exec_block ?? null,
         error: connected ? null : j.error ?? (j.connected ? 'No account in status' : 'Bridge not connected'),
       };
     } catch (e) {
@@ -127,7 +130,15 @@ export async function postBinanceAttach(apiBaseUrl, timeoutMs = 15000) {
     if (!res.ok) {
       return { ok: false, detail: typeof j.detail === 'string' ? j.detail : JSON.stringify(j) };
     }
-    return { ok: true, account: j.account || null };
+    return {
+      ok: true,
+      account: j.account || null,
+      mode: j.mode ?? null,
+      testnet: j.testnet,
+      can_execute: j.can_execute,
+      exec_enabled: j.exec_enabled,
+      exec_block: j.exec_block ?? null,
+    };
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) };
   }
@@ -156,7 +167,16 @@ export async function postBinanceLogin(apiBaseUrl, body, timeoutMs = 12000) {
       }
       return { ok: false, detail, status: res.status };
     }
-    return { ok: true, account: j.account || null, mode: j.mode ?? null, testnet: j.testnet, auto_detected: !!j.auto_detected };
+    return {
+      ok: true,
+      account: j.account || null,
+      mode: j.mode ?? null,
+      testnet: j.testnet,
+      auto_detected: !!j.auto_detected,
+      can_execute: j.can_execute,
+      exec_enabled: j.exec_enabled,
+      exec_block: j.exec_block ?? null,
+    };
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) };
   }

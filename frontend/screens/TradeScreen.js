@@ -4,12 +4,13 @@ import BinanceStatusStrip from '../components/BinanceStatusStrip';
 import OpenPositionsPanel from '../components/OpenPositionsPanel';
 import { PilotCard, PilotHeroBalance, PilotSectionTitle } from '../components/pilot/PilotUI';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
+import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
 import { spacing } from '../theme/designTokens';
 
 export default function TradeScreen({ pad, desk, scanner, onOpenProfile }) {
   const { colors: C, styles } = useBilshenzTheme();
-  const { baseUrl, connected, brokerFeed, useBrokerSession, lastBrokerMsg, setLastBrokerMsg, effectiveAutoExecute } =
-    desk;
+  const { sessionExec } = useBinanceBridge();
+  const { baseUrl, connected, brokerFeed, useBrokerSession, lastBrokerMsg, setLastBrokerMsg } = desk;
   const account = useBrokerSession ? brokerFeed.account : null;
 
   return (
@@ -30,9 +31,8 @@ export default function TradeScreen({ pad, desk, scanner, onOpenProfile }) {
         feedReady={brokerFeed.feedReady}
         feedError={brokerFeed.feedError}
         connected={connected}
-        execEnabled={scanner?.scannerMeta?.exec_enabled !== false}
-        autoExecute={effectiveAutoExecute}
-        execBlock={scanner?.scannerMeta?.exec_block}
+        execReady={sessionExec.canExecute === true || scanner?.scannerMeta?.can_execute === true}
+        execBlock={sessionExec.block || scanner?.scannerMeta?.exec_block}
         lastExecError={scanner?.scannerMeta?.last_exec_error}
         onPressConnect={onOpenProfile}
         style={{ marginBottom: spacing.md }}
