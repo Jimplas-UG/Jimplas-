@@ -96,9 +96,71 @@ class PaperStore:
             )
         return out
 
-    def has_open(self, symbol: str) -> bool:
+    def has_open(self, symbol: str, magic: int | None = None) -> bool:
         sym = symbol.upper()
-        return any(p.symbol == sym for p in self._positions)
+        for p in self._positions:
+            if p.symbol != sym:
+                continue
+            if magic is None or p.magic == magic:
+                return True
+        return False
+
+    def order_market_leg(
+        self,
+        symbol: str,
+        side: str,
+        volume: float,
+        sl: float | None,
+        tp: float | None,
+        magic: int,
+    ) -> dict[str, Any]:
+        sym = symbol.upper()
+        if self.has_open(sym, magic):
+            return {"ok": False, "error": "leg_already_open"}
+        return self.order_market(sym, side, volume, sl, tp, magic)
+
+    def close_leg(self, symbol: str, magic: int, volume: float | None = None) -> dict[str, Any]:
+        sym = symbol.upper()
+        remaining: list[PaperPosition] = []
+        closed: list[dict[str, Any]] = []
+        for p in self._positions:
+            if p.symbol != sym or p.magic != magic:
+                remaining.append(p)
+                continue
+            qty = float(volume) if volume is not None else p.volume
+            if qty <= 0 or qty > p.volume + 1e-12:
+                remaining.append(p)
+                continue
+            tick = self._last_tick.get(sym)
+            if not tick:
+                return {"ok": False, "error": "no tick — call set_tick first"}
+            fill = tick["bid"] if p.side == "BUY" else tick["ask"]
+            pnl = (fill - p.price_open) * qty * (1 if p.side == "BUY" else -1)
+            self.balance += pnl
+            self.equity = self.balance
+            deal_id = len(self._deals) + 1
+            self._deals.append(
+                {
+                    "ticket": deal_id,
+                    "symbol": sym,
+                    "type": p.side,
+                    "volume": qty,
+                    "price": fill,
+                    "profit": pnl,
+                    "time": int(time.time() * 1000),
+                    "magic": magic,
+                }
+            )
+            closed.append({"symbol": sym, "side": p.side, "volume": qty, "fill_price": fill, "profit": pnl})
+            leftover = p.volume - qty
+            if leftover > 1e-12:
+                remaining.append(
+                    PaperPosition(sym, p.side, leftover, p.price_open, p.sl, p.tp, p.magic)
+                )
+        if not closed:
+            return {"ok": False, "error": "no_open_leg"}
+        self._positions = remaining
+        return {"ok": True, "closed": closed, "broker": "binance-paper"}
 
     def order_market(
         self,
@@ -110,7 +172,7 @@ class PaperStore:
         magic: int,
     ) -> dict[str, Any]:
         sym = symbol.upper()
-        if self.has_open(sym):
+        if self.has_open(sym, magic):
             return {"ok": False, "error": "position_already_open"}
         tick = self._last_tick.get(sym)
         if not tick:

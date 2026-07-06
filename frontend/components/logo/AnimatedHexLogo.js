@@ -1,0 +1,171 @@
+import React, { useEffect, useState } from 'react';
+import { Platform, StyleSheet, View } from 'react-native';
+import Svg, {
+  Circle,
+  Defs,
+  G,
+  Line,
+  LinearGradient,
+  Polygon,
+  RadialGradient,
+  Stop,
+  Text as SvgText,
+} from 'react-native-svg';
+
+import { CX, CY, DIAMONDS, INNER_HEX, MAIN_HEX, VB } from './hexLogoGeometry';
+
+const serifSvg = Platform.select({ ios: 'Georgia', android: 'serif', default: 'serif' });
+
+/**
+ * Rotating Bilshenz hex logo — outer ring, inner diamonds, radar sweep.
+ */
+export default function AnimatedHexLogo({ size = VB, style }) {
+  const [tick, setTick] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setTick(Date.now()), 250);
+    return () => clearInterval(id);
+  }, []);
+
+  const ms = tick;
+  const pOuter = (ms % 3000) / 3000;
+  const outerR = 37 + ((Math.sin(pOuter * Math.PI * 2) + 1) / 2) * 2;
+  const outerOp = 0.05 + ((Math.cos(pOuter * Math.PI * 2) + 1) / 2) * (0.2 - 0.05);
+  const outerDeg = ((ms % 30000) / 30000) * 360;
+  const innerDeg = -((ms % 20000) / 20000) * 360;
+  const dashOff = ((ms % 8000) / 8000) * 100;
+  const radarDeg = ((ms % 4000) / 4000) * 360;
+  const pCenter = (ms % 1500) / 1500;
+  const centerR = 2 + ((Math.sin(pCenter * Math.PI * 2) + 1) / 2) * 1.5;
+  const centerOp = 0.4 + ((Math.sin(pCenter * Math.PI * 2 + Math.PI / 2) + 1) / 2) * 0.6;
+
+  return (
+    <View style={[styles.shadowWrap, { width: size, height: size }, style]}>
+      <Svg width={size} height={size} viewBox={`0 0 ${VB} ${VB}`}>
+        <Defs>
+          <RadialGradient id="hexFill" cx={CX} cy={CY} r={28} gradientUnits="userSpaceOnUse">
+            <Stop offset="0%" stopColor="#2C1E00" />
+            <Stop offset="100%" stopColor="#0A0700" />
+          </RadialGradient>
+          <LinearGradient id="goldLine" x1="0%" y1="0%" x2="100%" y2="100%">
+            <Stop offset="0%" stopColor="#F0D080" />
+            <Stop offset="50%" stopColor="#C9A84C" />
+            <Stop offset="100%" stopColor="#8B6914" />
+          </LinearGradient>
+          <LinearGradient id="goldLine2" x1="100%" y1="0%" x2="0%" y2="100%">
+            <Stop offset="0%" stopColor="#F0D080" />
+            <Stop offset="100%" stopColor="#6A4E10" />
+          </LinearGradient>
+          <LinearGradient id="gradB" x1="0%" y1="0%" x2="100%" y2="100%">
+            <Stop offset="0%" stopColor="#F0D080" />
+            <Stop offset="100%" stopColor="#8B6914" />
+          </LinearGradient>
+          <LinearGradient id="gradS" x1="100%" y1="0%" x2="0%" y2="100%">
+            <Stop offset="0%" stopColor="#F0D080" />
+            <Stop offset="100%" stopColor="#6A4E10" />
+          </LinearGradient>
+        </Defs>
+
+        <Circle
+          cx={CX}
+          cy={CY}
+          r={outerR}
+          fill="none"
+          stroke="#C9A84C"
+          strokeWidth={0.5}
+          strokeOpacity={outerOp}
+        />
+
+        <G rotation={outerDeg} originX={CX} originY={CY}>
+          <Circle
+            cx={CX}
+            cy={CY}
+            r={35}
+            fill="none"
+            stroke="#C9A84C"
+            strokeWidth={0.4}
+            strokeDasharray="2, 4"
+            strokeOpacity={0.4}
+          />
+          <Line x1={40} y1={5} x2={40} y2={9} stroke="#C9A84C" strokeWidth={1} strokeOpacity={0.8} />
+          <Line x1={40} y1={71} x2={40} y2={75} stroke="#C9A84C" strokeWidth={1} strokeOpacity={0.8} />
+          <Line x1={71} y1={40} x2={75} y2={40} stroke="#C9A84C" strokeWidth={1} strokeOpacity={0.8} />
+          <Line x1={5} y1={40} x2={9} y2={40} stroke="#C9A84C" strokeWidth={1} strokeOpacity={0.8} />
+          <Line x1={14.4} y1={14.4} x2={17.2} y2={17.2} stroke="#C9A84C" strokeWidth={0.8} strokeOpacity={0.5} />
+          <Line x1={62.8} y1={62.8} x2={65.6} y2={65.6} stroke="#C9A84C" strokeWidth={0.8} strokeOpacity={0.5} />
+          <Line x1={65.6} y1={14.4} x2={62.8} y2={17.2} stroke="#C9A84C" strokeWidth={0.8} strokeOpacity={0.5} />
+          <Line x1={17.2} y1={62.8} x2={14.4} y2={65.6} stroke="#C9A84C" strokeWidth={0.8} strokeOpacity={0.5} />
+        </G>
+
+        <G rotation={innerDeg} originX={CX} originY={CY}>
+          <Circle
+            cx={CX}
+            cy={CY}
+            r={28}
+            fill="none"
+            stroke="#C9A84C"
+            strokeWidth={0.3}
+            strokeDasharray="1, 6"
+            strokeOpacity={0.3}
+          />
+          {DIAMONDS.map((pts, i) => (
+            <Polygon key={i} points={pts} fill="#C9A84C" fillOpacity={i < 4 ? 0.7 : 0.5} />
+          ))}
+        </G>
+
+        <Polygon points={MAIN_HEX} fill="url(#hexFill)" stroke="url(#goldLine)" strokeWidth={1.2} />
+
+        <Polygon
+          points={INNER_HEX}
+          fill="none"
+          stroke="#C9A84C"
+          strokeWidth={0.5}
+          strokeOpacity={0.4}
+          strokeDasharray="3, 3"
+          strokeDashoffset={dashOff}
+        />
+
+        <G rotation={radarDeg} originX={CX} originY={CY}>
+          <Line
+            x1={40}
+            y1={40}
+            x2={40}
+            y2={11}
+            stroke="#F0D080"
+            strokeWidth={1}
+            strokeOpacity={0.5}
+            strokeLinecap="round"
+          />
+          <Circle cx={40} cy={11} r={1.5} fill="#F0D080" fillOpacity={0.8} />
+        </G>
+
+        <Circle cx={CX} cy={CY} r={centerR} fill="#F0D080" fillOpacity={centerOp} />
+
+        <SvgText
+          x={27}
+          y={45}
+          fontSize={16}
+          fontWeight="bold"
+          fontFamily={serifSvg}
+          fill="url(#gradB)"
+          stroke="url(#goldLine)"
+          strokeWidth={0.3}>
+          B
+        </SvgText>
+        <SvgText x={39} y={45} fontSize={16} fontWeight="bold" fontFamily={serifSvg} fill="url(#gradS)">
+          S
+        </SvgText>
+      </Svg>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  shadowWrap: {
+    shadowColor: '#C9A84C',
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 8,
+  },
+});

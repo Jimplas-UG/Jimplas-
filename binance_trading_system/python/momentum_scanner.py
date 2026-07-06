@@ -1,0 +1,655 @@
+"""
+Tick-by-tick multi-coin momentum scanner + retracement short strategy.
+
+Monitors 3m / 5m / 15m rolling % moves on every price tick (no candle close).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+log = logging.getLogger("momentum_scanner")
+
+GAIN_THRESHOLD_PCT = float(os.environ.get("SCANNER_GAIN_PCT", "5.0"))
+RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_RETRACE_PCT", "0.7"))
+SHORT_TP_PCT = float(os.environ.get("SCANNER_SHORT_TP_PCT", "2.5"))
+LONG1_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG1_PCT", "2.0"))
+LONG2_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG2_PCT", "4.0"))
+LONG_TP_PCT = float(os.environ.get("SCANNER_LONG_TP_PCT", "2.5"))
+SMART_EXIT_NET_PCT = float(os.environ.get("SCANNER_SMART_EXIT_PCT", "1.0"))
+SHORT_LEVERAGE = int(os.environ.get("SCANNER_SHORT_LEV", "5"))
+LONG1_LEVERAGE = int(os.environ.get("SCANNER_LONG1_LEV", "10"))
+LONG2_LEVERAGE = int(os.environ.get("SCANNER_LONG2_LEV", "10"))
+DEFAULT_PARTITION_USD = float(os.environ.get("SCANNER_PARTITION_USD", os.environ.get("SCANNER_RISK_USDT", "100")))
+SHORT_PARTITION_PCT = float(os.environ.get("SCANNER_SHORT_PARTITION_PCT", "50"))
+LONG1_PARTITION_PCT = float(os.environ.get("SCANNER_LONG1_PARTITION_PCT", "40"))
+LONG2_PARTITION_PCT = float(os.environ.get("SCANNER_LONG2_PARTITION_PCT", "40"))
+MAX_WATCHLIST = int(os.environ.get("SCANNER_MAX_WATCH", "80"))
+ONE_TRADE_AT_A_TIME = os.environ.get("SCANNER_ONE_TRADE", "1").strip().lower() not in ("0", "false", "off")
+PENDING_STALE_MS = int(os.environ.get("SCANNER_PENDING_STALE_MS", "120000"))
+PENDING_QUEUE_MS = int(os.environ.get("SCANNER_PENDING_QUEUE_MS", "1800000"))
+SIGNALS_PER_TF = int(os.environ.get("SCANNER_SIGNALS_PER_TF", "2"))
+SIGNAL_WINDOW_SEC = {"3m": 180, "5m": 300, "15m": 900}
+TIMEFRAMES_MIN = (3, 5, 15)
+
+MAGIC_SHORT = 88001
+MAGIC_LONG1 = 88002
+MAGIC_LONG2 = 88003
+
+STATUS_SCANNING = "Scanning"
+STATUS_WATCHING = "Watching"
+STATUS_PENDING = "Pending"
+STATUS_SHORT = "Short"
+STATUS_LONG1 = "Long 1"
+STATUS_LONG2 = "Long 2"
+STATUS_CLOSED = "Closed"
+
+
+@dataclass
+class PricePoint:
+    ts_ms: int
+    price: float
+
+
+@dataclass
+class LegPosition:
+    side: str
+    entry: float
+    qty: float
+    leverage: int
+    magic: int
+    tp_price: float | None = None
+
+
+@dataclass
+class CoinStrategy:
+    symbol: str
+    price: float = 0.0
+    pct_3m: float = 0.0
+    pct_5m: float = 0.0
+    pct_15m: float = 0.0
+    pct_24h: float = 0.0
+    best_pct: float = 0.0
+    best_tf: str = ""
+    qualifying_pct: float = 0.0
+    status: str = STATUS_SCANNING
+    highest_price: float | None = None
+    retrace_pct: float = 0.0
+    short: LegPosition | None = None
+    long1: LegPosition | None = None
+    long2: LegPosition | None = None
+    long1_was_closed: bool = False
+    unrealized_pnl: float = 0.0
+    last_update_ms: int = 0
+    _history: deque[PricePoint] = field(default_factory=lambda: deque(maxlen=2500))
+
+    def active(self) -> bool:
+        return self.status in (STATUS_WATCHING, STATUS_PENDING, STATUS_SHORT, STATUS_LONG1, STATUS_LONG2)
+
+
+class MomentumScanner:
+    """Runs on every mini-ticker tick across USDT-M perpetual symbols."""
+
+    def __init__(
+        self,
+        connector: Any,
+        get_testnet: Callable[[], bool],
+        on_snapshot: Callable[[list[dict[str, Any]]], None] | None = None,
+    ) -> None:
+        self._connector = connector
+        self._get_testnet = get_testnet
+        self._on_snapshot = on_snapshot
+        self._symbols_usdt: set[str] = set()
+        self._coins: dict[str, CoinStrategy] = {}
+        self._in_flight: set[str] = set()
+        self._last_broadcast = 0.0
+        self._enabled = os.environ.get("SCANNER_ENABLED", "1").strip().lower() not in ("0", "false", "off")
+        self._exec_enabled = os.environ.get("SCANNER_EXEC", "1").strip().lower() not in ("0", "false", "off")
+        self._one_at_a_time = ONE_TRADE_AT_A_TIME
+        self._trades_closed_today = 0
+        self._trades_day_key = self._utc_day_key()
+        self._partition_usd = DEFAULT_PARTITION_USD
+        self._short_pct = SHORT_PARTITION_PCT
+        self._long1_pct = LONG1_PARTITION_PCT
+        self._long2_pct = LONG2_PARTITION_PCT
+        self._recent_signals: deque[dict[str, Any]] = deque(maxlen=24)
+        self._last_exec_error: str | None = None
+        self._tf_emit_times: dict[str, deque[float]] = {
+            "3m": deque(maxlen=SIGNALS_PER_TF + 2),
+            "5m": deque(maxlen=SIGNALS_PER_TF + 2),
+            "15m": deque(maxlen=SIGNALS_PER_TF + 2),
+        }
+
+    def set_exec_enabled(self, enabled: bool) -> None:
+        self._exec_enabled = bool(enabled)
+        if self._exec_enabled:
+            self._last_exec_error = None
+        log.info("scanner exec_enabled=%s", self._exec_enabled)
+
+    def _order_session_ok(self) -> tuple[bool, str]:
+        if not self._exec_enabled:
+            return False, "exec_disabled"
+        if getattr(self._connector.cfg, "paper", False):
+            return True, ""
+        if not self._connector.cfg.api_key:
+            return False, "api_key_missing"
+        if not getattr(self._connector, "_connected", False):
+            return False, "binance_not_logged_in"
+        return True, ""
+
+    def set_risk_config(
+        self,
+        partition_usd: float | None = None,
+        short_pct: float | None = None,
+        long1_pct: float | None = None,
+        long2_pct: float | None = None,
+    ) -> None:
+        if partition_usd is not None and partition_usd > 0:
+            self._partition_usd = float(partition_usd)
+        if short_pct is not None:
+            self._short_pct = max(1.0, min(100.0, float(short_pct)))
+        if long1_pct is not None:
+            self._long1_pct = max(1.0, min(100.0, float(long1_pct)))
+        if long2_pct is not None:
+            self._long2_pct = max(1.0, min(100.0, float(long2_pct)))
+        log.info(
+            "scanner risk partition=$%s short=%s%% long1=%s%% long2=%s%%",
+            self._partition_usd,
+            self._short_pct,
+            self._long1_pct,
+            self._long2_pct,
+        )
+
+    def close_strategy(self, symbol: str) -> dict[str, Any]:
+        sym = symbol.upper()
+        coin = self._coins.get(sym)
+        if not coin:
+            return {"ok": False, "error": "unknown_symbol"}
+        if coin.short or coin.long1 or coin.long2:
+            self._close_all(coin, "MANUAL_APP")
+            return {"ok": True, "closed": sym}
+        if coin.status == STATUS_PENDING:
+            coin.status = STATUS_WATCHING
+            return {"ok": True, "cancelled_pending": sym}
+        return {"ok": False, "error": "nothing_to_close"}
+
+    def _can_emit_tf_signal(self, tf: str) -> bool:
+        window = SIGNAL_WINDOW_SEC.get(tf, 180)
+        now = time.time()
+        q = self._tf_emit_times.setdefault(tf, deque(maxlen=SIGNALS_PER_TF + 2))
+        while q and now - q[0] > window:
+            q.popleft()
+        if len(q) >= SIGNALS_PER_TF:
+            return False
+        q.append(now)
+        return True
+
+    def _emit_signal(self, coin: CoinStrategy, event: str) -> None:
+        tf = coin.best_tf or "5m"
+        if event == "watch" and not self._can_emit_tf_signal(tf):
+            return
+        sig = {
+            "id": f"{coin.symbol}-{event}-{int(time.time() * 1000)}",
+            "symbol": coin.symbol,
+            "coin": coin.symbol.replace("USDT", ""),
+            "event": event,
+            "timeframe": tf,
+            "pctGain": round(coin.best_pct, 2),
+            "retracePct": round(coin.retrace_pct, 2),
+            "price": round(coin.price, 8),
+            "status": coin.status,
+            "ts": int(time.time() * 1000),
+        }
+        self._recent_signals.appendleft(sig)
+
+    def trade_blocks(self) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        for coin in self._coins.values():
+            if coin.status not in (STATUS_PENDING, STATUS_SHORT, STATUS_LONG1, STATUS_LONG2):
+                continue
+            legs = []
+            if coin.short:
+                legs.append({"leg": "SHORT", "side": "SELL", "entry": coin.short.entry, "qty": coin.short.qty})
+            if coin.long1:
+                legs.append({"leg": "LONG1", "side": "BUY", "entry": coin.long1.entry, "qty": coin.long1.qty})
+            if coin.long2:
+                legs.append({"leg": "LONG2", "side": "BUY", "entry": coin.long2.entry, "qty": coin.long2.qty})
+            blocks.append(
+                {
+                    "symbol": coin.symbol,
+                    "coin": coin.symbol.replace("USDT", ""),
+                    "status": coin.status,
+                    "price": round(coin.price, 8),
+                    "pctGain": round(coin.best_pct, 2),
+                    "retracePct": round(coin.retrace_pct, 2),
+                    "timeframe": coin.best_tf,
+                    "unrealizedPnl": round(coin.unrealized_pnl, 2),
+                    "legs": legs,
+                    "canClose": True,
+                }
+            )
+        blocks.sort(
+            key=lambda b: (
+                0 if b["status"] in (STATUS_SHORT, STATUS_LONG1, STATUS_LONG2) else 1,
+                -b["pctGain"],
+            )
+        )
+        return blocks
+
+    def full_snapshot(self) -> dict[str, Any]:
+        return {
+            "rows": self.snapshot_rows(),
+            "scanner": self.status(),
+            "signals": list(self._recent_signals),
+            "blocks": self.trade_blocks(),
+            "ts": int(time.time() * 1000),
+        }
+
+    @staticmethod
+    def _utc_day_key() -> str:
+        import datetime as _dt
+
+        return _dt.datetime.utcnow().strftime("%Y-%m-%d")
+
+    def _bump_trades_closed(self) -> None:
+        day = self._utc_day_key()
+        if day != self._trades_day_key:
+            self._trades_day_key = day
+            self._trades_closed_today = 0
+        self._trades_closed_today += 1
+
+    def _global_active_symbol(self) -> str | None:
+        """Symbol with an open scanner strategy (short and/or recovery legs)."""
+        for coin in self._coins.values():
+            if coin.short or coin.long1 or coin.long2:
+                return coin.symbol
+            if coin.status in (STATUS_SHORT, STATUS_LONG1, STATUS_LONG2):
+                return coin.symbol
+        return None
+
+    def _has_open_strategy(self) -> bool:
+        return self._global_active_symbol() is not None
+
+    def _entry_score(self, coin: CoinStrategy) -> float:
+        """Rank pending candidates — highest momentum + confirmed retrace wins."""
+        tf_bonus = {"15m": 1.5, "5m": 1.0, "3m": 0.5}.get(coin.best_tf, 0.0)
+        return coin.best_pct * 10.0 + coin.retrace_pct * 2.0 + tf_bonus
+
+    def _pending_candidates(self) -> list[CoinStrategy]:
+        now_ms = int(time.time() * 1000)
+        out: list[CoinStrategy] = []
+        for coin in self._coins.values():
+            if coin.symbol in self._in_flight:
+                continue
+            if coin.short:
+                continue
+            if coin.status != STATUS_PENDING:
+                continue
+            if coin.retrace_pct < RETRACE_ENTRY_PCT:
+                continue
+            stale_ms = PENDING_QUEUE_MS if self._has_open_strategy() else PENDING_STALE_MS
+            if stale_ms > 0 and coin.last_update_ms and now_ms - coin.last_update_ms > stale_ms:
+                coin.status = STATUS_WATCHING
+                continue
+            out.append(coin)
+        out.sort(key=self._entry_score, reverse=True)
+        return out
+
+    def _maybe_execute_best_pending(self) -> None:
+        """One open strategy at a time — best qualifier enters; rest stay queued until close."""
+        ok, reason = self._order_session_ok()
+        if not ok:
+            if reason not in ("exec_disabled",):
+                self._last_exec_error = reason
+            return
+        if self._one_at_a_time and self._has_open_strategy():
+            return
+        candidates = self._pending_candidates()
+        if not candidates:
+            return
+        self._try_open_short(candidates[0])
+
+    def status(self) -> dict[str, Any]:
+        active_sym = self._global_active_symbol()
+        pending = self._pending_candidates()
+        active = sum(1 for c in self._coins.values() if c.active() or c.status == STATUS_SHORT or c.long1 or c.long2)
+        can_exec, block_reason = self._order_session_ok()
+        return {
+            "enabled": self._enabled,
+            "exec_enabled": self._exec_enabled,
+            "can_execute": can_exec,
+            "exec_block": block_reason or None,
+            "last_exec_error": self._last_exec_error,
+            "one_trade_at_a_time": self._one_at_a_time,
+            "daily_limit": None,
+            "trades_closed_today": self._trades_closed_today,
+            "active_symbol": active_sym,
+            "pending_count": len(pending),
+            "best_pending": pending[0].symbol if pending else None,
+            "symbols_tracked": len(self._coins),
+            "watchlist": sum(1 for c in self._coins.values() if c.active()),
+            "active_strategies": active,
+            "partition_usd": self._partition_usd,
+            "short_partition_pct": self._short_pct,
+            "long1_partition_pct": self._long1_pct,
+            "long2_partition_pct": self._long2_pct,
+        }
+
+    def load_symbols(self, symbols: list[str]) -> None:
+        for s in symbols:
+            sym = s.upper()
+            if sym.endswith("USDT"):
+                self._symbols_usdt.add(sym)
+                if sym not in self._coins:
+                    self._coins[sym] = CoinStrategy(symbol=sym)
+
+    def on_tick(self, symbol: str, price: float, ts_ms: int | None = None, pct_24h: float | None = None) -> None:
+        if not self._enabled:
+            return
+        sym = symbol.upper()
+        if sym not in self._symbols_usdt:
+            return
+        if price <= 0:
+            return
+        now_ms = int(ts_ms or time.time() * 1000)
+        coin = self._coins.get(sym)
+        if not coin:
+            coin = CoinStrategy(symbol=sym)
+            self._coins[sym] = coin
+
+        coin.price = price
+        coin.last_update_ms = now_ms
+        if pct_24h is not None:
+            coin.pct_24h = pct_24h
+        if getattr(self._connector.cfg, "paper", False):
+            try:
+                from paper_simulator import paper_store
+
+                spread = price * 0.0001
+                paper_store.set_tick(sym, price - spread, price + spread)
+            except Exception:
+                pass
+        coin._history.append(PricePoint(now_ms, price))
+        self._prune_history(coin, now_ms)
+        coin.pct_3m, coin.pct_5m, coin.pct_15m = self._rolling_pcts(coin, now_ms)
+        coin.best_pct, coin.best_tf = self._best_move(coin)
+
+        if coin.status in (STATUS_SCANNING, STATUS_CLOSED):
+            if coin.best_pct >= GAIN_THRESHOLD_PCT:
+                coin.status = STATUS_WATCHING
+                coin.highest_price = price
+                coin.retrace_pct = 0.0
+                coin.qualifying_pct = max(coin.qualifying_pct or 0.0, coin.best_pct)
+                self._emit_signal(coin, "watch")
+        elif coin.status in (STATUS_WATCHING, STATUS_PENDING):
+            coin.qualifying_pct = max(coin.qualifying_pct or 0.0, coin.best_pct)
+            if coin.highest_price is None or price > coin.highest_price:
+                coin.highest_price = price
+            if coin.highest_price and coin.highest_price > 0:
+                coin.retrace_pct = ((coin.highest_price - price) / coin.highest_price) * 100.0
+            if coin.status == STATUS_PENDING and coin.retrace_pct < RETRACE_ENTRY_PCT:
+                coin.status = STATUS_WATCHING
+            elif coin.retrace_pct >= RETRACE_ENTRY_PCT and coin.status != STATUS_PENDING:
+                coin.status = STATUS_PENDING
+                self._emit_signal(coin, "pending")
+                if self._exec_enabled and sym not in self._in_flight and not coin.short:
+                    if self._one_at_a_time:
+                        self._maybe_execute_best_pending()
+                    else:
+                        self._try_open_short(coin)
+            elif (
+                coin.status == STATUS_PENDING
+                and self._exec_enabled
+                and self._one_at_a_time
+                and sym not in self._in_flight
+                and not coin.short
+                and not self._has_open_strategy()
+            ):
+                self._maybe_execute_best_pending()
+
+        if coin.short or coin.long1 or coin.long2:
+            self._manage_positions(coin)
+
+        if self._one_at_a_time and self._exec_enabled and not self._has_open_strategy():
+            self._maybe_execute_best_pending()
+
+        self._maybe_broadcast()
+
+    def snapshot_rows(self) -> list[dict[str, Any]]:
+        rows = []
+        for coin in self._coins.values():
+            if coin.best_pct < 1.0 and not coin.active() and not coin.short:
+                continue
+            rows.append(self._row(coin))
+        rows.sort(key=lambda r: r["pctGain"], reverse=True)
+        return rows[:MAX_WATCHLIST]
+
+    def _row(self, coin: CoinStrategy) -> dict[str, Any]:
+        return {
+            "coin": coin.symbol.replace("USDT", ""),
+            "symbol": coin.symbol,
+            "price": round(coin.price, 8),
+            "pctGain": round(coin.best_pct, 2),
+            "pct3m": round(coin.pct_3m, 2),
+            "pct5m": round(coin.pct_5m, 2),
+            "pct15m": round(coin.pct_15m, 2),
+            "pct24h": round(coin.pct_24h, 2),
+            "timeframe": coin.best_tf,
+            "highestPrice": round(coin.highest_price or 0, 8),
+            "retracePct": round(coin.retrace_pct, 2),
+            "status": coin.status,
+            "unrealizedPnl": round(coin.unrealized_pnl, 2),
+        }
+
+    def _prune_history(self, coin: CoinStrategy, now_ms: int) -> None:
+        cutoff = now_ms - 16 * 60 * 1000
+        while coin._history and coin._history[0].ts_ms < cutoff:
+            coin._history.popleft()
+
+    def _price_at(self, coin: CoinStrategy, now_ms: int, minutes: int) -> float | None:
+        target = now_ms - minutes * 60 * 1000
+        for pt in coin._history:
+            if pt.ts_ms >= target:
+                return pt.price
+        return coin._history[0].price if coin._history else None
+
+    def _rolling_pcts(self, coin: CoinStrategy, now_ms: int) -> tuple[float, float, float]:
+        out = []
+        for m in TIMEFRAMES_MIN:
+            old = self._price_at(coin, now_ms, m)
+            if old and old > 0:
+                out.append(((coin.price - old) / old) * 100.0)
+            else:
+                out.append(0.0)
+        return out[0], out[1], out[2]
+
+    def _best_move(self, coin: CoinStrategy) -> tuple[float, str]:
+        pairs = [(coin.pct_3m, "3m"), (coin.pct_5m, "5m"), (coin.pct_15m, "15m")]
+        best = max(pairs, key=lambda x: x[0])
+        return best[0], best[1]
+
+    def _qty_for(self, symbol: str, price: float, leverage: int, partition_pct: float) -> float:
+        if price <= 0:
+            return 0.001
+        margin_usd = self._partition_usd * partition_pct / 100.0
+        notional = margin_usd * leverage
+        qty = notional / price
+        try:
+            spec = self._connector.symbol_spec(symbol, pip_size=0.01)
+            step = float(spec.get("stepSize") or 0.001)
+            min_q = float(spec.get("minQty") or 0.001)
+            from binance_connector import round_to_step
+
+            qty = max(min_q, round_to_step(qty, step))
+        except Exception:
+            qty = max(0.001, round(qty, 3))
+        return qty
+
+    def _try_open_short(self, coin: CoinStrategy) -> None:
+        sym = coin.symbol
+        if sym in self._in_flight:
+            return
+        if self._one_at_a_time:
+            active = self._global_active_symbol()
+            if active and active != sym:
+                return
+        self._in_flight.add(sym)
+        try:
+            entry = coin.price
+            qty = self._qty_for(sym, entry, SHORT_LEVERAGE, self._short_pct)
+            tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
+            r = self._connector.order_market_leg(
+                sym,
+                "SELL",
+                qty,
+                sl=None,
+                tp=tp,
+                leverage=SHORT_LEVERAGE,
+                magic=MAGIC_SHORT,
+                leg="SHORT",
+            )
+            if r.get("ok"):
+                fill = float(r.get("fill_price") or entry)
+                coin.short = LegPosition("SELL", fill, qty, SHORT_LEVERAGE, MAGIC_SHORT, tp)
+                coin.status = STATUS_SHORT
+                coin.long1_was_closed = False
+                self._last_exec_error = None
+                self._emit_signal(coin, "entered")
+                log.info("scanner SHORT %s qty=%s @ %s", sym, qty, fill)
+            else:
+                err = str(r.get("error") or "order_failed")
+                self._last_exec_error = f"{sym}: {err}"
+                log.warning("scanner SHORT failed %s: %s", sym, err)
+                # Keep pending so the next tick / queue pass can retry (e.g. margin, tick, rate limit).
+                coin.status = STATUS_PENDING
+        finally:
+            self._in_flight.discard(sym)
+
+    def _try_open_long(self, coin: CoinStrategy, leg: int) -> None:
+        sym = coin.symbol
+        if sym in self._in_flight:
+            return
+        self._in_flight.add(sym)
+        try:
+            entry = coin.price
+            lev = LONG1_LEVERAGE if leg == 1 else LONG2_LEVERAGE
+            magic = MAGIC_LONG1 if leg == 1 else MAGIC_LONG2
+            leg_pct = self._long1_pct if leg == 1 else self._long2_pct
+            qty = self._qty_for(sym, entry, lev, leg_pct)
+            tp = entry * (1.0 + LONG_TP_PCT / 100.0)
+            r = self._connector.order_market_leg(
+                sym, "BUY", qty, sl=None, tp=tp, leverage=lev, magic=magic, leg=f"LONG{leg}"
+            )
+            if r.get("ok"):
+                fill = float(r.get("fill_price") or entry)
+                pos = LegPosition("BUY", fill, qty, lev, magic, tp)
+                if leg == 1:
+                    coin.long1 = pos
+                    coin.status = STATUS_LONG1
+                else:
+                    coin.long2 = pos
+                    coin.status = STATUS_LONG2
+                log.info("scanner LONG%d %s qty=%s @ %s", leg, sym, qty, fill)
+        finally:
+            self._in_flight.discard(sym)
+
+    def _leg_pnl(self, leg: LegPosition, price: float) -> float:
+        if leg.side == "BUY":
+            return (price - leg.entry) * leg.qty
+        return (leg.entry - price) * leg.qty
+
+    def _manage_positions(self, coin: CoinStrategy) -> None:
+        price = coin.price
+        short = coin.short
+        if not short:
+            coin.unrealized_pnl = 0.0
+            return
+
+        short_pnl = self._leg_pnl(short, price)
+        long1_pnl = self._leg_pnl(coin.long1, price) if coin.long1 else 0.0
+        long2_pnl = self._leg_pnl(coin.long2, price) if coin.long2 else 0.0
+        coin.unrealized_pnl = short_pnl + long1_pnl + long2_pnl
+
+        adverse_pct = ((price - short.entry) / short.entry) * 100.0 if short.entry > 0 else 0.0
+
+        if coin.long1 is None and coin.long2 is None:
+            if not coin.long1_was_closed and adverse_pct >= LONG1_ADVERSE_PCT:
+                self._try_open_long(coin, 1)
+            elif coin.long1_was_closed and adverse_pct >= LONG2_ADVERSE_PCT:
+                self._try_open_long(coin, 2)
+
+        if short.tp_price and price <= short.tp_price:
+            self._close_all(coin, "SHORT_TP")
+            return
+
+        if coin.long1 and coin.long1.tp_price and price >= coin.long1.tp_price:
+            self._close_leg(coin, "long1")
+        if coin.long2 and coin.long2.tp_price and price >= coin.long2.tp_price:
+            self._close_leg(coin, "long2")
+
+        if coin.long2 and short:
+            combined = long1_pnl + long2_pnl + short_pnl
+            short_loss = abs(short_pnl) if short_pnl < 0 else 0.0
+            long_profit = long1_pnl + long2_pnl
+            if short_loss > 0 and long_profit >= short_loss * (1.0 + SMART_EXIT_NET_PCT / 100.0):
+                self._close_all(coin, "SMART_EXIT_L2")
+                return
+
+        if coin.long1 and short and not coin.long2:
+            combined = long1_pnl + short_pnl
+            short_loss = abs(short_pnl) if short_pnl < 0 else 0.0
+            if short_loss > 0 and long1_pnl >= short_loss * (1.0 + SMART_EXIT_NET_PCT / 100.0):
+                self._close_all(coin, "SMART_EXIT_L1")
+                return
+
+    def _close_leg(self, coin: CoinStrategy, leg_name: str) -> None:
+        sym = coin.symbol
+        leg = coin.long1 if leg_name == "long1" else coin.long2 if leg_name == "long2" else None
+        if not leg:
+            return
+        self._connector.close_leg(sym, leg.magic, leg.qty)
+        if leg_name == "long1":
+            coin.long1 = None
+            coin.long1_was_closed = True
+            coin.status = STATUS_SHORT if coin.short else STATUS_CLOSED
+        elif leg_name == "long2":
+            coin.long2 = None
+            coin.status = STATUS_LONG1 if coin.long1 else (STATUS_SHORT if coin.short else STATUS_CLOSED)
+
+    def _close_all(self, coin: CoinStrategy, reason: str) -> None:
+        sym = coin.symbol
+        if coin.short:
+            self._connector.close_leg(sym, coin.short.magic, coin.short.qty)
+        if coin.long1:
+            self._connector.close_leg(sym, coin.long1.magic, coin.long1.qty)
+        if coin.long2:
+            self._connector.close_leg(sym, coin.long2.magic, coin.long2.qty)
+        coin.short = None
+        coin.long1 = None
+        coin.long2 = None
+        coin.long1_was_closed = False
+        coin.status = STATUS_CLOSED
+        coin.highest_price = None
+        coin.qualifying_pct = 0.0
+        coin.unrealized_pnl = 0.0
+        log.info("scanner closed %s reason=%s", sym, reason)
+        self._bump_trades_closed()
+        if self._one_at_a_time:
+            self._maybe_execute_best_pending()
+
+    def _maybe_broadcast(self) -> None:
+        if not self._on_snapshot:
+            return
+        now = time.time()
+        if now - self._last_broadcast < 0.25:
+            return
+        self._last_broadcast = now
+        try:
+            self._on_snapshot(self.full_snapshot())
+        except Exception as e:
+            log.warning("snapshot broadcast: %s", e)

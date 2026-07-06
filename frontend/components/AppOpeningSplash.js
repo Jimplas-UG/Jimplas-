@@ -2,7 +2,6 @@ import React, { useLayoutEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
 import CinematicSplash, { SPLASH_MAX_MS } from './CinematicSplash';
 import { hideBootSplash } from '../lib/bootSplash';
-import { skipSplash } from '../lib/devPreview';
 
 export { SPLASH_MAX_MS };
 
@@ -21,15 +20,11 @@ export default function AppOpeningSplash({ onComplete }) {
   );
 }
 
-export function shouldPlayOpening() {
-  return !skipSplash();
-}
-
 const styles = StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 10000,
     elevation: 10000,
-    backgroundColor: '#000000',
+    backgroundColor: '#0A0E17',
   },
 });

@@ -9,8 +9,12 @@ import logging
 import os
 import re
 import time
+import asyncio
+import threading
 from collections import defaultdict
 from contextlib import asynccontextmanager
+
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +24,8 @@ from pydantic import BaseModel, Field
 from binance_connector import BinanceConnector, config_from_env, _truthy
 from position_manager import PositionManager
 from tick_stream import BinanceTickStream
+from momentum_scanner import MomentumScanner
+from scanner_stream import BinanceScannerStream
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("binance_api")
@@ -27,12 +33,12 @@ log = logging.getLogger("binance_api")
 BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN", "").strip()
 _PUBLIC_PATHS = frozenset({"/health", "/ping", "/docs", "/openapi.json"})
 # Unsigned Binance market data — safe without bridge token (home M30 feed).
-_PUBLIC_QUOTE_PREFIXES = ("/api/tick/", "/api/bars/", "/api/symbol/")
+_PUBLIC_QUOTE_PREFIXES = ("/api/tick/", "/api/bars/", "/api/symbol/", "/api/scanner/")
 
 
 def _is_public_quote(path: str) -> bool:
     return any(path.startswith(p) for p in _PUBLIC_QUOTE_PREFIXES)
-_SENSITIVE_PATHS = frozenset({"/api/login", "/api/order", "/api/close", "/api/attach", "/api/logout", "/api/margin"})
+_SENSITIVE_PATHS = frozenset({"/api/login", "/api/order", "/api/close", "/api/attach", "/api/logout", "/api/margin", "/api/scanner/close"})
 _rate_buckets: dict[str, list[float]] = defaultdict(list)
 _DEFAULT_SYMBOL = os.environ.get("BINANCE_SYMBOL", "XAUUSDT").upper()
 
@@ -94,12 +100,64 @@ tick_stream = BinanceTickStream(
     default_symbol=_DEFAULT_SYMBOL,
 )
 
+_scanner_payload: dict = {}
+
+
+def _on_scanner_snapshot(payload: dict | list) -> None:
+    global _scanner_payload
+    if isinstance(payload, list):
+        payload = momentum_scanner.full_snapshot()
+    _scanner_payload = payload
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(scanner_stream.broadcast_snapshot(payload))
+    except RuntimeError:
+        pass
+
+
+momentum_scanner = MomentumScanner(
+    connector=connector,
+    get_testnet=lambda: connector.cfg.testnet,
+    on_snapshot=_on_scanner_snapshot,
+)
+
+scanner_stream = BinanceScannerStream(
+    get_testnet=lambda: connector.cfg.testnet,
+    on_tick=lambda sym, price, ts, pct_24h=None: momentum_scanner.on_tick(sym, price, ts, pct_24h),
+    load_symbols=lambda: connector.list_usdt_perpetual_symbols(),
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await tick_stream.start()
+
+    async def load_scanner_symbols() -> None:
+        for attempt in range(4):
+            try:
+                syms = await asyncio.to_thread(connector.list_usdt_perpetual_symbols)
+                if syms:
+                    momentum_scanner.load_symbols(syms)
+                    log.info("scanner loaded %s USDT perpetual symbols", len(syms))
+                    return
+            except Exception as e:
+                log.warning("scanner symbol load attempt %s: %s", attempt + 1, e)
+            await asyncio.sleep(2.0 * (attempt + 1))
+        momentum_scanner.load_symbols(["BTCUSDT", "ETHUSDT", "XAUUSDT"])
+        log.warning("scanner using fallback symbol list (3)")
+
+    asyncio.create_task(load_scanner_symbols())
+    await scanner_stream.start()
+    try:
+        snap = connector.status_snapshot(skip_ping=False)
+        if snap.get("connected"):
+            momentum_scanner.set_exec_enabled(True)
+            log.info("scanner exec enabled for active bridge session")
+    except Exception as e:
+        log.warning("scanner exec restore on startup skipped: %s", e)
     log.info("Binance tick WebSocket stream started")
     yield
+    await scanner_stream.stop()
     await tick_stream.stop()
     log.info("Binance tick WebSocket stream stopped")
 
@@ -166,6 +224,11 @@ class LoginBody(BaseModel):
     api_key: str = Field(..., min_length=1, max_length=128)
     api_secret: str = Field(..., min_length=1, max_length=128)
     testnet: bool = True
+    auto_detect_env: bool = True
+
+
+def _is_key_env_mismatch(err: str) -> bool:
+    return bool(re.search(r"invalid api-key|api-key format|signature|permissions|unauthorized", err or "", re.I))
 
 
 def _login_error_detail(err: str, testnet: bool) -> str:
@@ -219,28 +282,115 @@ def health():
         "service": "bilshenz-binance-bridge",
         "mode": mode,
         "tick_stream": tick_stream.status(),
+        "scanner_stream": scanner_stream.status(),
+        "scanner": momentum_scanner.status(),
     }
+
+
+@app.get("/api/scanner/snapshot")
+def api_scanner_snapshot():
+    payload = momentum_scanner.full_snapshot()
+    return {"ok": True, **payload}
+
+
+class ScannerCloseBody(BaseModel):
+    symbol: str = Field(..., min_length=3, max_length=20, pattern=r"^[A-Za-z0-9]+$")
+
+
+class ScannerExecBody(BaseModel):
+    enabled: bool = True
+
+
+class ScannerRiskBody(BaseModel):
+    partition_usd: float = Field(100, gt=0, le=1_000_000)
+    short_pct: float = Field(50, gt=0, le=100)
+    long1_pct: float = Field(40, gt=0, le=100)
+    long2_pct: float = Field(40, gt=0, le=100)
+
+
+@app.post("/api/scanner/close")
+def api_scanner_close(body: ScannerCloseBody):
+    return momentum_scanner.close_strategy(body.symbol.upper())
+
+
+@app.post("/api/scanner/exec")
+def api_scanner_exec(body: ScannerExecBody):
+    momentum_scanner.set_exec_enabled(body.enabled)
+    return {"ok": True, "exec_enabled": momentum_scanner.status().get("exec_enabled")}
+
+
+@app.post("/api/scanner/risk")
+def api_scanner_risk(body: ScannerRiskBody):
+    momentum_scanner.set_risk_config(
+        partition_usd=body.partition_usd,
+        short_pct=body.short_pct,
+        long1_pct=body.long1_pct,
+        long2_pct=body.long2_pct,
+    )
+    st = momentum_scanner.status()
+    return {
+        "ok": True,
+        "partition_usd": st.get("partition_usd"),
+        "short_partition_pct": st.get("short_partition_pct"),
+        "long1_partition_pct": st.get("long1_partition_pct"),
+        "long2_partition_pct": st.get("long2_partition_pct"),
+    }
+
+
+@app.websocket("/ws/scanner")
+async def ws_scanner(websocket: WebSocket):
+    if not _ws_token_ok(websocket):
+        await websocket.close(code=4401, reason="unauthorized")
+        return
+    try:
+        await scanner_stream.serve_client(websocket)
+    except WebSocketDisconnect:
+        pass
+
+
+def _attempt_binance_login(api_key: str, api_secret: str, testnet: bool) -> tuple[dict[str, Any] | None, str | None]:
+    connector.cfg.paper = False
+    connector.configure(api_key, api_secret, testnet)
+    try:
+        acct = connector.account_info()
+        connector._connected = acct is not None
+        return acct, None
+    except Exception as e:
+        connector._connected = False
+        return None, str(e)
 
 
 @app.post("/api/login")
 def api_login(body: LoginBody):
-    # Explicit app login must validate real Futures credentials (not paper bypass).
-    connector.cfg.paper = False
-    connector.configure(body.api_key, body.api_secret, body.testnet)
-    connector.sync_server_time(force=True)
-    snap = connector.status_snapshot()
-    if not snap.get("connected"):
-        err = _login_error_detail(snap.get("error") or "Binance login failed", body.testnet)
-        raise HTTPException(status_code=401, detail=err)
-    try:
-        connector._ensure_margin_setup()
-    except Exception as e:
-        log.warning("post-login margin setup: %s", e)
+    """Fast login — time sync + account verify; alt env in one request when enabled."""
+    resolved_testnet = bool(body.testnet)
+    auto_detected = False
+    acct, err = _attempt_binance_login(body.api_key, body.api_secret, resolved_testnet)
+
+    if acct is None and body.auto_detect_env and _is_key_env_mismatch(err or ""):
+        alt_acct, alt_err = _attempt_binance_login(body.api_key, body.api_secret, not resolved_testnet)
+        if alt_acct is not None:
+            acct = alt_acct
+            resolved_testnet = not resolved_testnet
+            auto_detected = True
+        else:
+            err = alt_err or err
+
+    if acct is None:
+        raise HTTPException(
+            status_code=401,
+            detail=_login_error_detail(err or "Binance login failed", resolved_testnet),
+        )
+
+    momentum_scanner.set_exec_enabled(True)
+    threading.Thread(target=connector.warm_order_cache, daemon=True).start()
     return {
         "ok": True,
-        "account": snap.get("account"),
-        "mode": snap.get("mode"),
-        "testnet": bool(body.testnet),
+        "account": acct,
+        "mode": "testnet" if resolved_testnet else "live",
+        "testnet": resolved_testnet,
+        "auto_detected": auto_detected,
+        "exec_enabled": True,
     }
 
 
@@ -259,6 +409,7 @@ def api_attach():
             status_code=401,
             detail="Binance not configured — set BINANCE_API_KEY/SECRET or POST /api/login",
         )
+    momentum_scanner.set_exec_enabled(True)
     return {"ok": True, "account": snap.get("account"), "mode": snap.get("mode", "env")}
 
 
@@ -267,12 +418,13 @@ def api_logout():
     prev_testnet = connector.cfg.testnet
     connector.cfg.paper = _truthy(os.environ.get("BINANCE_PAPER", "0"))
     connector.configure("", "", prev_testnet)
+    momentum_scanner.set_exec_enabled(False)
     return {"ok": True}
 
 
 @app.get("/api/status")
 def api_status():
-    return connector.status_snapshot()
+    return connector.status_snapshot(skip_ping=connector._connected)
 
 
 @app.get("/api/symbol/{symbol}")

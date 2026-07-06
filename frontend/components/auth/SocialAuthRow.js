@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
-import Constants from 'expo-constants';
+import { safeConstantsExtraKey } from '../../lib/expoConstantsSafe';
 import { useAuth } from '../../contexts/AuthContext';
 import { useBilshenzTheme } from '../../contexts/ThemeContext';
 import { createAuthStyles } from '../../theme/authStyles';
@@ -10,8 +10,7 @@ import { createAuthStyles } from '../../theme/authStyles';
 WebBrowser.maybeCompleteAuthSession();
 
 function extra(key) {
-  const c = Constants.expoConfig?.extra ?? Constants.manifest2?.extra ?? Constants.manifest?.extra;
-  return c?.[key];
+  return safeConstantsExtraKey(key);
 }
 
 export default function SocialAuthRow({ onError }) {

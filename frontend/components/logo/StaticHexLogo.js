@@ -1,5 +1,6 @@
 import React from 'react';
 import Svg, { Circle, Defs, G, Line, LinearGradient, Polygon, RadialGradient, Rect, Stop, Text as SvgText } from 'react-native-svg';
+import AnimatedHexLogo from './AnimatedHexLogo';
 import { CX, CY, DIAMONDS, INNER_HEX, MAIN_HEX, VB, logoTransform } from './hexLogoGeometry';
 
 const COLORS = {
@@ -11,10 +12,13 @@ const COLORS = {
 };
 
 /**
- * Static Bilshenz hex logo — same geometry as launcher icon when variant is set.
- * @param {{ size?: number, variant?: 'icon'|'adaptiveIcon'|'splash'|'default' }} props
+ * Bilshenz hex logo — static by default; pass animated for rotating header-style logo.
+ * @param {{ size?: number, variant?: 'icon'|'adaptiveIcon'|'splash'|'default', animated?: boolean }} props
  */
-export default function StaticHexLogo({ size = 120, variant = 'splash' }) {
+export default function StaticHexLogo({ size = 120, variant = 'splash', animated = false }) {
+  if (animated) {
+    return <AnimatedHexLogo size={size} />;
+  }
   const isIcon = variant === 'icon' || variant === 'adaptiveIcon';
   const transform = logoTransform(variant);
   const bX = isIcon ? 30.5 : 27;

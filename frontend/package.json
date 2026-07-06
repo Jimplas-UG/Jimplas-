@@ -4,6 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node scripts/run-expo-go.js",
+    "start:phone": "node scripts/run-expo-go.js --clear",
     "start:usb": "node scripts/ensure-adb.js && node scripts/run-expo-go.js --usb",
     "start:dev": "node scripts/run-dev-preview.js",
     "start:dev:lan": "node scripts/run-dev-preview.js --lan",

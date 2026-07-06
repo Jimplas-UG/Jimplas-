@@ -1,11 +1,16 @@
 /**
  * Production env — process.env (EAS) + app.config extra (runtime fallback).
+ * Never imports expo-constants at module load (Expo Go Android crash).
  */
-import Constants from 'expo-constants';
 
 function extra(key) {
-  const c = Constants.expoConfig?.extra ?? Constants.manifest2?.extra ?? Constants.manifest?.extra;
-  return c?.[key];
+  try {
+    // eslint-disable-next-line global-require
+    const { safeConstantsExtraKey } = require('./expoConstantsSafe');
+    return safeConstantsExtraKey(key);
+  } catch {
+    return undefined;
+  }
 }
 
 function stripTrailingSlash(url) {

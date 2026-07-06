@@ -23,7 +23,12 @@ Write-Host "=== Bilshenz Expo Go (Administrator) ===" -ForegroundColor Cyan
 $ruleName = "Expo Metro TCP $port"
 netsh advfirewall firewall delete rule name="$ruleName" 2>$null | Out-Null
 netsh advfirewall firewall add rule name="$ruleName" dir=in action=allow protocol=TCP localport=$port profile=any | Out-Null
-Write-Host "OK: Firewall allows inbound TCP $port" -ForegroundColor Green
+foreach ($extraPort in @('8766', '8791')) {
+  $extraRule = "Bilshenz Desk TCP $extraPort"
+  netsh advfirewall firewall delete rule name="$extraRule" 2>$null | Out-Null
+  netsh advfirewall firewall add rule name="$extraRule" dir=in action=allow protocol=TCP localport=$extraPort profile=any | Out-Null
+}
+Write-Host "OK: Firewall allows inbound TCP $port, 8766, 8791" -ForegroundColor Green
 
 $ip = (Get-NetIPAddress -AddressFamily IPv4 |
   Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.*' -and $_.PrefixOrigin -eq 'Dhcp' } |

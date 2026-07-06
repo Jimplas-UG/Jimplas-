@@ -98,14 +98,14 @@ export default function OpenPositionsPanel({
 
   return (
     <View style={st.wrap}>
-      <View style={[appStyles.gmPanelShell ?? {}, st.panel, { borderColor: C.border }]}>
+      <View style={[st.panel, { borderColor: C.border, backgroundColor: C.panel }]}>
         <View style={[st.head, { borderBottomColor: C.border }]}>
-          <Text style={[st.title, { color: C.goldL }]}>CHART WATCH</Text>
-          <Text style={[st.badge, { color: C.gold }]}>{TRADING_PAIR_LABEL}</Text>
+          <Text style={[st.title, { color: C.text }]}>Live quote</Text>
+          <Text style={[st.badge, { color: C.accentLight }]}>{TRADING_PAIR_LABEL}</Text>
         </View>
         <View style={st.watchRow}>
           <WatchCell label="BID" value={fmtPx(bid)} color={C.red} />
-          <WatchCell label="MID" value={fmtPx(livePrice)} color={C.goldL} large />
+          <WatchCell label="MID" value={fmtPx(livePrice)} color={C.text} large />
           <WatchCell label="ASK" value={fmtPx(ask)} color={C.green} />
         </View>
         <Text style={[st.watchHint, { color: C.dim }]}>
@@ -113,9 +113,9 @@ export default function OpenPositionsPanel({
         </Text>
       </View>
 
-      <View style={[appStyles.gmPanelShell ?? {}, st.panel, { borderColor: C.border, marginTop: 10 }]}>
+      <View style={[st.panel, { borderColor: C.border, backgroundColor: C.panel, marginTop: 10 }]}>
         <View style={[st.head, { borderBottomColor: C.border }]}>
-          <Text style={[st.title, { color: C.goldL }]}>OPEN POSITIONS</Text>
+          <Text style={[st.title, { color: C.text }]}>Open positions</Text>
           <Text style={[st.badge, { color: positions.length ? C.green : C.dim }]}>
             {positions.length ? String(positions.length) : 'FLAT'}
           </Text>
@@ -144,7 +144,7 @@ export default function OpenPositionsPanel({
                   : '—';
               const busy = closingKey === `${p.symbol}-${p.type}-${p.price_open}`;
               return (
-                <View key={key} style={[st.posCard, { borderColor: C.border, backgroundColor: 'rgba(0,0,0,0.22)' }]}>
+                <View key={key} style={[st.posCard, { borderColor: C.border, backgroundColor: C.panel2 }]}>
                   <View style={st.posTop}>
                     <Text style={[st.posSide, { color: sideCol }]}>
                       {p.type} · {p.volume} {p.symbol}
@@ -172,7 +172,7 @@ export default function OpenPositionsPanel({
                       },
                     ]}>
                     {busy ? (
-                      <ActivityIndicator size="small" color={C.goldL} />
+                      <ActivityIndicator size="small" color={C.accentLight} />
                     ) : (
                       <Text style={[st.closeTxt, { color: profit >= 0 ? C.green : C.red }]}>
                         {profit >= 0 ? 'CLOSE IN PROFIT' : 'CLOSE AT LOSS'}
@@ -186,10 +186,10 @@ export default function OpenPositionsPanel({
         )}
       </View>
 
-      <View style={[appStyles.gmPanelShell ?? {}, st.panel, { borderColor: C.border, marginTop: 10 }]}>
+      <View style={[st.panel, { borderColor: C.border, backgroundColor: C.panel, marginTop: 10 }]}>
         <View style={[st.head, { borderBottomColor: C.border }]}>
-          <Text style={[st.title, { color: C.goldL }]}>TRADE WATCH</Text>
-          <Text style={[st.badge, { color: C.teal }]}>LOG</Text>
+          <Text style={[st.title, { color: C.text }]}>Recent fills</Text>
+          <Text style={[st.badge, { color: C.teal }]}>Log</Text>
         </View>
         {!watchDeals.length ? (
           <Text style={[st.empty, { color: C.dim }]}>Recent fills appear here after trades execute.</Text>
@@ -223,7 +223,7 @@ function WatchCell({ label, value, color, large }) {
 
 const st = StyleSheet.create({
   wrap: { marginBottom: 10 },
-  panel: { borderWidth: 1, borderRadius: 14, overflow: 'hidden' },
+  panel: { borderWidth: 1, borderRadius: 16, overflow: 'hidden' },
   head: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -252,7 +252,7 @@ const st = StyleSheet.create({
   },
   totalLbl: { fontSize: 9, fontWeight: '700', letterSpacing: 0.4 },
   totalVal: { fontSize: 16, fontWeight: '800' },
-  posCard: { marginHorizontal: 12, marginTop: 10, marginBottom: 4, borderWidth: 1, borderRadius: 12, padding: 12 },
+  posCard: { marginHorizontal: 12, marginTop: 10, marginBottom: 4, borderWidth: 1, borderRadius: 14, padding: 12 },
   posTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   posSide: { fontSize: 12, fontWeight: '800' },
   posPnl: { fontSize: 15, fontWeight: '800' },

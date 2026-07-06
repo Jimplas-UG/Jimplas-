@@ -20,7 +20,7 @@ export function createAuthStyles(C) {
     brand: {
       fontSize: 28,
       fontWeight: '900',
-      color: C.goldL,
+      color: C.accentLight,
       letterSpacing: 4,
     },
     brandSub: {
@@ -83,8 +83,8 @@ export function createAuthStyles(C) {
       alignItems: 'center',
     },
     chipActive: {
-      borderColor: C.gold,
-      backgroundColor: 'rgba(212,180,90,0.12)',
+      borderColor: C.accent,
+      backgroundColor: C.accentDim,
     },
     chipTxt: {
       fontSize: 11,
@@ -93,22 +93,22 @@ export function createAuthStyles(C) {
       letterSpacing: 0.5,
     },
     chipTxtActive: {
-      color: C.goldL,
+      color: C.accentLight,
     },
     btn: {
       marginTop: spacing.lg,
       borderRadius: radius.md,
       paddingVertical: 14,
       alignItems: 'center',
-      backgroundColor: C.goldD,
+      backgroundColor: C.accent,
       borderWidth: 1,
-      borderColor: C.gold,
+      borderColor: 'rgba(124,108,240,0.55)',
     },
     btnDisabled: {
       opacity: 0.45,
     },
     btnTxt: {
-      color: C.goldL,
+      color: '#F1F5F9',
       fontSize: 13,
       fontWeight: '800',
       letterSpacing: 1.2,
@@ -183,7 +183,7 @@ export function createAuthStyles(C) {
       color: C.text,
     },
     link: {
-      color: C.goldL,
+      color: C.accentLight,
       fontWeight: '700',
     },
     checkRow: {
@@ -203,8 +203,8 @@ export function createAuthStyles(C) {
       marginTop: 2,
     },
     checkBoxOn: {
-      borderColor: C.gold,
-      backgroundColor: 'rgba(212,180,90,0.2)',
+      borderColor: C.accent,
+      backgroundColor: C.accentDim,
     },
     footer: {
       alignItems: 'center',

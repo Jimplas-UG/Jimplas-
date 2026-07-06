@@ -22,7 +22,7 @@ export default function AuthShell({ children, scroll = true }) {
   const body = (
     <Animated.View style={{ flex: 1, opacity: fade, transform: [{ translateY: slide }] }}>
       <View style={st.hero}>
-        <StaticHexLogo size={56} />
+        <StaticHexLogo size={56} animated />
         <Animated.Text style={st.brand}>BILSHENZ</Animated.Text>
         <Animated.Text style={st.brandSub}>Institutional Desk · BSV32</Animated.Text>
       </View>

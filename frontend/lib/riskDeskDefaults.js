@@ -12,6 +12,9 @@ export const MARGIN_MODE_PRESETS = ['ISOLATED', 'CROSS'];
 /** Capital & risk desk — independent from strategy signal logic. */
 export const RISK_DESK_DEFAULTS = {
   partitionUsd: 100,
+  shortPartitionPct: 50,
+  long1PartitionPct: 40,
+  long2PartitionPct: 40,
   riskPerTradePct: 1,
   maxDailyLossPct: 3,
   maxWeeklyLossPct: 8,
@@ -66,6 +69,9 @@ export function normalizeRiskDeskConfig(raw) {
 
   return {
     partitionUsd,
+    shortPartitionPct: n('shortPartitionPct', 1, 100),
+    long1PartitionPct: n('long1PartitionPct', 1, 100),
+    long2PartitionPct: n('long2PartitionPct', 1, 100),
     riskPerTradePct: n('riskPerTradePct', 0.1, 5),
     maxDailyLossPct: n('maxDailyLossPct', 0.5, 25),
     maxWeeklyLossPct: n('maxWeeklyLossPct', 1, 40),

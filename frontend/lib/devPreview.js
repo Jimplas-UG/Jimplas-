@@ -18,7 +18,21 @@ export function useMockApi() {
 
 export function skipSplash() {
   const v = process.env.EXPO_PUBLIC_SKIP_SPLASH?.trim();
-  return v === '1' || v === 'true';
+  if (v === '0' || v === 'false') return false;
+  if (v === '1' || v === 'true') return true;
+  /* Expo Go dev reloads — skip 9s cinematic by default */
+  return typeof __DEV__ !== 'undefined' && __DEV__;
+}
+
+export function fastSplash() {
+  const v = process.env.EXPO_PUBLIC_FAST_SPLASH?.trim();
+  if (v === '0' || v === 'false') return false;
+  if (v === '1' || v === 'true') return true;
+  return skipSplash();
+}
+
+export function shouldPlayOpening() {
+  return !skipSplash();
 }
 
 export function devScreens() {

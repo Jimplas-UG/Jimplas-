@@ -77,13 +77,24 @@ class BinanceConnector:
         return TESTNET if self.cfg.testnet else MAINNET
 
     def configure(self, api_key: str, api_secret: str, testnet: bool | None = None) -> None:
-        self.cfg.api_key = (api_key or "").strip()
-        self.cfg.api_secret = (api_secret or "").strip()
+        new_key = (api_key or "").strip()
+        new_secret = (api_secret or "").strip()
+        new_testnet = self.cfg.testnet if testnet is None else testnet
+        same_creds = (
+            self.cfg.api_key == new_key
+            and self.cfg.api_secret == new_secret
+            and self.cfg.testnet == new_testnet
+            and self._time_synced_at
+            and time.time() - self._time_synced_at < 300
+        )
+        self.cfg.api_key = new_key
+        self.cfg.api_secret = new_secret
         if testnet is not None:
             self.cfg.testnet = testnet
-        self._symbol_info = None
+        if not same_creds:
+            self._symbol_info = None
         self._connected = bool(self.cfg.api_key and self.cfg.api_secret) or self.cfg.paper
-        if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper:
+        if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper and not same_creds:
             self.sync_server_time(force=True)
 
     def sync_server_time(self, force: bool = False) -> None:
@@ -116,13 +127,13 @@ class BinanceConnector:
         path: str,
         params: dict[str, Any] | None = None,
         signed: bool = False,
-        timeout: float = 15.0,
+        timeout: float = 10.0,
         base_url: str | None = None,
     ) -> Any:
         params = dict(params or {})
         root = (base_url or self.base_url).rstrip("/")
         last_err: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(5):
             if signed:
                 params["timestamp"] = self._server_timestamp_ms()
                 params["recvWindow"] = 60000
@@ -164,8 +175,8 @@ class BinanceConnector:
                 raise RuntimeError(detail.get("msg") or detail.get("detail") or body) from e
             except urllib.error.URLError as e:
                 last_err = e
-                if attempt < 2:
-                    time.sleep(1.0 * (attempt + 1))
+                if attempt < 4:
+                    time.sleep(1.5 * (attempt + 1))
                     continue
                 raise RuntimeError(str(e)) from e
         if last_err:
@@ -259,6 +270,16 @@ class BinanceConnector:
         except RuntimeError as e:
             log.warning("leverage: %s", e)
 
+    def warm_order_cache(self) -> None:
+        """Background prep after login — margin + symbol filters for first market order."""
+        if self.cfg.paper or not self.cfg.api_key:
+            return
+        self._ensure_margin_setup()
+        try:
+            self.exchange_info()
+        except Exception as e:
+            log.warning("warm_order_cache: %s", e)
+
     def symbol_margin_type(self, symbol: str | None = None) -> str:
         sym = (symbol or self.cfg.symbol).upper()
         if self.cfg.paper:
@@ -313,7 +334,7 @@ class BinanceConnector:
             log.warning("symbol_leverage: %s", e)
         return int(self.cfg.leverage)
 
-    def status_snapshot(self) -> dict[str, Any]:
+    def status_snapshot(self, *, skip_ping: bool = False) -> dict[str, Any]:
         if self.cfg.paper:
             return {
                 "connected": True,
@@ -324,7 +345,7 @@ class BinanceConnector:
         if not self.cfg.api_key or not self.cfg.api_secret:
             return {"connected": False, "mode": "unconfigured", "testnet": self.cfg.testnet}
         try:
-            if not self.ping():
+            if not skip_ping and not self.ping():
                 env = "testnet.binancefuture.com" if self.cfg.testnet else "fapi.binance.com"
                 return {
                     "connected": False,
@@ -747,6 +768,129 @@ class BinanceConnector:
 
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         return {"ok": True, "closed": closed, "latency_ms": latency_ms, "broker": "binance"}
+
+    def list_usdt_perpetual_symbols(self) -> list[str]:
+        data = self._request("GET", "/fapi/v1/exchangeInfo", timeout=45.0)
+        out: list[str] = []
+        for s in data.get("symbols", []):
+            if (
+                s.get("contractType") == "PERPETUAL"
+                and s.get("quoteAsset") == "USDT"
+                and s.get("status") == "TRADING"
+            ):
+                out.append(str(s.get("symbol", "")).upper())
+        return sorted(sym for sym in out if sym)
+
+    def prepare_symbol(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> None:
+        sym = symbol.upper()
+        self.cfg.symbol = sym
+        self.cfg.leverage = int(leverage)
+        self.cfg.margin_type = margin_type.upper()
+        self._symbol_info = None
+        if self.cfg.paper:
+            return
+        if not self.cfg.api_key:
+            return
+        try:
+            self._request(
+                "POST",
+                "/fapi/v1/marginType",
+                {"symbol": sym, "marginType": self.cfg.margin_type},
+                signed=True,
+            )
+        except RuntimeError as e:
+            if "No need to change" not in str(e):
+                log.warning("prepare_symbol marginType %s: %s", sym, e)
+        try:
+            self._request(
+                "POST",
+                "/fapi/v1/leverage",
+                {"symbol": sym, "leverage": int(leverage)},
+                signed=True,
+            )
+        except RuntimeError as e:
+            log.warning("prepare_symbol leverage %s: %s", sym, e)
+
+    def order_market_leg(
+        self,
+        symbol: str,
+        side: str,
+        volume: float,
+        sl: float | None = None,
+        tp: float | None = None,
+        leverage: int = 5,
+        magic: int = DEFAULT_MAGIC,
+        leg: str = "",
+    ) -> dict[str, Any]:
+        """Scanner leg order — allows multiple legs per symbol (paper) or hedge legs (live)."""
+        import time as _time
+
+        if _truthy(os.environ.get("FORWARD_DRY_RUN")):
+            return {"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True}
+
+        sym = symbol.upper()
+        side_u = side.upper()
+        if self.cfg.paper:
+            from paper_simulator import paper_store
+
+            return paper_store.order_market_leg(sym, side_u, volume, sl, tp, magic)
+
+        if not self.cfg.api_key:
+            return {"ok": False, "error": "api_key_missing"}
+
+        self.prepare_symbol(sym, leverage, "ISOLATED")
+        tick = self.book_ticker(sym)
+        if not tick:
+            return {"ok": False, "error": f"no tick for {sym}"}
+        intended = tick["ask"] if side_u == "BUY" else tick["bid"]
+        info = self.symbol_spec(sym)
+        qty = round_to_step(volume, info["stepSize"])
+        if qty < info["minQty"]:
+            qty = info["minQty"]
+
+        cid = f"{CLIENT_ID_PREFIX}_SC_{leg or magic}_{int(_time.time())}"[:36]
+        params: dict[str, Any] = {
+            "symbol": sym,
+            "side": side_u,
+            "type": "MARKET",
+            "quantity": qty,
+            "newClientOrderId": cid,
+        }
+        t0 = _time.perf_counter()
+        try:
+            entry_resp = self._request("POST", "/fapi/v1/order", params, signed=True)
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e), "latency_ms": round((_time.perf_counter() - t0) * 1000, 1)}
+        fill = float(entry_resp.get("avgPrice") or intended)
+        if tp is not None:
+            try:
+                self._place_conditional(side_u, "TAKE_PROFIT_MARKET", float(tp), qty, f"{cid}_TP")
+            except RuntimeError as e:
+                log.warning("scanner TP %s: %s", sym, e)
+        return {
+            "ok": True,
+            "symbol": sym,
+            "side": side_u,
+            "volume": qty,
+            "intended_price": intended,
+            "fill_price": fill,
+            "latency_ms": round((_time.perf_counter() - t0) * 1000, 1),
+            "order": entry_resp.get("orderId"),
+            "magic": magic,
+            "leg": leg,
+            "broker": "binance",
+        }
+
+    def close_leg(self, symbol: str, magic: int, volume: float | None = None) -> dict[str, Any]:
+        if self.cfg.paper:
+            from paper_simulator import paper_store
+
+            return paper_store.close_leg(symbol, magic, volume)
+        sym = symbol.upper()
+        positions = [p for p in self.positions(sym) if int(p.get("magic", DEFAULT_MAGIC)) == int(magic)]
+        if not positions:
+            return self.close_position(sym, volume)
+        return self.close_position(sym, volume or positions[0].get("volume"))
 
 
 def config_from_env() -> BinanceConfig:

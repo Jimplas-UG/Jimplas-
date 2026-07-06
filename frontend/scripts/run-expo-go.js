@@ -15,7 +15,7 @@
  *
  * Usage: node scripts/run-expo-go.js [--lan] [--usb] [--clear ...]
  */
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -40,6 +40,13 @@ function loadEnvLocal() {
 
 loadEnvLocal();
 
+const raw = process.argv.slice(2);
+const forceLan = raw.includes('--lan');
+const forceUsb = raw.includes('--usb');
+const forceTunnelFlag = raw.includes('--tunnel');
+
+const { ensureMetroFirewall } = require('./ensure-metro-firewall');
+
 const EXPO_GO_52 = 'https://expo.dev/go?sdkVersion=52';
 
 console.log('');
@@ -47,17 +54,34 @@ console.log('[expo-go] Install / update Expo Go for SDK 52: ' + EXPO_GO_52);
 console.log('[expo-go] This project uses Expo SDK 52 (expo package ~52.x).');
 console.log('');
 
-const raw = process.argv.slice(2);
-const forceLan = raw.includes('--lan');
-const forceUsb = raw.includes('--usb');
-const forceTunnelFlag = raw.includes('--tunnel');
 const hasAdbDevice = adbHasDevice();
-// Never use tunnel when --lan; ignore stale EXPO_FORCE_TUNNEL from parent shell unless --tunnel passed.
-const forceTunnel =
+const passThru = raw.filter((x) => x !== '--lan' && x !== '--usb' && x !== '--tunnel');
+const metroPort = process.env.METRO_PORT || process.env.RCT_METRO_PORT || '8081';
+
+let useTunnel =
   !forceLan &&
   (forceTunnelFlag || process.env.EXPO_FORCE_TUNNEL === '1' || process.env.EXPO_FORCE_TUNNEL === 'true');
-const passThru = raw.filter((x) => x !== '--lan' && x !== '--usb');
-const metroPort = process.env.METRO_PORT || process.env.RCT_METRO_PORT || '8081';
+
+if (!useTunnel && !forceLan && !forceUsb && process.platform === 'win32' && !hasAdbDevice) {
+  useTunnel = true;
+  console.log('[expo-go] No USB device — using TUNNEL mode (avoids Expo Go download fatal errors).');
+  console.log('[expo-go] Same Wi‑Fi LAN: npm run start:lan  |  USB: npm run start:usb');
+  console.log('');
+}
+
+const usbReverseOk =
+  !useTunnel &&
+  (forceUsb || !forceLan) &&
+  process.platform === 'win32' &&
+  hasAdbDevice &&
+  adbReverseTcp(metroPort);
+
+if (!useTunnel && !usbReverseOk && process.platform === 'win32' && !ensureMetroFirewall()) {
+  useTunnel = true;
+  console.log('[expo-go] LAN blocked by firewall — switching to TUNNEL so Expo Go can connect.');
+  console.log('[expo-go] For Wi‑Fi LAN later: Admin → npm run fix:metro-firewall → npm run start:lan');
+  console.log('');
+}
 
 function isLikelyVirtualInterface(name) {
   const n = String(name).toLowerCase();
@@ -115,18 +139,13 @@ const portArgs = passThru.includes('--port') ? [] : ['--port', String(metroPort)
 
 let expoArgs;
 
-if (forceTunnel) {
+if (useTunnel) {
   expoArgs = ['expo', 'start', '--tunnel', '--go', ...portArgs, ...passThru];
   console.log('');
   console.log('[expo-go] Mode: TUNNEL — scan the QR / exp URL from THIS terminal in Expo Go 52.');
   console.log('[expo-go] Requires outbound internet (ngrok). If tunnel fails, try USB + npm run start:usb.');
   console.log('');
-} else if (
-  (forceUsb || !forceLan) &&
-  process.platform === 'win32' &&
-  hasAdbDevice &&
-  adbReverseTcp(metroPort)
-) {
+} else if (usbReverseOk) {
   expoArgs = ['expo', 'start', '--localhost', '--go', ...portArgs, ...passThru];
   const adbPath = resolveAdbPath() || 'adb';
   console.log('');
@@ -150,7 +169,16 @@ if (forceTunnel) {
   console.log('');
   console.log('[expo-go] Mode: LAN  REACT_NATIVE_PACKAGER_HOSTNAME=' + ip);
   console.log('[expo-go] After Metro starts, open: exp://' + ip + ':' + metroPort);
-  console.log('[expo-go] Use THIS terminal\'s QR/URL (not expo-go-qr.png) unless you just ran npm run qr with matching IP/port.');
+  try {
+    spawnSync(process.execPath, [path.join(__dirname, 'make-expo-qr.js')], {
+      stdio: 'inherit',
+      env: { ...process.env, EXPO_LAN_IP: ip, METRO_PORT: metroPort },
+      cwd: frontendRoot,
+    });
+  } catch {
+    /* qr optional */
+  }
+  console.log('[expo-go] Open frontend/expo-go-qr.html in your browser to scan.');
   if (process.platform === 'win32') {
     console.log('');
     console.log('[expo-go] If Expo Go 52 shows "Failed to download remote update" on same Wi‑Fi:');
@@ -165,7 +193,10 @@ if (forceTunnel) {
 // Do not force EXPO_OFFLINE — it breaks Expo Go manifest fetch on many devices.
 const childEnv = { ...process.env };
 delete childEnv.EXPO_OFFLINE;
-if (!forceTunnel) delete childEnv.EXPO_FORCE_TUNNEL;
+if (!useTunnel) delete childEnv.EXPO_FORCE_TUNNEL;
+if (!childEnv.EXPO_PUBLIC_SKIP_SPLASH?.trim()) {
+  childEnv.EXPO_PUBLIC_SKIP_SPLASH = '1';
+}
 if (!childEnv.EXPO_PUBLIC_DESK_API_URL?.trim()) {
   const apiHost = pickLanIp();
   childEnv.EXPO_PUBLIC_DESK_API_URL = `http://${apiHost}:8791`;

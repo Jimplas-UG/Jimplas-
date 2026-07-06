@@ -13,6 +13,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useBilshenzTheme } from '../../contexts/ThemeContext';
 import { apiChangePassword, apiUpdateProfile, friendlyAuthError } from '../../lib/authApi';
 import { createAuthStyles } from '../../theme/authStyles';
+import { PilotCard } from '../pilot/PilotUI';
 import PasswordField from './PasswordField';
 
 function initials(name) {
@@ -26,7 +27,7 @@ function initials(name) {
 }
 
 export default function AccountProfileCard() {
-  const { colors: C, styles } = useBilshenzTheme();
+  const { colors: C } = useBilshenzTheme();
   const st = useMemo(() => createAuthStyles(C), [C]);
   const { user, accessToken, logout, refreshProfile, busy, biometricEnabled, enableBiometric, biometricAvailable } =
     useAuth();
@@ -95,8 +96,7 @@ export default function AccountProfileCard() {
   if (!user) return null;
 
   return (
-    <View style={[styles.card, { marginBottom: 12, borderColor: C.border }]}>
-      <Text style={[st.label, { marginTop: 0 }]}>Account</Text>
+    <PilotCard style={{ marginBottom: 12 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 }}>
         <Pressable onPress={onPickPhoto}>
           {avatarUrl ? (
@@ -109,11 +109,11 @@ export default function AccountProfileCard() {
                 borderRadius: 28,
                 backgroundColor: C.panel2,
                 borderWidth: 1,
-                borderColor: C.gold,
+                borderColor: C.accent,
                 alignItems: 'center',
                 justifyContent: 'center',
               }}>
-              <Text style={{ color: C.goldL, fontWeight: '800', fontSize: 16 }}>{initials(fullName)}</Text>
+              <Text style={{ color: C.accentLight, fontWeight: '800', fontSize: 16 }}>{initials(fullName)}</Text>
             </View>
           )}
         </Pressable>
@@ -139,7 +139,7 @@ export default function AccountProfileCard() {
       />
 
       <Pressable style={[st.btn, saving && st.btnDisabled]} onPress={onSaveProfile} disabled={saving}>
-        {saving ? <ActivityIndicator color={C.goldL} /> : <Text style={st.btnTxt}>SAVE PROFILE</Text>}
+        {saving ? <ActivityIndicator color={C.accentLight} /> : <Text style={st.btnTxt}>SAVE PROFILE</Text>}
       </Pressable>
 
       <Pressable style={st.btnGhost} onPress={() => setShowPw((v) => !v)}>
@@ -179,6 +179,6 @@ export default function AccountProfileCard() {
         disabled={busy}>
         <Text style={[st.btnTxt, { color: C.red }]}>LOG OUT</Text>
       </Pressable>
-    </View>
+    </PilotCard>
   );
 }

@@ -8,7 +8,7 @@ import StaticHexLogo from './logo/StaticHexLogo';
 export default function BootFallback({ message, onRetry }) {
   return (
     <View style={styles.root}>
-      <StaticHexLogo size={96} />
+      <StaticHexLogo size={96} animated />
       <Text style={styles.title}>Bilshenz</Text>
       <Text style={styles.msg}>{message || 'Starting desk…'}</Text>
       {onRetry ? (

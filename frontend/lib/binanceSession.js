@@ -10,14 +10,18 @@ import {
   pickReachableBinanceBridgeUrl,
   postBinanceAttach,
   postBinanceLogin,
+  rememberBridgeUrl,
+  probeBridgeHealth,
 } from '../broker/binanceFuturesApi';
 import { getBrokerMode } from './brokerMode';
-import { binanceBridgeUrlCandidates } from '../utils/binanceApiUrl';
 
 export const STORAGE_BINANCE_KEY = '@bilshenz_v1/binanceApiKey';
 export const STORAGE_BINANCE_SECRET = '@bilshenz_v1/binanceApiSecret';
 export const STORAGE_BINANCE_TESTNET = '@bilshenz_v1/binanceTestnet';
 const MIGRATION_FLAG = '@bilshenz_v1/binanceSecureMigrated';
+
+const CONNECT_TIMEOUT_MS = 12000;
+const FAST_LOGIN_TIMEOUT_MS = 7000;
 
 const SECURE_KEYS = {
   apiKey: 'bilshenz.binance.apiKey',
@@ -94,7 +98,6 @@ export async function saveStoredBinanceCredentials(apiKey, apiSecret, testnet) {
   await AsyncStorage.setItem(MIGRATION_FLAG, '1');
 }
 
-/** Persist testnet/mainnet preference before connect (keeps auto-restore in sync with UI toggle). */
 export async function saveStoredBinanceTestnetPref(testnet) {
   await AsyncStorage.setItem(STORAGE_BINANCE_TESTNET, testnet ? '1' : '0');
 }
@@ -105,38 +108,45 @@ export async function clearStoredBinanceCredentials() {
   await AsyncStorage.multiRemove([STORAGE_BINANCE_KEY, STORAGE_BINANCE_SECRET, STORAGE_BINANCE_TESTNET]);
 }
 
-function isKeyEnvMismatch(detail) {
-  return /invalid api-key|api-key format|signature|permissions|unauthorized/i.test(String(detail || ''));
+export function hasBinanceCredentials(creds) {
+  return !!(String(creds?.apiKey || '').trim() && String(creds?.apiSecret || '').trim());
 }
 
-/**
- * Login with optional auto-detect: if keys fail on selected env, try the other (testnet ↔ mainnet).
- */
-async function loginWithEnvFallback(url, apiKey, apiSecret, testnet, timeoutMs) {
-  let login = await postBinanceLogin(
+
+export function isTransientBridgeError(error) {
+  const msg = String(error || '');
+  return /network|fetch|timeout|timed out|ECONNREFUSED|abort|failed to connect|bridge offline|503|502|504/i.test(msg);
+}
+
+export function isHardBinanceAuthFailure(error) {
+  const msg = String(error || '');
+  if (isTransientBridgeError(msg)) return false;
+  return /invalid api-key|api-key format|signature|permission denied|ip.*restrict/i.test(msg);
+}
+
+/** Resolve bridge URL — on fast connect, use configured URL immediately (login proves reachability). */
+async function resolveBridgeUrl(baseUrl, { fast = true } = {}) {
+  const pref = String(baseUrl || '').trim().replace(/\/$/, '');
+  if (fast && pref) {
+    rememberBridgeUrl(pref);
+    return pref;
+  }
+  const url = await pickReachableBinanceBridgeUrl(pref);
+  if (url) rememberBridgeUrl(url);
+  return url;
+}
+
+/** Login — backend auto-detects testnet/mainnet mismatch in a single request. */
+async function loginOnce(url, apiKey, apiSecret, testnet, timeoutMs, autoDetectEnv) {
+  return postBinanceLogin(
     url,
-    { api_key: apiKey, api_secret: apiSecret, testnet },
+    { api_key: apiKey, api_secret: apiSecret, testnet, auto_detect_env: autoDetectEnv },
     timeoutMs,
   );
-  if (login.ok) return { login, testnet, autoDetected: false };
-
-  if (isKeyEnvMismatch(login.detail)) {
-    const alt = !testnet;
-    const altLogin = await postBinanceLogin(
-      url,
-      { api_key: apiKey, api_secret: apiSecret, testnet: alt },
-      timeoutMs,
-    );
-    if (altLogin.ok) {
-      return { login: altLogin, testnet: alt, autoDetected: true };
-    }
-  }
-
-  return { login, testnet, autoDetected: false };
 }
 
 /**
- * Full connect flow: reach bridge → clear stale session → login/attach → verify account.
+ * Full connect flow — optimized for quant speed on credential re-entry.
  */
 export async function connectBinanceBridge({
   baseUrl = '',
@@ -144,18 +154,20 @@ export async function connectBinanceBridge({
   apiSecret = '',
   testnet = true,
   mode = getBrokerMode(),
-  timeoutMs = 22000,
+  timeoutMs = CONNECT_TIMEOUT_MS,
   autoDetectEnv = true,
+  clearSession = false,
+  fast = true,
 } = {}) {
-  const url = await pickReachableBinanceBridgeUrl(baseUrl);
+  const url = await resolveBridgeUrl(baseUrl, { fast });
   if (!url) {
     return { ok: false, url: baseUrl, error: 'Cannot reach Binance bridge' };
   }
 
-  try {
-    await binanceFetch(url, '/api/logout', { method: 'POST' }, 8000);
-  } catch {
-    /* clear stale session */
+  const loginTimeout = fast ? FAST_LOGIN_TIMEOUT_MS : timeoutMs;
+
+  if (clearSession) {
+    void binanceFetch(url, '/api/logout', { method: 'POST' }, 2000).catch(() => {});
   }
 
   let resolvedTestnet = testnet;
@@ -163,7 +175,7 @@ export async function connectBinanceBridge({
   let autoDetected = false;
 
   if (mode === 'paper') {
-    login = await postBinanceAttach(url, timeoutMs);
+    login = await postBinanceAttach(url, loginTimeout);
     if (!login.ok) {
       return { ok: false, url, error: login.detail || 'Paper attach failed' };
     }
@@ -175,39 +187,48 @@ export async function connectBinanceBridge({
     }
 
     const attempt = autoDetectEnv
-      ? await loginWithEnvFallback(url, key, secret, testnet, timeoutMs)
-      : {
-          login: await postBinanceLogin(url, { api_key: key, api_secret: secret, testnet }, timeoutMs),
-          testnet,
-          autoDetected: false,
-        };
-    login = attempt.login;
-    resolvedTestnet = attempt.testnet;
-    autoDetected = attempt.autoDetected;
+      ? await loginOnce(url, key, secret, testnet, loginTimeout, true)
+      : await loginOnce(url, key, secret, testnet, loginTimeout, false);
+    login = attempt;
+    resolvedTestnet = attempt.testnet ?? testnet;
+    autoDetected = !!attempt.auto_detected;
 
     if (!login.ok) {
       return { ok: false, url, error: login.detail || 'Login failed', testnet: resolvedTestnet };
     }
 
-    await saveStoredBinanceCredentials(key, secret, resolvedTestnet);
+    void saveStoredBinanceCredentials(key, secret, resolvedTestnet);
   }
 
-  let account = login.account;
-  let modeLabel = login.mode ?? (resolvedTestnet ? 'testnet' : 'live');
+  const account = login.account;
+  const modeLabel = login.mode ?? (resolvedTestnet ? 'testnet' : 'live');
 
-  const verified = await fetchBinanceSession(url, timeoutMs, 3);
-  if (verified.account) {
-    account = verified.account;
-    modeLabel = verified.mode ?? modeLabel;
-    resolvedTestnet = verified.testnet ?? resolvedTestnet;
-  } else if (!account) {
+  if (!account) {
+    const verified = await fetchBinanceSession(url, 2500, 0);
+    if (!verified.account) {
+      return {
+        ok: false,
+        url,
+        error: verified.error || 'Could not verify account after login',
+        testnet: resolvedTestnet,
+      };
+    }
+    rememberBridgeUrl(url);
     return {
-      ok: false,
+      ok: true,
       url,
-      error: verified.error || 'Could not verify account after login',
-      testnet: resolvedTestnet,
+      session: {
+        ok: true,
+        account: verified.account,
+        mode: verified.mode ?? modeLabel,
+        testnet: verified.testnet ?? resolvedTestnet,
+      },
+      testnet: verified.testnet ?? resolvedTestnet,
+      autoDetected,
     };
   }
+
+  rememberBridgeUrl(url);
 
   return {
     ok: true,
@@ -218,31 +239,62 @@ export async function connectBinanceBridge({
   };
 }
 
-/**
- * Restore bridge session — uses stored keys for binance mode, attach for paper.
- */
-export async function tryBinanceSessionConnect(baseUrl, timeoutMs = 18000) {
+export async function tryBinanceSessionConnect(baseUrl, timeoutMs = 10000) {
   const mode = getBrokerMode();
+  const pref = String(baseUrl || '').trim().replace(/\/$/, '');
+  const hit = pref ? await probeBridgeHealth(pref, 500) : null;
+  const url = hit || (await pickReachableBinanceBridgeUrl(pref));
+  if (!url) {
+    return { ok: false, url: baseUrl, error: 'Cannot reach Binance bridge' };
+  }
 
-  const session = await fetchBinanceSession(baseUrl, timeoutMs, 1);
+  const session = await fetchBinanceSession(url, 4000, 0);
   if (session.ok) {
-    const url = await pickReachableBinanceBridgeUrl(baseUrl);
-    return { ok: true, url: url || baseUrl, session };
+    rememberBridgeUrl(url);
+    return { ok: true, url, session };
   }
 
   const creds = await loadStoredBinanceCredentials();
   if (mode !== 'paper' && (!creds.apiKey.trim() || !creds.apiSecret.trim())) {
-    const url = await pickReachableBinanceBridgeUrl(baseUrl);
-    return { ok: false, url: url || baseUrl, error: 'No stored API credentials' };
+    return { ok: false, url, error: 'No stored API credentials' };
   }
 
   return connectBinanceBridge({
-    baseUrl,
+    baseUrl: url,
     apiKey: creds.apiKey,
     apiSecret: creds.apiSecret,
     testnet: creds.testnet,
     mode,
     timeoutMs,
-    autoDetectEnv: true,
+    autoDetectEnv: false,
+    clearSession: false,
+    fast: true,
   });
+}
+
+export async function restoreBinanceBridgeSession(baseUrl, timeoutMs = 10000) {
+  const pref = String(baseUrl || '').trim().replace(/\/$/, '');
+  const hit = pref ? await probeBridgeHealth(pref, 500) : null;
+  const url = hit || (await pickReachableBinanceBridgeUrl(pref)) || pref;
+
+  const session = await fetchBinanceSession(url, 4000, 0);
+  if (session.ok) {
+    rememberBridgeUrl(url);
+    return { ok: true, url, session, hardFail: false };
+  }
+  if (isHardBinanceAuthFailure(session.error)) {
+    return { ok: false, url, error: session.error, hardFail: true };
+  }
+
+  const mode = getBrokerMode();
+  const creds = await loadStoredBinanceCredentials();
+  if (mode !== 'paper' && !hasBinanceCredentials(creds)) {
+    return { ok: false, url, error: 'No stored API credentials', hardFail: false };
+  }
+
+  const restored = await tryBinanceSessionConnect(url, timeoutMs);
+  return {
+    ...restored,
+    hardFail: isHardBinanceAuthFailure(restored.error),
+  };
 }

@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import {
   ActivityIndicator,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,7 +9,6 @@ import {
   View,
 } from 'react-native';
 import Slider from '@react-native-community/slider';
-import { BlurView } from 'expo-blur';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { fmtRiskUsd } from '../lib/riskDeskModel';
 import { PARTITION_PRESETS_USD, LEVERAGE_PRESETS, MARGIN_MODE_PRESETS } from '../lib/riskDeskDefaults';
@@ -19,16 +17,11 @@ import BinanceStatusStrip from './BinanceStatusStrip';
 
 function RiskCard({ title, badge, children, C }) {
   return (
-    <View style={[st.card, { borderColor: C.border }]}>
-      {Platform.OS === 'ios' ? (
-        <BlurView intensity={18} tint="dark" style={[StyleSheet.absoluteFillObject, { borderRadius: 14 }]} />
-      ) : (
-        <View style={[StyleSheet.absoluteFillObject, { backgroundColor: 'rgba(8,7,4,0.92)', borderRadius: 14 }]} />
-      )}
+    <View style={[st.card, { borderColor: C.border, backgroundColor: C.panel }]}>
       <View style={st.cardInner}>
         <View style={[st.cardHead, { borderBottomColor: C.border }]}>
-          <Text style={[st.cardTitle, { color: C.goldL }]}>{title}</Text>
-          {badge ? <Text style={[st.cardBadge, { color: C.gold }]}>{badge}</Text> : null}
+          <Text style={[st.cardTitle, { color: C.text }]}>{title}</Text>
+          {badge ? <Text style={[st.cardBadge, { color: C.accentLight }]}>{badge}</Text> : null}
         </View>
         {children}
       </View>
@@ -51,7 +44,7 @@ function PctSlider({ label, value, onChange, min, max, step, suffix, C }) {
     <View style={st.sliderBlock}>
       <View style={st.sliderHdr}>
         <Text style={[st.sliderLab, { color: C.dim }]}>{label}</Text>
-        <Text style={[st.sliderVal, { color: C.goldL }]}>
+        <Text style={[st.sliderVal, { color: C.accentLight }]}>
           {value.toFixed(step < 1 ? 1 : 0)}
           {suffix}
         </Text>
@@ -62,9 +55,9 @@ function PctSlider({ label, value, onChange, min, max, step, suffix, C }) {
         step={step}
         value={value}
         onValueChange={onChange}
-        minimumTrackTintColor={C.gold}
+        minimumTrackTintColor={C.accent}
         maximumTrackTintColor={C.border}
-        thumbTintColor={C.goldL}
+        thumbTintColor={C.accentLight}
       />
     </View>
   );
@@ -84,10 +77,10 @@ function PresetChipRow({ label, hint, options, value, onChange, format, C }) {
               onPress={() => onChange(opt)}
               style={({ pressed }) => [
                 st.chip,
-                { borderColor: on ? C.gold : C.border, backgroundColor: on ? 'rgba(212,180,90,0.18)' : 'rgba(0,0,0,0.2)' },
+                { borderColor: on ? C.accent : C.border, backgroundColor: on ? C.accentDim : C.panel2 },
                 pressed && { opacity: 0.85 },
               ]}>
-              <Text style={[st.chipTxt, { color: on ? C.goldL : C.text }]}>{format(opt)}</Text>
+              <Text style={[st.chipTxt, { color: on ? C.accentLight : C.text }]}>{format(opt)}</Text>
             </Pressable>
           );
         })}
@@ -127,7 +120,7 @@ export default function InstitutionalRiskDesk({
   if (!hydrated) {
     return (
       <View style={[st.loading, { paddingHorizontal: pad }]}>
-        <ActivityIndicator color={C.gold} />
+        <ActivityIndicator color={C.accentLight} />
         <Text style={{ color: C.dim, marginTop: 12, fontSize: 12 }}>Loading risk desk…</Text>
       </View>
     );
@@ -154,9 +147,9 @@ export default function InstitutionalRiskDesk({
       contentContainerStyle={[st.scroll, { paddingHorizontal: pad, paddingBottom: 32 }]}
       showsVerticalScrollIndicator={false}>
       <View style={st.hero}>
-        <Text style={[st.heroTitle, { color: C.goldL }]}>INSTITUTIONAL RISK DESK</Text>
+        <Text style={[st.heroTitle, { color: C.text }]}>Risk settings</Text>
         <Text style={[st.heroSub, { color: C.dim }]}>
-          Capital allocation & safety controls — independent from strategy signals
+          Capital allocation, leverage, and safety limits for automated execution
         </Text>
       </View>
 
@@ -176,8 +169,8 @@ export default function InstitutionalRiskDesk({
           <Text style={[st.alertSub, { color: C.dim }]}>All new trades blocked until resumed.</Text>
           <Pressable
             onPress={onResumeTrading}
-            style={[st.resumeBtn, { borderColor: C.gold }]}>
-            <Text style={{ color: C.goldL, fontWeight: '800', fontSize: 11 }}>RESUME TRADING</Text>
+            style={[st.resumeBtn, { borderColor: C.accent }]}>
+            <Text style={{ color: C.accentLight, fontWeight: '800', fontSize: 11 }}>RESUME TRADING</Text>
           </Pressable>
         </View>
       ) : null}
@@ -197,6 +190,29 @@ export default function InstitutionalRiskDesk({
           <MetricTile label="Protected capital" value={fmtRiskUsd(metrics.protectedCapital)} sub="Not traded" color={C.teal} C={C} />
           <MetricTile label="Available to trade" value={fmtRiskUsd(metrics.availableTradingCapital)} color={C.green} C={C} />
         </View>
+        <View style={st.metricGrid}>
+          <MetricTile
+            label="Slot 1"
+            value={`${config.shortPartitionPct}%`}
+            sub={fmtRiskUsd(metrics.shortLegUsd)}
+            color={C.accentLight}
+            C={C}
+          />
+          <MetricTile
+            label="Slot 2"
+            value={`${config.long1PartitionPct}%`}
+            sub={fmtRiskUsd(metrics.long1LegUsd)}
+            color={C.teal}
+            C={C}
+          />
+          <MetricTile
+            label="Slot 3"
+            value={`${config.long2PartitionPct}%`}
+            sub={fmtRiskUsd(metrics.long2LegUsd)}
+            color={C.amber}
+            C={C}
+          />
+        </View>
         <PresetChipRow
           label="Subscribe partition"
           hint="Pick what you are ready to lose — only this slice is used for new trades."
@@ -207,7 +223,7 @@ export default function InstitutionalRiskDesk({
           C={C}
         />
         <Text style={[st.ruleNote, { color: C.dim }]}>
-          Balance above your partition stays protected and is never used for position sizing.
+          Balance above your partition stays protected and is never allocated to new trades.
         </Text>
       </RiskCard>
 
@@ -224,7 +240,7 @@ export default function InstitutionalRiskDesk({
               <Pressable onPress={() => onConfigChange({ maxOpenPositions: Math.max(1, config.maxOpenPositions - 1) })} style={[st.stepBtn, { borderColor: C.border }]}>
                 <Text style={{ color: C.text }}>−</Text>
               </Pressable>
-              <Text style={[st.stepVal, { color: C.goldL }]}>{config.maxOpenPositions}</Text>
+              <Text style={[st.stepVal, { color: C.accentLight }]}>{config.maxOpenPositions}</Text>
               <Pressable onPress={() => onConfigChange({ maxOpenPositions: Math.min(20, config.maxOpenPositions + 1) })} style={[st.stepBtn, { borderColor: C.border }]}>
                 <Text style={{ color: C.text }}>+</Text>
               </Pressable>
@@ -238,7 +254,7 @@ export default function InstitutionalRiskDesk({
       {/* 3. Leverage Controls */}
       <RiskCard title="LEVERAGE CONTROLS" badge={`${config.defaultLeverage}x · ${config.marginMode}`} C={C}>
         <View style={st.metricGrid}>
-          <MetricTile label="Selected leverage" value={`${config.defaultLeverage}x`} color={C.goldL} C={C} />
+          <MetricTile label="Selected leverage" value={`${config.defaultLeverage}x`} color={C.accentLight} C={C} />
           <MetricTile label="Active on Binance" value={`${metrics.activeLeverage}x`} color={levCapOk ? C.green : C.red} C={C} />
           <MetricTile
             label="Margin on Binance"
@@ -271,7 +287,7 @@ export default function InstitutionalRiskDesk({
         />
         {marginBusy ? (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 }}>
-            <ActivityIndicator size="small" color={C.gold} />
+            <ActivityIndicator size="small" color={C.accent} />
             <Text style={{ color: C.dim, fontSize: 10 }}>Updating margin mode on Binance…</Text>
           </View>
         ) : null}
@@ -350,14 +366,6 @@ export default function InstitutionalRiskDesk({
           <MetricTile label="Peak equity" value={fmtRiskUsd(metrics.peakEquity)} C={C} />
         </View>
       </RiskCard>
-
-      {/* 7. Validation Rules */}
-      <View style={[st.rulesBox, { borderColor: C.border }]}>
-        <Text style={[st.rulesTitle, { color: C.teal }]}>VALIDATION RULES</Text>
-        <Text style={[st.ruleLine, { color: C.dim }]}>• Protected capital is never used for trading.</Text>
-        <Text style={[st.ruleLine, { color: C.dim }]}>• Trades exceeding limits are rejected at execution only.</Text>
-        <Text style={[st.ruleLine, { color: C.dim }]}>• This desk affects sizing & capital — not signals, TP, or SL logic.</Text>
-      </View>
     </ScrollView>
   );
 }
@@ -369,8 +377,8 @@ function ToggleRow({ label, value, onChange, C }) {
       <Switch
         value={value}
         onValueChange={onChange}
-        trackColor={{ false: C.border, true: 'rgba(212,180,90,0.45)' }}
-        thumbColor={value ? C.goldL : C.dim2}
+        trackColor={{ false: C.border, true: 'rgba(124,108,240,0.45)' }}
+        thumbColor={value ? C.accentLight : C.dim2}
       />
     </View>
   );
@@ -382,7 +390,7 @@ const st = StyleSheet.create({
   hero: { marginBottom: 4 },
   heroTitle: { fontSize: 14, fontWeight: '800', letterSpacing: 1 },
   heroSub: { fontSize: 10, lineHeight: 15, marginTop: 4 },
-  card: { borderRadius: 14, borderWidth: 1, overflow: 'hidden' },
+  card: { borderRadius: 16, borderWidth: 1, overflow: 'hidden' },
   cardInner: { padding: 12 },
   cardHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 10, marginBottom: 8, borderBottomWidth: 1 },
   cardTitle: { fontSize: 11, fontWeight: '800', letterSpacing: 0.6 },
@@ -410,9 +418,6 @@ const st = StyleSheet.create({
   emergencyTxt: { fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
   toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 10, minHeight: 44 },
   toggleLab: { flex: 1, fontSize: 11, fontWeight: '600', paddingRight: 12 },
-  rulesBox: { borderWidth: 1, borderRadius: 12, padding: 14, marginTop: 4 },
-  rulesTitle: { fontSize: 10, fontWeight: '800', letterSpacing: 0.5, marginBottom: 8 },
-  ruleLine: { fontSize: 10, lineHeight: 16, marginTop: 2 },
   presetBlock: { marginTop: 10 },
   presetHint: { fontSize: 9, lineHeight: 14, marginTop: 4, marginBottom: 8 },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },

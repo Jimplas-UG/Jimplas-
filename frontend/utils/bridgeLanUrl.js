@@ -8,21 +8,16 @@ export function isLocalhostApiUrl(url) {
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(u);
 }
 
+import { safeDebuggerHostCandidates, safeExpoHostUri } from '../lib/expoConstantsSafe';
+
 /** LAN host Metro used when you opened Expo Go (e.g. 192.168.1.154). */
 export function getMetroLanHost() {
   try {
-    const Constants = require('expo-constants').default;
-    const candidates = [
-      Constants.expoGoConfig?.debuggerHost,
-      Constants.manifest2?.extra?.expoGo?.debuggerHost,
-      Constants.manifest?.debuggerHost,
-    ];
-    for (const dbg of candidates) {
-      if (typeof dbg !== 'string') continue;
+    for (const dbg of safeDebuggerHostCandidates()) {
       const host = dbg.split(':')[0]?.trim();
       if (host && !isLoopbackHost(host)) return host;
     }
-    const hostUri = Constants.expoConfig?.hostUri;
+    const hostUri = safeExpoHostUri();
     if (typeof hostUri === 'string') {
       const m = hostUri.match(/\/\/([^/:]+)/);
       if (m?.[1] && !isLoopbackHost(m[1])) return m[1];

@@ -13,12 +13,21 @@ export function computeCapitalAllocation(config, totalBalance) {
   const partitionCap = Math.max(0, Number(config.partitionUsd) || PARTITION_PRESETS_USD[1]);
   const tradingPartition = Math.min(partitionCap, bal);
   const protectedCapital = Math.max(0, bal - tradingPartition);
+  const shortPct = Math.max(0, Number(config.shortPartitionPct) || 50);
+  const long1Pct = Math.max(0, Number(config.long1PartitionPct) || 40);
+  const long2Pct = Math.max(0, Number(config.long2PartitionPct) || 40);
   return {
     totalBalance: bal,
     protectedCapital,
     tradingPartition,
     tradableBase: tradingPartition,
     partitionUsd: partitionCap,
+    shortLegUsd: (tradingPartition * shortPct) / 100,
+    long1LegUsd: (tradingPartition * long1Pct) / 100,
+    long2LegUsd: (tradingPartition * long2Pct) / 100,
+    shortPartitionPct: shortPct,
+    long1PartitionPct: long1Pct,
+    long2PartitionPct: long2Pct,
   };
 }
 

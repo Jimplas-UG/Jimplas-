@@ -11,9 +11,11 @@ import {
 } from 'react-native';
 import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
+import { PilotCard } from './pilot/PilotUI';
 import StaticHexLogo from './logo/StaticHexLogo';
 import ErrorState from './ui/ErrorState';
 import { TRADING_SYMBOL } from '../lib/tradingSymbol';
+import { postScannerExecEnable } from '../broker/binanceScannerApi';
 import {
   binanceFetch,
   fetchBinancePositions,
@@ -22,9 +24,12 @@ import {
 import { getBrokerMode } from '../lib/brokerMode';
 import {
   connectBinanceBridge,
+  hasBinanceCredentials,
+  isHardBinanceAuthFailure,
+  isTransientBridgeError,
   loadStoredBinanceCredentials,
+  restoreBinanceBridgeSession,
   saveStoredBinanceTestnetPref,
-  tryBinanceSessionConnect,
 } from '../lib/binanceSession';
 import {
   formatBinanceNetworkError,
@@ -58,7 +63,7 @@ export default function BinanceBridgePanel() {
   const { colors: C } = useBilshenzTheme();
   const mode = getBrokerMode();
   const metroLan = getMetroLanHost();
-  const { baseUrl, setBaseUrl, connected, setConnected, hydrated } = useBinanceBridge();
+  const { baseUrl, setBaseUrl, connected, setConnected } = useBinanceBridge();
 
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
@@ -72,12 +77,18 @@ export default function BinanceBridgePanel() {
   const [tick, setTick] = useState(null);
   const [positions, setPositions] = useState([]);
   const [feedLive, setFeedLive] = useState(false);
+  const [credsHydrated, setCredsHydrated] = useState(false);
   const graceUntilRef = useRef(0);
   const pollRef = useRef(null);
+  const reconnectRef = useRef(false);
 
-  const sessionLive = connected && !!account;
+  const hasCredentials = mode === 'paper' || (apiKey.trim() && apiSecret.trim());
+
+  /** Trust persisted bridge connection — account may still be loading after remount. */
+  const sessionLive = connected;
+  const sessionReady = !!account;
   const sessionTestnet = account ? accountIsTestnet(account) : null;
-  const envMismatch = sessionLive && sessionTestnet != null && sessionTestnet !== testnet;
+  const envMismatch = sessionReady && sessionTestnet != null && sessionTestnet !== testnet;
 
   const clearBridgeSession = useCallback(async () => {
     try {
@@ -104,7 +115,7 @@ export default function BinanceBridgePanel() {
       if (url) setBaseUrl(url);
       const acct = session?.account;
       if (acct && typeof acct === 'object') {
-        graceUntilRef.current = Date.now() + 45000;
+        graceUntilRef.current = Date.now() + 300000;
         setConnected(true);
         setAccount(acct);
         setBridgeMode(session.mode ?? null);
@@ -116,20 +127,59 @@ export default function BinanceBridgePanel() {
     [setBaseUrl, setConnected],
   );
 
+  const refreshMarketData = useCallback(async (urlOverride) => {
+    const b = (urlOverride || baseUrl)?.trim();
+    if (!b) return;
+    try {
+      const [tkRes, pos] = await Promise.all([
+        binanceFetch(b, `/api/tick/${TRADING_SYMBOL}`, {}, 5000),
+        fetchBinancePositions(b, TRADING_SYMBOL),
+      ]);
+      if (tkRes.ok) setTick(await tkRes.json());
+      setPositions(pos);
+    } catch {
+      /* non-blocking — session already live from login */
+    }
+  }, [baseUrl]);
+
   const refresh = useCallback(async () => {
     const b = baseUrl?.trim();
     if (!b) return;
     try {
-      const session = await fetchBinanceSession(b, 15000);
+      const session = await fetchBinanceSession(b, 6000, 0);
       if (session.ok) {
         applySession(session, b);
-      } else if (Date.now() > graceUntilRef.current) {
+      } else if (isHardBinanceAuthFailure(session.error)) {
         setConnected(false);
         setAccount(null);
         setBridgeMode(null);
         if (session.error) setErr(session.error);
+        return;
+      } else if (connected && !reconnectRef.current) {
+        reconnectRef.current = true;
+        try {
+          const restored = await restoreBinanceBridgeSession(b, 18000);
+          if (restored.ok && restored.session) {
+            applySession(restored.session, restored.url || b);
+          } else if (restored.hardFail) {
+            setConnected(false);
+            setAccount(null);
+            setBridgeMode(null);
+            if (restored.error) setErr(restored.error);
+            return;
+          } else if (isTransientBridgeError(session.error) || isTransientBridgeError(restored.error)) {
+            /* keep connected — bridge blip or restart */
+          } else if (session.error && Date.now() > graceUntilRef.current) {
+            setErr(session.error);
+          }
+        } finally {
+          reconnectRef.current = false;
+        }
+        if (!account && !connected) return;
+      } else if (session.error && Date.now() > graceUntilRef.current) {
+        setErr(session.error);
       }
-      if (!session.ok) return;
+      if (!session.ok && !account) return;
 
       const tkRes = await binanceFetch(b, `/api/tick/${TRADING_SYMBOL}`, {}, 10000);
       if (tkRes.ok) setTick(await tkRes.json());
@@ -137,17 +187,23 @@ export default function BinanceBridgePanel() {
       const pos = await fetchBinancePositions(b, TRADING_SYMBOL);
       setPositions(pos);
     } catch (e) {
-      if (Date.now() > graceUntilRef.current) {
-        setErr(formatBinanceNetworkError(e instanceof Error ? e.message : String(e), b));
+      const msg = e instanceof Error ? e.message : String(e);
+      if (isHardBinanceAuthFailure(msg)) {
+        setConnected(false);
+        setAccount(null);
+        setBridgeMode(null);
+        setErr(msg);
+      } else if (Date.now() > graceUntilRef.current && !isTransientBridgeError(msg)) {
+        setErr(formatBinanceNetworkError(msg, b));
       }
     }
-  }, [applySession, baseUrl, setConnected]);
+  }, [applySession, account, baseUrl, connected, setConnected]);
 
   const onTestnetChange = useCallback(
     async (next) => {
       setTestnet(next);
       await saveStoredBinanceTestnetPref(next);
-      if (sessionLive && sessionTestnet != null && sessionTestnet !== next) {
+      if (sessionReady && sessionTestnet != null && sessionTestnet !== next) {
         await clearBridgeSession();
         const creds = await loadStoredBinanceCredentials();
         if (creds.apiKey.trim() && creds.apiSecret.trim() && mode !== 'paper') {
@@ -161,11 +217,13 @@ export default function BinanceBridgePanel() {
               testnet: next,
               mode,
               autoDetectEnv: false,
+              clearSession: false,
+              fast: true,
             });
             if (result.ok && result.session) {
               if (result.autoDetected) setTestnet(result.testnet);
               applySession(result.session, result.url);
-              void refresh();
+              void refreshMarketData(result.url);
               return;
             }
             setErr(
@@ -188,7 +246,7 @@ export default function BinanceBridgePanel() {
         );
       }
     },
-    [applySession, baseUrl, clearBridgeSession, mode, refresh, sessionLive, sessionTestnet],
+    [applySession, baseUrl, clearBridgeSession, mode, refreshMarketData, sessionReady, sessionTestnet],
   );
 
   useEffect(() => {
@@ -198,6 +256,7 @@ export default function BinanceBridgePanel() {
       if (creds.apiKey) setApiKey(creds.apiKey);
       if (creds.apiSecret) setApiSecret(creds.apiSecret);
       setTestnet(creds.testnet);
+      setCredsHydrated(true);
     });
     return () => {
       cancelled = true;
@@ -205,34 +264,18 @@ export default function BinanceBridgePanel() {
   }, []);
 
   useEffect(() => {
-    if (!hydrated || sessionLive || busy || mode === 'paper' || connected) return;
-    let cancelled = false;
-    (async () => {
-      const creds = await loadStoredBinanceCredentials();
-      if (!creds.apiKey.trim() || !creds.apiSecret.trim()) return;
-      setBusy(true);
-      try {
-        const restored = await tryBinanceSessionConnect(baseUrl, 20000);
-        if (cancelled) return;
-        if (restored.ok && restored.session) {
-          if (restored.testnet != null) setTestnet(restored.testnet);
-          if (restored.autoDetected) {
-            setErr(
-              restored.testnet
-                ? 'Connected to Testnet (auto-detected from your API keys).'
-                : 'Connected to Mainnet (auto-detected from your API keys).',
-            );
-          }
-          applySession(restored.session, restored.url);
-        }
-      } finally {
-        if (!cancelled) setBusy(false);
+    if (!credsHydrated || mode === 'paper') return;
+    if (!hasCredentials) {
+      stopPoll();
+      if (connected) {
+        setConnected(false);
+        setAccount(null);
+        setBridgeMode(null);
+        setPositions([]);
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [hydrated, sessionLive, busy, mode, baseUrl, connected, applySession]);
+      setErr((prev) => (/enter both api key/i.test(prev) ? prev : ''));
+    }
+  }, [credsHydrated, hasCredentials, mode, connected, setConnected]);
 
   useEffect(() => {
     if (isLocalhostApiUrl(baseUrl) && metroLan) {
@@ -241,25 +284,35 @@ export default function BinanceBridgePanel() {
   }, [baseUrl, metroLan, setBaseUrl]);
 
   useEffect(() => {
-    if (connected && baseUrl && !account) {
-      void refresh();
-    }
-  }, [connected, baseUrl, account, refresh]);
+    if (!hasCredentials || !connected || !baseUrl || account) return;
+    graceUntilRef.current = Date.now() + 300000;
+    void refresh();
+  }, [hasCredentials, connected, baseUrl, account, refresh]);
 
   useEffect(() => {
-    if (sessionLive && baseUrl) {
+    if (!hasCredentials) {
+      stopPoll();
+      return undefined;
+    }
+    if (connected && baseUrl) {
       void refresh();
       stopPoll();
       pollRef.current = setInterval(() => refresh(), 8000);
       return stopPoll;
     }
+    if (sessionReady && baseUrl) {
+      void refreshMarketData();
+      stopPoll();
+      pollRef.current = setInterval(() => refreshMarketData(), 8000);
+      return stopPoll;
+    }
     stopPoll();
     return undefined;
-  }, [sessionLive, baseUrl, refresh]);
+  }, [connected, hasCredentials, sessionReady, baseUrl, refresh, refreshMarketData]);
 
   useEffect(() => {
     const b = baseUrl?.trim();
-    if (!b || sessionLive) {
+    if (!b || sessionLive || busy) {
       setFeedLive(false);
       return undefined;
     }
@@ -286,24 +339,42 @@ export default function BinanceBridgePanel() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [baseUrl, sessionLive]);
+  }, [baseUrl, sessionLive, busy]);
 
   const onConnect = useCallback(async () => {
+    const key = apiKey.trim();
+    const secret = apiSecret.trim();
+
+    if (mode !== 'paper' && (!key || !secret)) {
+      setErr(
+        testnet
+          ? 'Enter both API key and secret from testnet.binancefuture.com'
+          : 'Enter both API key and secret from binance.com (Futures API)',
+      );
+      return;
+    }
+
     setBusy(true);
     setErr('');
     try {
-      const key = apiKey.trim();
-      const secret = apiSecret.trim();
-
-      if (mode !== 'paper' && (!key || !secret)) {
-        setErr(
-          testnet
-            ? 'Enter both API key and secret from testnet.binancefuture.com'
-            : 'Enter both API key and secret from binance.com (Futures API)',
-        );
-        return;
+      if (connected) {
+        if (account) {
+          void refreshMarketData();
+          return;
+        }
+        const session = await fetchBinanceSession(baseUrl, 5000, 0);
+        if (session.ok && session.account) {
+          applySession(session, baseUrl);
+          void refreshMarketData();
+          return;
+        }
+        if (!isHardBinanceAuthFailure(session.error)) {
+          setErr(session.error || 'Syncing session…');
+          return;
+        }
       }
 
+      const wasConnected = connected && !!account;
       const result = await connectBinanceBridge({
         baseUrl,
         apiKey: key,
@@ -311,20 +382,26 @@ export default function BinanceBridgePanel() {
         testnet,
         mode,
         autoDetectEnv: true,
+        clearSession: false,
+        fast: true,
       });
 
       if (!result.ok) {
-        setConnected(false);
-        setAccount(null);
+        if (!wasConnected || isHardBinanceAuthFailure(result.error)) {
+          setConnected(false);
+          setAccount(null);
+        }
         const msg = formatLoginEnvError(result.error, result.testnet ?? testnet);
         const netMsg = /bridge|network|fetch|ECONNREFUSED/i.test(msg)
           ? formatBinanceNetworkError(msg, baseUrl)
           : msg;
         setErr(netMsg);
-        if (/bridge|network|fetch|ECONNREFUSED/i.test(msg)) {
-          Alert.alert('Bridge offline', netMsg);
-        } else {
-          Alert.alert('Binance login failed', netMsg);
+        if (!wasConnected) {
+          if (/bridge|network|fetch|ECONNREFUSED/i.test(msg)) {
+            Alert.alert('Bridge offline', netMsg);
+          } else if (isHardBinanceAuthFailure(result.error)) {
+            Alert.alert('Binance login failed', netMsg);
+          }
         }
         return;
       }
@@ -342,7 +419,9 @@ export default function BinanceBridgePanel() {
 
       applySession(result.session, result.url);
       setConnected(true);
-      void refresh();
+      setBusy(false);
+      void refreshMarketData(result.url);
+      return;
     } catch (e) {
       const msg = formatBinanceNetworkError(e instanceof Error ? e.message : String(e), baseUrl);
       setErr(msg);
@@ -351,12 +430,15 @@ export default function BinanceBridgePanel() {
     } finally {
       setBusy(false);
     }
-  }, [apiKey, apiSecret, applySession, baseUrl, mode, refresh, setConnected, testnet]);
+  }, [apiKey, apiSecret, account, applySession, baseUrl, connected, mode, refreshMarketData, setConnected, testnet]);
 
   const onDisconnect = useCallback(async () => {
     setBusy(true);
     try {
-      if (baseUrl) await binanceFetch(baseUrl, '/api/logout', { method: 'POST' }, 8000);
+      if (baseUrl) {
+        await binanceFetch(baseUrl, '/api/logout', { method: 'POST' }, 8000);
+        void postScannerExecEnable(baseUrl, false);
+      }
     } catch {
       /* ignore */
     }
@@ -379,7 +461,9 @@ export default function BinanceBridgePanel() {
 
   const statusColor = sessionLive ? C.green : feedLive ? C.amber : err ? C.red : C.dim;
   const statusText = sessionLive
-    ? `Connected · ${sessionLabel(account, bridgeMode)}`
+    ? sessionReady
+      ? `Connected · ${sessionLabel(account, bridgeMode)}`
+      : 'Connected · syncing account…'
     : feedLive
       ? `Market data live · paste secret & tap Connect`
       : busy
@@ -403,24 +487,26 @@ export default function BinanceBridgePanel() {
 
   return (
     <View style={st.root}>
-      <View style={[st.banner, { borderColor: sessionLive ? 'rgba(0,230,118,0.4)' : 'rgba(255,61,87,0.35)' }]}>
-        <StaticHexLogo size={44} variant="icon" />
-        <View style={{ flex: 1, marginLeft: 12 }}>
-          <Text style={[st.bannerTitle, { color: C.goldL }]}>Binance Futures · {envLabel}</Text>
-          <Text style={[st.bannerStatus, { color: statusColor }]}>{statusText}</Text>
-          {(sessionLive || feedLive) && tick ? (
-            <Text style={[st.bannerSub, { color: C.dim }]}>
-              {TRADING_SYMBOL} {(tick.bid + tick.ask) / 2} · spread {spreadPips}p
-            </Text>
-          ) : null}
+      <PilotCard style={{ padding: 14, marginBottom: 10 }}>
+        <View style={st.bannerRow}>
+          <StaticHexLogo size={44} variant="icon" animated />
+          <View style={{ flex: 1, marginLeft: 12 }}>
+            <Text style={[st.bannerTitle, { color: C.text }]}>Binance Futures · {envLabel}</Text>
+            <Text style={[st.bannerStatus, { color: statusColor }]}>{statusText}</Text>
+            {(sessionLive || feedLive) && tick ? (
+              <Text style={[st.bannerSub, { color: C.dim }]}>
+                {TRADING_SYMBOL} {(tick.bid + tick.ask) / 2} · spread {spreadPips}p
+              </Text>
+            ) : null}
+          </View>
         </View>
-      </View>
+      </PilotCard>
 
-      <View style={[st.checklist, { borderColor: C.border }]}>
+      <PilotCard style={{ padding: 12, marginBottom: 10 }}>
         {[
           { ok: feedLive || sessionLive, label: 'Bridge & XAUUSDT quotes' },
           { ok: sessionLive, label: 'Futures API logged in' },
-          { ok: sessionLive, label: 'Ready to send orders' },
+          { ok: sessionLive && sessionReady, label: 'Ready to send orders' },
         ].map((step) => (
           <View key={step.label} style={st.checkRow}>
             <Text style={{ color: step.ok ? C.green : C.dim, fontSize: 12, width: 18 }}>
@@ -429,9 +515,9 @@ export default function BinanceBridgePanel() {
             <Text style={{ color: step.ok ? C.text : C.dim2, fontSize: 11, fontWeight: '600' }}>{step.label}</Text>
           </View>
         ))}
-      </View>
+      </PilotCard>
 
-      <View style={[st.card, { borderColor: C.border }]}>
+      <PilotCard style={{ padding: 14 }}>
         {mode !== 'paper' ? (
           <>
             <Text style={[st.hint, { color: C.dim, marginTop: 0 }]}>
@@ -454,8 +540,8 @@ export default function BinanceBridgePanel() {
                 <Pressable
                   key={String(opt.id)}
                   onPress={() => void onTestnetChange(opt.id)}
-                  style={[st.chip, testnet === opt.id && { borderColor: C.gold, backgroundColor: 'rgba(212,180,90,0.15)' }]}>
-                  <Text style={{ color: testnet === opt.id ? C.goldL : C.dim, fontSize: 11, fontWeight: '700' }}>
+                  style={[st.chip, testnet === opt.id && { borderColor: C.accent, backgroundColor: C.accentDim }]}>
+                  <Text style={{ color: testnet === opt.id ? C.accentLight : C.dim, fontSize: 11, fontWeight: '700' }}>
                     {opt.label}
                   </Text>
                 </Pressable>
@@ -498,11 +584,11 @@ export default function BinanceBridgePanel() {
               </Text>
             ) : null}
 
-            {err ? (
+            {err && !/enter both api key/i.test(err) ? (
               <ErrorState title="Connection failed" message={err} compact onRetry={onConnect} retryLabel="Retry connect" />
             ) : null}
 
-            {sessionLive ? (
+            {connected ? (
               <Pressable onPress={onDisconnect} disabled={busy} style={[st.btn, st.btnOff]}>
                 <Text style={st.btnOffTxt}>Disconnect</Text>
               </Pressable>
@@ -515,7 +601,7 @@ export default function BinanceBridgePanel() {
                   st.btnOn,
                   mode !== 'paper' && (!apiKey.trim() || !apiSecret.trim()) ? { opacity: 0.45 } : null,
                 ]}>
-                {busy ? <ActivityIndicator color="#F2E6C5" /> : (
+                {busy ? <ActivityIndicator color={C.accentLight} /> : (
                   <Text style={st.btnOnTxt}>
                     {mode === 'paper' ? 'Connect Paper' : 'Connect Binance'}
                   </Text>
@@ -540,7 +626,7 @@ export default function BinanceBridgePanel() {
         ) : null}
 
         {mode === 'paper' ? (
-          sessionLive ? (
+          connected ? (
             <Pressable onPress={onDisconnect} disabled={busy} style={[st.btn, st.btnOff]}>
               <Text style={st.btnOffTxt}>Disconnect</Text>
             </Pressable>
@@ -552,7 +638,7 @@ export default function BinanceBridgePanel() {
         ) : null}
 
         <Pressable onPress={onAutoUrl} style={[st.secondaryBtn, { borderColor: C.border }]}>
-          <Text style={{ color: C.goldL, fontWeight: '700', fontSize: 11 }}>
+          <Text style={{ color: C.accentLight, fontWeight: '700', fontSize: 11 }}>
             {metroLan ? `USE PC ON WI‑FI (${metroLan}:8766)` : 'USE DEFAULT BRIDGE URL'}
           </Text>
         </Pressable>
@@ -577,11 +663,11 @@ export default function BinanceBridgePanel() {
           </>
         ) : null}
 
-        {sessionLive && account ? (
+        {sessionReady && account ? (
           <View style={st.metrics}>
             <View style={[st.metric, { borderColor: C.border }]}>
               <Text style={[st.metricLab, { color: C.dim }]}>Balance</Text>
-              <Text style={[st.metricVal, { color: C.goldL }]}>
+              <Text style={[st.metricVal, { color: C.text }]}>
                 ${Math.round(account.balance ?? 0).toLocaleString()}
               </Text>
             </View>
@@ -600,9 +686,9 @@ export default function BinanceBridgePanel() {
           </View>
         ) : null}
 
-        {sessionLive && positions.length ? (
+        {sessionReady && positions.length ? (
           <View style={[st.posBox, { borderColor: C.border }]}>
-            <Text style={[st.metricLab, { color: C.goldL, marginBottom: 8 }]}>OPEN POSITIONS</Text>
+            <Text style={[st.metricLab, { color: C.accentLight, marginBottom: 8 }]}>OPEN POSITIONS</Text>
             {positions.map((p, i) => (
               <View key={`${p.symbol}-${p.type}-${i}`} style={st.posRow}>
                 <Text style={{ color: C.text, fontSize: 11, fontWeight: '700' }}>
@@ -615,31 +701,17 @@ export default function BinanceBridgePanel() {
             ))}
           </View>
         ) : null}
-      </View>
+      </PilotCard>
     </View>
   );
 }
 
 const st = StyleSheet.create({
   root: { marginTop: 4 },
-  banner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 14,
-    borderRadius: 12,
-    borderWidth: 1,
-    backgroundColor: 'rgba(10,8,6,0.55)',
-  },
+  bannerRow: { flexDirection: 'row', alignItems: 'center' },
   bannerTitle: { fontSize: 13, fontWeight: '800', letterSpacing: 0.6 },
   bannerStatus: { fontSize: 11, fontWeight: '700', marginTop: 4 },
   bannerSub: { fontSize: 10, marginTop: 4 },
-  card: {
-    marginTop: 12,
-    padding: 14,
-    borderRadius: 12,
-    borderWidth: 1,
-    backgroundColor: 'rgba(0,0,0,0.28)',
-  },
   label: { fontSize: 10, fontWeight: '700', marginTop: 12, marginBottom: 6, letterSpacing: 0.4 },
   input: {
     borderWidth: 1,
@@ -682,8 +754,8 @@ const st = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
   },
-  btnOn: { backgroundColor: 'rgba(212,180,90,0.38)', borderColor: 'rgba(242,226,176,0.35)' },
-  btnOnTxt: { color: '#F2E6C5', fontWeight: '800', fontSize: 12, letterSpacing: 0.5 },
+  btnOn: { backgroundColor: 'rgba(124,108,240,0.35)', borderColor: 'rgba(124,108,240,0.45)' },
+  btnOnTxt: { color: '#E8E4FF', fontWeight: '800', fontSize: 12, letterSpacing: 0.5 },
   btnOff: { backgroundColor: 'rgba(255,61,87,0.18)', borderColor: 'rgba(255,61,87,0.4)' },
   btnOffTxt: { color: '#ffc8d0', fontWeight: '800', fontSize: 12 },
   metrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14 },

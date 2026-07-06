@@ -77,7 +77,7 @@ export async function fetchBinanceSession(apiBaseUrl, timeoutMs = 12000, retries
         }
         last = { ok: false, connected: false, account: null, mode: null, error: detail };
         if (i < retries) {
-          await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+          await new Promise((r) => setTimeout(r, 250 * (i + 1)));
           continue;
         }
         return last;
@@ -102,7 +102,7 @@ export async function fetchBinanceSession(apiBaseUrl, timeoutMs = 12000, retries
         error: e instanceof Error ? e.message : String(e),
       };
       if (i < retries) {
-        await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+        await new Promise((r) => setTimeout(r, 250 * (i + 1)));
         continue;
       }
       return last;
@@ -133,7 +133,7 @@ export async function postBinanceAttach(apiBaseUrl, timeoutMs = 15000) {
   }
 }
 
-export async function postBinanceLogin(apiBaseUrl, body, timeoutMs = 20000) {
+export async function postBinanceLogin(apiBaseUrl, body, timeoutMs = 12000) {
   const b = base(apiBaseUrl);
   try {
     const res = await binanceFetch(
@@ -156,7 +156,7 @@ export async function postBinanceLogin(apiBaseUrl, body, timeoutMs = 20000) {
       }
       return { ok: false, detail, status: res.status };
     }
-    return { ok: true, account: j.account || null, mode: j.mode ?? null };
+    return { ok: true, account: j.account || null, mode: j.mode ?? null, testnet: j.testnet, auto_detected: !!j.auto_detected };
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) };
   }
@@ -281,17 +281,74 @@ export async function fetchBinanceBarsM30(
   return { ok: false, bars: [], error: lastErr, status: lastStatus };
 }
 
-/** Pick first bridge URL that responds to /health (login does not require bars). */
+/** Last known-good bridge URL — instant reconnect on credential re-entry. */
+let cachedBridgeUrl = null;
+
+export async function probeBridgeHealth(url, timeoutMs = 700) {
+  const u = String(url || '').trim().replace(/\/$/, '');
+  if (!u) return null;
+  const health = await binanceFetch(u, '/health', {}, timeoutMs);
+  return health.ok ? u : null;
+}
+
+/** First URL from list that responds — resolves on first success. */
+function firstReachableBridge(urls, timeoutMs) {
+  const list = [...new Set(urls.map((u) => String(u || '').trim().replace(/\/$/, '')).filter(Boolean))];
+  if (!list.length) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    let failures = 0;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    for (const url of list) {
+      probeBridgeHealth(url, timeoutMs)
+        .then((ok) => {
+          if (ok) {
+            cachedBridgeUrl = ok;
+            done(ok);
+          } else {
+            failures += 1;
+            if (failures >= list.length) done(null);
+          }
+        })
+        .catch(() => {
+          failures += 1;
+          if (failures >= list.length) done(null);
+        });
+    }
+  });
+}
+
+/** Pick first bridge URL that responds to /health — cached + preferred URL first. */
 export async function pickReachableBinanceBridgeUrl(preferred = '', _symbol = TRADING_SYMBOL) {
-  for (const url of binanceBridgeUrlCandidates(preferred)) {
-    try {
-      const health = await binanceFetch(url, '/health', {}, 4000);
-      if (health.ok) return url.replace(/\/$/, '');
-    } catch {
-      /* try next */
+  const pref = String(preferred || '').trim().replace(/\/$/, '');
+
+  if (cachedBridgeUrl) {
+    const hit = await probeBridgeHealth(cachedBridgeUrl, 450);
+    if (hit) return hit;
+    cachedBridgeUrl = null;
+  }
+
+  if (pref) {
+    const hit = await probeBridgeHealth(pref, 700);
+    if (hit) {
+      cachedBridgeUrl = hit;
+      return hit;
     }
   }
+
+  const rest = binanceBridgeUrlCandidates(preferred).filter((u) => u !== pref && u !== cachedBridgeUrl);
+  const found = await firstReachableBridge(rest, 1100);
+  if (found) return found;
   return null;
+}
+
+export function rememberBridgeUrl(url) {
+  const u = String(url || '').trim().replace(/\/$/, '');
+  if (u) cachedBridgeUrl = u;
 }
 
 export async function postBinanceClosePosition(apiBaseUrl, { symbol = TRADING_SYMBOL, volume } = {}) {
