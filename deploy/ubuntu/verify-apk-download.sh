@@ -32,7 +32,7 @@ if echo "$META" | grep -q '"ok":true'; then
   exit 1
 fi
 
-if echo "$META" | grep -q 'apk_not_found'; then
+if echo "$META" | grep -q '"ok":false'; then
   echo "WARN: route OK but APK missing — upload to /opt/bilshenz/frontend/dist/bilshenz-release.apk"
   exit 2
 fi
