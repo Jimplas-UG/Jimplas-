@@ -69,11 +69,13 @@ def validate_startup(*, require_keys: bool = False) -> list[str]:
     env = detect_environment()
     paper = _truthy(os.environ.get("BINANCE_PAPER", "0"))
 
-    if env == "production" and not paper:
+    # Keys are optional at boot — supplied via POST /api/login or /api/attach from the app.
+    # Orders are blocked until Binance session is connected.
+    if require_keys and env == "production" and not paper:
         if not os.environ.get("BINANCE_API_KEY", "").strip():
-            errors.append("BINANCE_API_KEY is required in production (or set BINANCE_PAPER=1)")
+            errors.append("BINANCE_API_KEY is required when require_keys=true")
         if not os.environ.get("BINANCE_API_SECRET", "").strip():
-            errors.append("BINANCE_API_SECRET is required in production (or set BINANCE_PAPER=1)")
+            errors.append("BINANCE_API_SECRET is required when require_keys=true")
 
     if require_keys and os.environ.get("BRIDGE_TOKEN", "").strip() == "" and env == "production":
         errors.append("BRIDGE_TOKEN is strongly recommended in production")
@@ -114,6 +116,10 @@ def ensure_valid_or_exit() -> AppSettings:
     if errors:
         for e in errors:
             print(f"[config] ERROR: {e}", file=sys.stderr)
-        if settings.is_production and not settings.paper:
-            sys.exit(1)
+        sys.exit(1)
+    if settings.is_production and not settings.paper and not os.environ.get("BINANCE_API_KEY", "").strip():
+        print(
+            "[config] Bridge starting without BINANCE_API_KEY — connect via app POST /api/login",
+            file=sys.stderr,
+        )
     return settings
