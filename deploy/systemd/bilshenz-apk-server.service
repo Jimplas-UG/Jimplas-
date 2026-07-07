@@ -1,0 +1,13 @@
+[Unit]
+Description=Bilshenz APK download server (port 9090)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/bilshenz/frontend/dist
+ExecStart=/usr/bin/python3 -m http.server 9090 --bind 0.0.0.0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

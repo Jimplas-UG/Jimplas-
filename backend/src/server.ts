@@ -13,10 +13,40 @@ import { handleBinanceProxy, isBinanceProxyPath } from './binanceProxy';
 import { attachBinanceWebSocketProxy } from './binanceWsProxy';
 import { handleAuthRoute, isAuthPath } from './auth/routes';
 import { isStrategyFreezeEnforced, mergeFrozenDeskCfg, verifyFrozenStrategy } from '../strategy/frozenProduction';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BACKEND_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const REPO_ROOT = path.join(BACKEND_ROOT, '..');
+const APK_CANDIDATES = [
+  process.env.BILSHENZ_APK_PATH?.trim(),
+  path.join(REPO_ROOT, 'frontend', 'dist', 'bilshenz-release.apk'),
+  path.join(REPO_ROOT, 'frontend', 'dist', 'bilshenz-release-signed.apk'),
+  '/opt/bilshenz/frontend/dist/bilshenz-release.apk',
+].filter((p): p is string => !!p);
+
+function resolveApkPath(): string | null {
+  for (const p of APK_CANDIDATES) {
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+    } catch {
+      /* skip */
+    }
+  }
+  return null;
+}
+
+function serveApkDownload(res: http.ServerResponse, apkPath: string): void {
+  const stat = fs.statSync(apkPath);
+  res.writeHead(200, {
+    'Content-Type': 'application/vnd.android.package-archive',
+    'Content-Disposition': 'attachment; filename="bilshenz-release.apk"',
+    'Content-Length': stat.size,
+    'Cache-Control': 'public, max-age=300',
+  });
+  fs.createReadStream(apkPath).pipe(res);
+}
 
 const PORT = Number(process.env.DESK_API_PORT) || 8791;
 const API_KEY = process.env.DESK_API_KEY?.trim() || '';
@@ -171,13 +201,46 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url === '/health' && req.method === 'GET') {
+  const urlEarly = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
+
+  if (urlEarly.pathname === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, service: 'desk-api' }));
     return;
   }
 
-  const urlEarly = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
+  // Public APK install — uses desk-api port 8791 (already open on VPS firewall).
+  if (
+    (urlEarly.pathname === '/download/bilshenz.apk' || urlEarly.pathname === '/download/bilshenz-release.apk') &&
+    req.method === 'GET'
+  ) {
+    const apkPath = resolveApkPath();
+    if (!apkPath) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: 'apk_not_found',
+          detail: 'Upload bilshenz-release.apk to /opt/bilshenz/frontend/dist/ on the VPS.',
+        }),
+      );
+      return;
+    }
+    serveApkDownload(res, apkPath);
+    return;
+  }
+
+  if (urlEarly.pathname === '/download' && req.method === 'GET') {
+    const apkPath = resolveApkPath();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        ok: !!apkPath,
+        apkUrl: apkPath ? '/download/bilshenz.apk' : null,
+        sizeBytes: apkPath ? fs.statSync(apkPath).size : null,
+      }),
+    );
+    return;
+  }
 
   // User auth — public routes (register/login/refresh); /me requires user JWT
   if (isAuthPath(urlEarly.pathname)) {

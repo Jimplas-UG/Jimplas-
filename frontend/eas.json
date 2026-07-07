@@ -17,8 +17,8 @@
         "EAS_BUILD": "true",
         "EXPO_PUBLIC_DESK_LOCAL": "0",
         "EXPO_PUBLIC_DESK_REMOTE": "1",
-        "EXPO_PUBLIC_DESK_API_URL": "http://104.194.140.203:8791",
-        "EXPO_PUBLIC_BINANCE_API_URL": "http://104.194.140.203:8791/v1/binance"
+        "EXPO_PUBLIC_DESK_API_URL": "http://157.245.33.42:8791",
+        "EXPO_PUBLIC_BINANCE_API_URL": "http://157.245.33.42:8791/v1/binance"
       }
     },
     "production-local": {

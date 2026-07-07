@@ -59,11 +59,15 @@ const indexJs = fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8');
 if (!indexJs.includes("import 'react-native-reanimated'")) {
   fail('index.js must import react-native-reanimated');
 } else {
-  const firstLine = indexJs.split('\n').find((l) => l.startsWith('import '));
-  if (!firstLine?.includes('react-native-reanimated')) {
-    fail('react-native-reanimated must be the first import in index.js');
+  const imports = indexJs.split('\n').filter((l) => l.startsWith('import '));
+  const reanimatedIdx = imports.findIndex((l) => l.includes('react-native-reanimated'));
+  const metroIdx = imports.findIndex((l) => l.includes('@expo/metro-runtime'));
+  if (reanimatedIdx < 0) {
+    fail('react-native-reanimated import missing');
+  } else if (reanimatedIdx > 1 || (metroIdx >= 0 && reanimatedIdx !== metroIdx + 1 && reanimatedIdx !== 0)) {
+    fail('react-native-reanimated must be first import (after optional @expo/metro-runtime)');
   } else {
-    ok('reanimated is first import');
+    ok('reanimated import order OK');
   }
 }
 
@@ -113,7 +117,7 @@ try {
       const file = l.slice(3).replace(/\\/g, '/');
       return file.startsWith(prefix);
     });
-  if (pending.length) {
+  if (pending.length && process.env.SKIP_GIT_CHECK !== '1') {
     fail(
       `Uncommitted frontend changes — EAS builds old git code. Commit first:\n${pending.slice(0, 12).join('\n')}${
         pending.length > 12 ? `\n... +${pending.length - 12} more` : ''

@@ -68,6 +68,18 @@ if ($UseEasCloud) {
 
   Write-Host '==> EAS cloud build (signed APK)' -ForegroundColor Cyan
 
+  if ($DeskApiUrl) {
+    npx eas-cli env:create --environment production --name EXPO_PUBLIC_DESK_API_URL --value $DeskApiUrl --visibility plaintext --force --non-interactive 2>$null
+    $binanceProxy = if ($BinanceApiUrl) { $BinanceApiUrl } else { ($DeskApiUrl.TrimEnd('/') + '/v1/binance') }
+    npx eas-cli env:create --environment production --name EXPO_PUBLIC_BINANCE_API_URL --value $binanceProxy --visibility plaintext --force --non-interactive 2>$null
+  }
+  if ($DeskApiKey) {
+    npx eas-cli env:create --environment production --name EXPO_PUBLIC_DESK_API_KEY --value $DeskApiKey --visibility secret --force --non-interactive 2>$null
+    Write-Host '    EAS env: EXPO_PUBLIC_DESK_API_KEY set for production' -ForegroundColor DarkGray
+  } elseif (-not $env:EXPO_PUBLIC_DESK_API_KEY) {
+    throw 'DeskApiKey required for EAS cloud build (APK cannot auth without EXPO_PUBLIC_DESK_API_KEY)'
+  }
+
   $prevEap = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   $easLog = @(npx eas-cli build --platform android --profile production --non-interactive 2>&1)
