@@ -660,7 +660,11 @@ async def ws_tick(websocket: WebSocket, symbol: str):
 
 @app.get("/api/positions")
 def api_positions(symbol: str | None = None):
-    return {"positions": connector.positions(symbol)}
+    try:
+        return {"ok": True, "positions": connector.positions(symbol)}
+    except Exception as e:
+        log.warning("api_positions: %s", e)
+        return {"ok": False, "positions": [], "error": str(e)[:200]}
 
 
 @app.post("/api/order")

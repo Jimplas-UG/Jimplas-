@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "frozenAt": "2026-05-23T22:24:07.293Z",
+  "frozenAt": "2026-07-08T16:17:56.410Z",
   "strategyId": "bilshenz-xau-m30-v1",
   "gitNote": "Lock signal sources + productionFrozenConfig; zero tuning during forward demo",
   "config": {

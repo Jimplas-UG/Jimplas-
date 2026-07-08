@@ -558,8 +558,18 @@ class BinanceConnector:
             from paper_simulator import paper_store
 
             return paper_store.positions(symbol)
-        sym = (symbol or self.cfg.symbol).upper()
-        data = self._request("GET", "/fapi/v2/positionRisk", {"symbol": sym}, signed=True)
+        if not self.cfg.api_key or not self.cfg.api_secret:
+            return []
+        try:
+            params: dict[str, Any] = {}
+            if symbol:
+                params["symbol"] = symbol.upper()
+            data = self._request("GET", "/fapi/v2/positionRisk", params or None, signed=True)
+        except Exception as e:
+            log.warning("positions: %s", e)
+            return []
+        if not isinstance(data, list):
+            data = [data] if data else []
         out: list[dict[str, Any]] = []
         for p in data:
             amt = float(p.get("positionAmt", 0))

@@ -48,14 +48,24 @@ fi
 grep -q '^BINANCE_API_URL=' /etc/tradingbot.env && sed -i 's|^BINANCE_API_URL=.*|BINANCE_API_URL=http://127.0.0.1:8766|' /etc/tradingbot.env || echo 'BINANCE_API_URL=http://127.0.0.1:8766' >> /etc/tradingbot.env
 grep -q '^BROKER_MODE=' /etc/tradingbot.env && sed -i 's/^BROKER_MODE=.*/BROKER_MODE=binance/' /etc/tradingbot.env || echo 'BROKER_MODE=binance' >> /etc/tradingbot.env
 grep -q '^FORWARD_DRY_RUN=' /etc/tradingbot.env && sed -i 's/^FORWARD_DRY_RUN=.*/FORWARD_DRY_RUN=0/' /etc/tradingbot.env || echo 'FORWARD_DRY_RUN=0' >> /etc/tradingbot.env
+# Keep DESK_API_KEY in sync for desk routes used by forward bot
+DESK_KEY=$(grep '^DESK_API_KEY=' /etc/bilshenz.env | cut -d= -f2- || true)
+if [[ -n "$DESK_KEY" ]]; then
+  grep -q '^DESK_API_KEY=' /etc/tradingbot.env && sed -i "s|^DESK_API_KEY=.*|DESK_API_KEY=$DESK_KEY|" /etc/tradingbot.env || echo "DESK_API_KEY=$DESK_KEY" >> /etc/tradingbot.env
+fi
 mkdir -p /var/log/tradingbot
+cd /opt/bilshenz/backend
+# Refresh freeze fingerprints only (does not change entry/exit parameters)
+npm run strategy:freeze >/tmp/strategy-freeze.out 2>&1 || cat /tmp/strategy-freeze.out
 if [[ -f /opt/bilshenz/deploy/systemd/bilshenz-forward-bot.service ]]; then
   cp -f /opt/bilshenz/deploy/systemd/bilshenz-forward-bot.service /etc/systemd/system/
   systemctl daemon-reload
   systemctl enable bilshenz-forward-bot 2>/dev/null || true
   systemctl restart bilshenz-forward-bot || true
 fi
-sleep 3
+sleep 5
+cd /opt/bilshenz
+
 
 echo === services ===
 systemctl is-active bilshenz-binance-api bilshenz-desk-api bilshenz-forward-bot 2>/dev/null || true
