@@ -1,7 +1,7 @@
 /**
  * Tick momentum scanner — REST snapshot + WebSocket live updates.
  */
-import { getBridgeToken } from '../lib/envConfig';
+import { getBridgeToken, getDeskApiKey } from '../lib/envConfig';
 import { binanceFetch } from './binanceFuturesApi';
 
 function wsBase(httpBase) {
@@ -11,10 +11,12 @@ function wsBase(httpBase) {
     .replace(/^https:\/\//i, 'wss://');
 }
 
+/** Desk proxy needs DESK_API_KEY; direct bridge needs BRIDGE_TOKEN. */
 export function scannerWsUrl(baseUrl) {
   const b = String(baseUrl || '').replace(/\/$/, '');
   const path = `${wsBase(b)}/ws/scanner`;
-  const token = getBridgeToken();
+  const viaDesk = b.includes('/v1/binance');
+  const token = viaDesk ? getDeskApiKey() : getBridgeToken();
   if (!token) return path;
   const sep = path.includes('?') ? '&' : '?';
   return `${path}${sep}token=${encodeURIComponent(token)}`;
@@ -34,17 +36,19 @@ function normalizeSnapshot(data) {
 export async function fetchScannerSnapshot(baseUrl, timeoutMs = 12000) {
   const b = String(baseUrl || '').replace(/\/$/, '');
   if (!b) return { ok: false, rows: [], signals: [], blocks: [], error: 'no_base_url' };
-  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  const t = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
   try {
-    const res = await fetch(`${b}/api/scanner/snapshot`, { signal: ctrl?.signal });
-    if (!res.ok) return { ok: false, rows: [], signals: [], blocks: [], error: `HTTP ${res.status}` };
+    const res = await binanceFetch(b, '/api/scanner/snapshot', {}, timeoutMs);
+    if (!res.ok) {
+      const detail =
+        res.status === 401
+          ? 'Desk auth failed — rebuild APK with EXPO_PUBLIC_DESK_API_KEY matching the VPS.'
+          : `HTTP ${res.status}`;
+      return { ok: false, rows: [], signals: [], blocks: [], error: detail };
+    }
     const data = await res.json();
     return normalizeSnapshot(data);
   } catch (e) {
     return { ok: false, rows: [], signals: [], blocks: [], error: e instanceof Error ? e.message : String(e) };
-  } finally {
-    if (t) clearTimeout(t);
   }
 }
 

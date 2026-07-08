@@ -479,11 +479,72 @@ class MomentumScanner:
     def snapshot_rows(self) -> list[dict[str, Any]]:
         rows = []
         for coin in self._coins.values():
-            if coin.best_pct < 1.0 and not coin.active() and not coin.short:
+            # Include 24h movers immediately (miniTicker) so the app isn't empty while
+            # 3m/5m/15m tick history is still warming up.
+            hot_24h = abs(coin.pct_24h) >= 2.0
+            if coin.best_pct < 1.0 and not hot_24h and not coin.active() and not coin.short:
                 continue
             rows.append(self._row(coin))
-        rows.sort(key=lambda r: r["pctGain"], reverse=True)
+        rows.sort(
+            key=lambda r: max(abs(r.get("pctGain") or 0), abs(r.get("pct24h") or 0) * 0.35),
+            reverse=True,
+        )
         return rows[:MAX_WATCHLIST]
+
+    def seed_history_from_klines(self, symbols: list[str] | None = None, limit_bars: int = 20) -> int:
+        """
+        Seed ~15–20 minutes of 1m closes so rolling 3m/5m/15m % work immediately
+        instead of waiting for live ticks to accumulate.
+        """
+        if not self._enabled:
+            return 0
+        syms = [s.upper() for s in (symbols or list(self._symbols_usdt)) if s]
+        if not syms:
+            return 0
+        # Cap REST fan-out — prefer symbols already receiving ticks / high 24h move.
+        scored: list[tuple[float, str]] = []
+        for sym in syms:
+            coin = self._coins.get(sym)
+            score = abs(coin.pct_24h) if coin else 0.0
+            if coin and coin.price > 0:
+                score += 0.1
+            scored.append((score, sym))
+        scored.sort(reverse=True)
+        pick = [s for _, s in scored[: min(60, len(scored))]]
+        seeded = 0
+        for sym in pick:
+            coin = self._coins.get(sym)
+            if not coin:
+                continue
+            if len(coin._history) >= max(8, limit_bars // 2):
+                continue
+            try:
+                bars = self._connector.bars_interval(sym, interval="1m", count=limit_bars)
+            except Exception as e:
+                log.debug("seed klines %s: %s", sym, e)
+                continue
+            if not bars:
+                continue
+            now_ms = int(time.time() * 1000)
+            for bar in bars:
+                ts = int(bar.get("t") or 0)
+                close = float(bar.get("c") or 0)
+                if ts <= 0 or close <= 0:
+                    continue
+                # kline open time → approximate close time (+1m)
+                coin._history.append(PricePoint(ts + 60_000, close))
+            self._prune_history(coin, now_ms)
+            if coin.price <= 0 and bars:
+                coin.price = float(bars[-1].get("c") or 0)
+                coin.last_update_ms = now_ms
+            coin.pct_3m, coin.pct_5m, coin.pct_15m = self._rolling_pcts(coin, now_ms)
+            coin.best_pct, coin.best_tf = self._best_move(coin)
+            seeded += 1
+        if seeded:
+            log.info("scanner seeded 1m history for %s symbols", seeded)
+            self._last_broadcast = 0.0
+            self._maybe_broadcast()
+        return seeded
 
     def _row(self, coin: CoinStrategy) -> dict[str, Any]:
         return {

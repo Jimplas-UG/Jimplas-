@@ -165,6 +165,17 @@ async def lifespan(app: FastAPI):
                 if syms:
                     momentum_scanner.load_symbols(syms)
                     log.info("scanner loaded %s USDT perpetual symbols", len(syms))
+                    # Seed rolling % from 1m klines so ready-signal logic works without 15m wait.
+                    async def _seed() -> None:
+                        await asyncio.sleep(2.0)
+                        try:
+                            n = await asyncio.to_thread(momentum_scanner.seed_history_from_klines)
+                            log.info("scanner history seed complete (%s)", n)
+                            _flush_scanner_snapshot()
+                        except Exception as se:
+                            log.warning("scanner history seed failed: %s", se)
+
+                    asyncio.create_task(_seed())
                     return
             except Exception as e:
                 log.warning("scanner symbol load attempt %s: %s", attempt + 1, e)
@@ -466,6 +477,21 @@ def api_login(body: LoginBody):
         )
 
     threading.Thread(target=connector.warm_order_cache, daemon=True).start()
+
+    def _post_login_seed() -> None:
+        try:
+            # Prioritize symbols already on the watch/pending queue after connect.
+            hot = [
+                c.symbol
+                for c in momentum_scanner._coins.values()
+                if c.active() or abs(c.pct_24h) >= 3.0 or c.best_pct >= 1.0
+            ][:40]
+            momentum_scanner.seed_history_from_klines(hot or None)
+        except Exception as e:
+            log.warning("post-login seed: %s", e)
+        _flush_scanner_snapshot()
+
+    threading.Thread(target=_post_login_seed, daemon=True).start()
     _flush_scanner_snapshot()
     st = momentum_scanner.status()
     return {

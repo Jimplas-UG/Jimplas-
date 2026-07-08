@@ -4,10 +4,10 @@ import { fetchScannerSnapshot, subscribeScannerStream } from '../broker/binanceS
 function applyPayload(setters, payload) {
   if (!payload) return;
   if (payload.scanner) setters.setScannerMeta(payload.scanner);
-  if (!Array.isArray(payload.rows)) return;
-  setters.setRows(payload.rows);
+  // First successful snapshot means the engine is live — don't block UI on empty movers.
   setters.setReady(true);
   setters.setError('');
+  if (Array.isArray(payload.rows)) setters.setRows(payload.rows);
   if (payload.ts) setters.setLastTs(payload.ts);
   if (Array.isArray(payload.signals)) setters.setSignals(payload.signals);
   if (Array.isArray(payload.blocks)) setters.setBlocks(payload.blocks);

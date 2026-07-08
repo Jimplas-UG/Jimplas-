@@ -480,17 +480,22 @@ class BinanceConnector:
             return self.base_url
         return MAINNET
 
-    def bars_m30(self, symbol: str | None = None, count: int = 320) -> list[dict[str, Any]]:
+    def bars_interval(self, symbol: str | None = None, interval: str = "1m", count: int = 20) -> list[dict[str, Any]]:
+        """Public klines for any interval (used to seed scanner rolling windows)."""
         sym = (symbol or self.cfg.symbol).upper()
-        n = max(50, min(1500, int(count)))
+        n = max(2, min(1500, int(count)))
+        iv = (interval or "1m").strip() or "1m"
         data = self._request(
             "GET",
             "/fapi/v1/klines",
-            {"symbol": sym, "interval": "30m", "limit": n},
+            {"symbol": sym, "interval": iv, "limit": n},
             base_url=self._klines_base_url(),
-            timeout=35.0,
+            timeout=20.0,
         )
         return self._klines_to_bars(data)
+
+    def bars_m30(self, symbol: str | None = None, count: int = 320) -> list[dict[str, Any]]:
+        return self.bars_interval(symbol, interval="30m", count=max(50, min(1500, int(count))))
 
     def bars_m30_range(self, symbol: str | None = None, from_ms: int = 0, to_ms: int = 0) -> list[dict[str, Any]]:
         """M30 OHLC between UTC epoch ms (inclusive start). Paginates Binance klines."""

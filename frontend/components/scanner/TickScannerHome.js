@@ -195,7 +195,7 @@ export default function TickScannerHome({
         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
           <View style={{ flex: 1, minWidth: '100%' }}>
             <MarketTableHeader C={C} />
-            {!ready ? (
+            {!ready && !error ? (
               <View style={{ paddingVertical: 28, alignItems: 'center' }}>
                 <ActivityIndicator color={C.accentLight} />
                 <Text style={{ color: C.dim, fontSize: 12, marginTop: 10 }}>Syncing market data…</Text>
@@ -204,7 +204,9 @@ export default function TickScannerHome({
               marketRows.map((row) => <MarketTableRow key={row.symbol} row={row} C={C} />)
             ) : (
               <Text style={{ color: C.dim, fontSize: 12, textAlign: 'center', paddingVertical: 22, lineHeight: 18 }}>
-                Scanning USDT-M pairs — movers rank here by 3m / 5m / 15m change.
+                {connected
+                  ? 'Engine live — ranking USDT-M movers by 3m / 5m / 15m and 24h change.'
+                  : 'Connect Binance to arm execution. Market scan loads in the background.'}
               </Text>
             )}
           </View>
