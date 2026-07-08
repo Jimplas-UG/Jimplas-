@@ -43,7 +43,8 @@ if [[ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]]; then
 fi
 
 yes | sdkmanager --licenses >/dev/null || true
-sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+sdkmanager "platform-tools" "platforms;android-34" "platforms;android-35" "build-tools;34.0.0" "build-tools;35.0.0" || \
+  sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
 cd "$APP_DIR"
 git fetch origin
