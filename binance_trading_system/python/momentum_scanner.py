@@ -1,8 +1,10 @@
 """
 Tick-by-tick multi-coin momentum scanner + retracement short strategy.
 
-Monitors 15m rolling % move on every price tick (no candle close).
-Entry: tick move >= 5% gain, then >= 0.7% retrace from peak → short.
+Monitors 1m / 3m / 5m / 15m rolling % on every price tick (max study window 15m).
+Entry: tick move >= 5% gain, then >= 0.7% retrace from peak → short (50% partition).
+Recovery: +2% adverse from short → Long1 (40%); +4% → Long2 (40%).
+Each long closes on 0.5% retrace from its own peak.
 """
 
 from __future__ import annotations
@@ -36,10 +38,8 @@ ONE_TRADE_AT_A_TIME = os.environ.get("SCANNER_ONE_TRADE", "1").strip().lower() n
 PENDING_STALE_MS = int(os.environ.get("SCANNER_PENDING_STALE_MS", "120000"))
 PENDING_QUEUE_MS = int(os.environ.get("SCANNER_PENDING_QUEUE_MS", "1800000"))
 SIGNALS_PER_TF = int(os.environ.get("SCANNER_SIGNALS_PER_TF", "5"))
-SCANNER_TF_MIN = max(1, int(os.environ.get("SCANNER_TF_MIN", "15") or 15))
-TIMEFRAMES_MIN = (SCANNER_TF_MIN,)
-SCANNER_TF_LABEL = f"{SCANNER_TF_MIN}m"
-SIGNAL_WINDOW_SEC = {SCANNER_TF_LABEL: SCANNER_TF_MIN * 60}
+TIMEFRAMES_MIN = (1, 3, 5, 15)
+SIGNAL_WINDOW_SEC = {f"{m}m": m * 60 for m in TIMEFRAMES_MIN}
 
 MAGIC_SHORT = 88001
 MAGIC_LONG1 = 88002
@@ -88,6 +88,7 @@ class LegPosition:
 class CoinStrategy:
     symbol: str
     price: float = 0.0
+    pct_1m: float = 0.0
     pct_3m: float = 0.0
     pct_5m: float = 0.0
     pct_15m: float = 0.0
@@ -104,6 +105,8 @@ class CoinStrategy:
     long1: LegPosition | None = None
     long2: LegPosition | None = None
     long1_was_closed: bool = False
+    long1_peak_price: float | None = None
+    long2_peak_price: float | None = None
     recovery_peak_price: float | None = None
     unrealized_pnl: float = 0.0
     last_update_ms: int = 0
@@ -141,7 +144,7 @@ class MomentumScanner:
         self._last_exec_error: str | None = None
         self._session_ok_cache: tuple[float, tuple[bool, str]] | None = None
         self._tf_emit_times: dict[str, deque[float]] = {
-            SCANNER_TF_LABEL: deque(maxlen=SIGNALS_PER_TF + 2),
+            f"{m}m": deque(maxlen=SIGNALS_PER_TF + 2) for m in TIMEFRAMES_MIN
         }
 
     def set_exec_enabled(self, enabled: bool) -> None:
@@ -243,7 +246,7 @@ class MomentumScanner:
         return True
 
     def _emit_signal(self, coin: CoinStrategy, event: str) -> None:
-        tf = coin.best_tf or SCANNER_TF_LABEL
+        tf = coin.best_tf or "15m"
         if event == "watch" and not self._can_emit_tf_signal(tf):
             return
         # Always surface pending/entry events — do not throttle execution-critical signals.
@@ -331,7 +334,7 @@ class MomentumScanner:
 
     def _entry_score(self, coin: CoinStrategy) -> float:
         """Rank pending candidates — highest momentum + confirmed retrace wins."""
-        tf_bonus = {f"{SCANNER_TF_MIN}m": 1.0}.get(coin.best_tf, 0.0)
+        tf_bonus = {"15m": 1.5, "5m": 1.0, "3m": 0.75, "1m": 0.5}.get(coin.best_tf, 0.0)
         return coin.best_pct * 10.0 + coin.retrace_pct * 2.0 + tf_bonus
 
     def _pending_candidates(self) -> list[CoinStrategy]:
@@ -444,7 +447,7 @@ class MomentumScanner:
                 pass
         coin._history.append(PricePoint(now_ms, price))
         self._prune_history(coin, now_ms)
-        coin.pct_3m, coin.pct_5m, coin.pct_15m = self._rolling_pcts(coin, now_ms)
+        coin.pct_1m, coin.pct_3m, coin.pct_5m, coin.pct_15m = self._rolling_pcts(coin, now_ms)
         coin.best_pct, coin.best_tf = self._best_move(coin)
 
         if coin.status in (STATUS_SCANNING, STATUS_CLOSED):
@@ -494,7 +497,13 @@ class MomentumScanner:
             # Live market view: include any coin with recent price + meaningful move,
             # or an active strategy state — does not change entry/gain thresholds.
             hot_24h = abs(coin.pct_24h) >= 1.0
-            hot_tf = abs(coin.pct_15m) >= 0.5 or abs(coin.best_pct) >= 0.5
+            hot_tf = max(
+                abs(coin.pct_1m),
+                abs(coin.pct_3m),
+                abs(coin.pct_5m),
+                abs(coin.pct_15m),
+                abs(coin.best_pct),
+            ) >= 0.5
             if not hot_tf and not hot_24h and not coin.active() and not coin.short:
                 if coin.price <= 0:
                     continue
@@ -505,6 +514,9 @@ class MomentumScanner:
         rows.sort(
             key=lambda r: max(
                 abs(r.get("pctGain") or 0),
+                abs(r.get("pct1m") or 0),
+                abs(r.get("pct3m") or 0),
+                abs(r.get("pct5m") or 0),
                 abs(r.get("pct15m") or 0),
                 abs(r.get("pct24h") or 0) * 0.35,
             ),
@@ -553,7 +565,7 @@ class MomentumScanner:
 
     def seed_history_from_klines(self, symbols: list[str] | None = None, limit_bars: int = 20) -> int:
         """
-        Seed ~15–20 minutes of 1m closes so rolling 15m tick % works immediately
+        Seed ~15–20 minutes of 1m closes so rolling 1m/3m/5m/15m tick % works immediately
         instead of waiting for live ticks to accumulate.
         """
         if not self._enabled:
@@ -612,6 +624,7 @@ class MomentumScanner:
             "symbol": coin.symbol,
             "price": round(coin.price, 8),
             "pctGain": round(coin.best_pct, 2),
+            "pct1m": round(coin.pct_1m, 2),
             "pct3m": round(coin.pct_3m, 2),
             "pct5m": round(coin.pct_5m, 2),
             "pct15m": round(coin.pct_15m, 2),
@@ -638,14 +651,25 @@ class MomentumScanner:
                 return pt.price
         return coin._history[0].price if coin._history else None
 
-    def _rolling_pcts(self, coin: CoinStrategy, now_ms: int) -> tuple[float, float, float]:
-        m = TIMEFRAMES_MIN[0]
-        old = self._price_at(coin, now_ms, m)
-        pct = ((coin.price - old) / old) * 100.0 if old and old > 0 else 0.0
-        return 0.0, 0.0, pct
+    def _rolling_pcts(self, coin: CoinStrategy, now_ms: int) -> tuple[float, float, float, float]:
+        out: list[float] = []
+        for m in TIMEFRAMES_MIN:
+            old = self._price_at(coin, now_ms, m)
+            if old and old > 0:
+                out.append(((coin.price - old) / old) * 100.0)
+            else:
+                out.append(0.0)
+        return out[0], out[1], out[2], out[3]
 
     def _best_move(self, coin: CoinStrategy) -> tuple[float, str]:
-        return coin.pct_15m, SCANNER_TF_LABEL
+        pairs = [
+            (coin.pct_1m, "1m"),
+            (coin.pct_3m, "3m"),
+            (coin.pct_5m, "5m"),
+            (coin.pct_15m, "15m"),
+        ]
+        best = max(pairs, key=lambda x: x[0])
+        return best[0], best[1]
 
     def _qty_for(self, symbol: str, price: float, leverage: int, partition_pct: float) -> float:
         if price <= 0:
@@ -692,6 +716,8 @@ class MomentumScanner:
                 coin.short = LegPosition("SELL", fill, qty, SHORT_LEVERAGE, MAGIC_SHORT, tp)
                 coin.status = STATUS_SHORT
                 coin.long1_was_closed = False
+                coin.long1_peak_price = None
+                coin.long2_peak_price = None
                 coin.recovery_peak_price = None
                 self._last_exec_error = None
                 self._emit_signal(coin, "entered")
@@ -716,20 +742,20 @@ class MomentumScanner:
             magic = MAGIC_LONG1 if leg == 1 else MAGIC_LONG2
             leg_pct = self._long1_pct if leg == 1 else self._long2_pct
             qty = self._qty_for(sym, entry, lev, leg_pct)
-            tp = entry * (1.0 + LONG_TP_PCT / 100.0)
             r = self._connector.order_market_leg(
-                sym, "BUY", qty, sl=None, tp=tp, leverage=lev, magic=magic, leg=f"LONG{leg}"
+                sym, "BUY", qty, sl=None, tp=None, leverage=lev, magic=magic, leg=f"LONG{leg}"
             )
             if r.get("ok"):
                 fill = float(r.get("fill_price") or entry)
-                pos = LegPosition("BUY", fill, qty, lev, magic, tp)
+                pos = LegPosition("BUY", fill, qty, lev, magic, None)
                 if leg == 1:
                     coin.long1 = pos
+                    coin.long1_peak_price = fill
                     coin.status = STATUS_LONG1
                 else:
                     coin.long2 = pos
+                    coin.long2_peak_price = fill
                     coin.status = STATUS_LONG2
-                    coin.recovery_peak_price = fill
                 self._last_exec_error = None
                 self._emit_signal(coin, f"long{leg}_entered")
                 log.info("scanner LONG%d %s qty=%s @ %s", leg, sym, qty, fill)
@@ -759,56 +785,51 @@ class MomentumScanner:
 
         adverse_pct = ((price - short.entry) / short.entry) * 100.0 if short.entry > 0 else 0.0
 
-        # Long1 @ +2% adverse; Long2 @ +4% while Long1 still open (both legs can run together).
-        if coin.long2 is None:
-            if coin.long1 is None and adverse_pct >= LONG1_ADVERSE_PCT:
-                self._try_open_long(coin, 1)
-            elif coin.long1 is not None and adverse_pct >= LONG2_ADVERSE_PCT:
-                self._try_open_long(coin, 2)
+        # Long1 @ +2% adverse; Long2 @ +4% from short entry (independent triggers).
+        if coin.long1 is None and adverse_pct >= LONG1_ADVERSE_PCT:
+            self._try_open_long(coin, 1)
+        if coin.long2 is None and adverse_pct >= LONG2_ADVERSE_PCT:
+            self._try_open_long(coin, 2)
 
-        # Both recovery longs filled — close all if price pulls back 0.5% from peak (no bullish continuation).
-        if coin.long1 and coin.long2 and short:
-            if coin.recovery_peak_price is None or price > coin.recovery_peak_price:
-                coin.recovery_peak_price = price
-            peak = coin.recovery_peak_price or price
+        # Long1: close on 0.5% retrace from its own peak.
+        if coin.long1 and coin.long1_peak_price is not None:
+            if price > coin.long1_peak_price:
+                coin.long1_peak_price = price
+            peak = coin.long1_peak_price
             if peak > 0:
                 pullback_pct = ((peak - price) / peak) * 100.0
                 if pullback_pct >= LONG_BOTH_PULLBACK_PCT:
                     log.info(
-                        "scanner %s LONG_BOTH_PULLBACK %.2f%% (peak=%s price=%s)",
+                        "scanner %s LONG1_PULLBACK %.2f%% (peak=%s price=%s)",
                         coin.symbol,
                         pullback_pct,
                         peak,
                         price,
                     )
-                    self._close_all(coin, "LONG_BOTH_PULLBACK")
-                    return
+                    self._close_leg(coin, "long1", reason="LONG1_PULLBACK")
+
+        # Long2: close immediately on 0.5% retrace from its own peak.
+        if coin.long2 and coin.long2_peak_price is not None:
+            if price > coin.long2_peak_price:
+                coin.long2_peak_price = price
+            peak = coin.long2_peak_price
+            if peak > 0:
+                pullback_pct = ((peak - price) / peak) * 100.0
+                if pullback_pct >= LONG_BOTH_PULLBACK_PCT:
+                    log.info(
+                        "scanner %s LONG2_PULLBACK %.2f%% (peak=%s price=%s)",
+                        coin.symbol,
+                        pullback_pct,
+                        peak,
+                        price,
+                    )
+                    self._close_leg(coin, "long2", reason="LONG2_PULLBACK")
 
         if short.tp_price and price <= short.tp_price:
             self._close_all(coin, "SHORT_TP")
             return
 
-        if coin.long1 and coin.long1.tp_price and price >= coin.long1.tp_price:
-            self._close_leg(coin, "long1")
-        if coin.long2 and coin.long2.tp_price and price >= coin.long2.tp_price:
-            self._close_leg(coin, "long2")
-
-        if coin.long2 and short:
-            combined = long1_pnl + long2_pnl + short_pnl
-            short_loss = abs(short_pnl) if short_pnl < 0 else 0.0
-            long_profit = long1_pnl + long2_pnl
-            if short_loss > 0 and long_profit >= short_loss * (1.0 + SMART_EXIT_NET_PCT / 100.0):
-                self._close_all(coin, "SMART_EXIT_L2")
-                return
-
-        if coin.long1 and short and not coin.long2:
-            combined = long1_pnl + short_pnl
-            short_loss = abs(short_pnl) if short_pnl < 0 else 0.0
-            if short_loss > 0 and long1_pnl >= short_loss * (1.0 + SMART_EXIT_NET_PCT / 100.0):
-                self._close_all(coin, "SMART_EXIT_L1")
-                return
-
-    def _close_leg(self, coin: CoinStrategy, leg_name: str) -> None:
+    def _close_leg(self, coin: CoinStrategy, leg_name: str, reason: str = "") -> None:
         sym = coin.symbol
         leg = coin.long1 if leg_name == "long1" else coin.long2 if leg_name == "long2" else None
         if not leg:
@@ -816,11 +837,15 @@ class MomentumScanner:
         self._connector.close_leg(sym, leg.magic, leg.qty)
         if leg_name == "long1":
             coin.long1 = None
+            coin.long1_peak_price = None
             coin.long1_was_closed = True
             coin.status = STATUS_SHORT if coin.short else STATUS_CLOSED
         elif leg_name == "long2":
             coin.long2 = None
+            coin.long2_peak_price = None
             coin.status = STATUS_LONG1 if coin.long1 else (STATUS_SHORT if coin.short else STATUS_CLOSED)
+        if reason:
+            log.info("scanner closed leg %s %s reason=%s", sym, leg_name, reason)
 
     def _close_all(self, coin: CoinStrategy, reason: str) -> None:
         sym = coin.symbol
@@ -834,6 +859,8 @@ class MomentumScanner:
         coin.long1 = None
         coin.long2 = None
         coin.long1_was_closed = False
+        coin.long1_peak_price = None
+        coin.long2_peak_price = None
         coin.recovery_peak_price = None
         coin.status = STATUS_CLOSED
         coin.highest_price = None

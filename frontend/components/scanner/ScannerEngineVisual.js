@@ -34,14 +34,14 @@ const BUBBLE_LAYOUT = [
 
 function bubbleHot(row) {
   if (!row) return false;
-  const vals = [row.pct15m, row.pctGain].map(Number).filter((v) => Number.isFinite(v));
+  const vals = [row.pct1m, row.pct3m, row.pct5m, row.pct15m, row.pctGain].map(Number).filter((v) => Number.isFinite(v));
   if (!vals.length) return false;
   return Math.max(...vals.map((v) => Math.abs(v))) >= 1.2;
 }
 
 function bubbleTone(row, hot) {
   if (!row) return { ring: '#7C6CF0', glow: 'rgba(124,108,240,0.35)', text: '#E8E4FF' };
-  const pct = Number(row.pct15m ?? row.pctGain ?? 0);
+  const pct = Number(row.pct5m ?? row.pct3m ?? row.pct15m ?? row.pctGain ?? 0);
   if (hot && pct > 0) return { ring: '#34D399', glow: 'rgba(52,211,153,0.45)', text: '#D1FAE5' };
   if (hot && pct < 0) return { ring: '#F87171', glow: 'rgba(248,113,113,0.4)', text: '#FECACA' };
   if (hot) return { ring: '#38BDF8', glow: 'rgba(56,189,248,0.4)', text: '#E0F2FE' };

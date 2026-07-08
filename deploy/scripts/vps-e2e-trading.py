@@ -18,9 +18,14 @@ git --no-pager log -1 --oneline
 ENVF=/etc/bilshenz.env
 grep -q '^FORWARD_DRY_RUN=' "$ENVF" && sed -i 's/^FORWARD_DRY_RUN=.*/FORWARD_DRY_RUN=0/' "$ENVF" || echo 'FORWARD_DRY_RUN=0' >> "$ENVF"
 grep -q '^SCANNER_EXEC=' "$ENVF" && sed -i 's/^SCANNER_EXEC=.*/SCANNER_EXEC=1/' "$ENVF" || echo 'SCANNER_EXEC=1' >> "$ENVF"
-grep -q '^SCANNER_TF_MIN=' "$ENVF" && sed -i 's/^SCANNER_TF_MIN=.*/SCANNER_TF_MIN=15/' "$ENVF" || echo 'SCANNER_TF_MIN=15' >> "$ENVF"
 grep -q '^SCANNER_GAIN_PCT=' "$ENVF" && sed -i 's/^SCANNER_GAIN_PCT=.*/SCANNER_GAIN_PCT=5.0/' "$ENVF" || echo 'SCANNER_GAIN_PCT=5.0' >> "$ENVF"
 grep -q '^SCANNER_RETRACE_PCT=' "$ENVF" && sed -i 's/^SCANNER_RETRACE_PCT=.*/SCANNER_RETRACE_PCT=0.7/' "$ENVF" || echo 'SCANNER_RETRACE_PCT=0.7' >> "$ENVF"
+grep -q '^SCANNER_LONG1_PCT=' "$ENVF" && sed -i 's/^SCANNER_LONG1_PCT=.*/SCANNER_LONG1_PCT=2.0/' "$ENVF" || echo 'SCANNER_LONG1_PCT=2.0' >> "$ENVF"
+grep -q '^SCANNER_LONG2_PCT=' "$ENVF" && sed -i 's/^SCANNER_LONG2_PCT=.*/SCANNER_LONG2_PCT=4.0/' "$ENVF" || echo 'SCANNER_LONG2_PCT=4.0' >> "$ENVF"
+grep -q '^SCANNER_LONG_PULLBACK_PCT=' "$ENVF" && sed -i 's/^SCANNER_LONG_PULLBACK_PCT=.*/SCANNER_LONG_PULLBACK_PCT=0.5/' "$ENVF" || echo 'SCANNER_LONG_PULLBACK_PCT=0.5' >> "$ENVF"
+grep -q '^SCANNER_SHORT_PARTITION_PCT=' "$ENVF" && sed -i 's/^SCANNER_SHORT_PARTITION_PCT=.*/SCANNER_SHORT_PARTITION_PCT=50/' "$ENVF" || echo 'SCANNER_SHORT_PARTITION_PCT=50' >> "$ENVF"
+grep -q '^SCANNER_LONG1_PARTITION_PCT=' "$ENVF" && sed -i 's/^SCANNER_LONG1_PARTITION_PCT=.*/SCANNER_LONG1_PARTITION_PCT=40/' "$ENVF" || echo 'SCANNER_LONG1_PARTITION_PCT=40' >> "$ENVF"
+grep -q '^SCANNER_LONG2_PARTITION_PCT=' "$ENVF" && sed -i 's/^SCANNER_LONG2_PARTITION_PCT=.*/SCANNER_LONG2_PARTITION_PCT=40/' "$ENVF" || echo 'SCANNER_LONG2_PARTITION_PCT=40' >> "$ENVF"
 
 # Kill leftover Gradle JVMs that steal RAM from trading
 pkill -f 'GradleDaemon' 2>/dev/null || true
@@ -109,7 +114,7 @@ s=get('http://127.0.0.1:8791/v1/binance/api/scanner/snapshot', H)
 rows=s.get('rows') or []
 print('MARKET_ROWS', len(rows))
 for r in rows[:6]:
-  print(' ', r.get('symbol'), 'gain', r.get('pctGain'), '15m', r.get('pct15m'), '24h', r.get('pct24h'), r.get('status'))
+  print(' ', r.get('symbol'), 'gain', r.get('pctGain'), r.get('timeframe'), '1m', r.get('pct1m'), '15m', r.get('pct15m'), r.get('status'))
 t=get('http://127.0.0.1:8791/v1/binance/api/tick/XAUUSDT', H)
 print('XAU_TICK', t.get('bid'), t.get('ask'), t.get('source'))
 st=get('http://127.0.0.1:8791/v1/binance/api/status', H)
