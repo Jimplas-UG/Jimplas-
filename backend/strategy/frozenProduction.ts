@@ -34,7 +34,7 @@ export const FROZEN_SIGNAL_SOURCE_FILES = [
 export type FrozenManifest = {
   version: 1;
   frozenAt: string;
-  strategyId: 'bilshenz-xau-m30-v1';
+  strategyId: 'bilshenz-futures-m30-v1';
   gitNote: string;
   config: BilshenzEngineConfig;
   tunableKeysBlocked: string[];
@@ -110,7 +110,7 @@ export function buildFrozenManifest(rootDir: string): FrozenManifest {
   return {
     version: 1,
     frozenAt: new Date().toISOString(),
-    strategyId: 'bilshenz-xau-m30-v1',
+    strategyId: 'bilshenz-futures-m30-v1',
     gitNote: 'Lock signal sources + productionFrozenConfig; zero tuning during forward demo',
     config: productionFrozenConfig(),
     tunableKeysBlocked: [...TUNABLE_BLOCKED],

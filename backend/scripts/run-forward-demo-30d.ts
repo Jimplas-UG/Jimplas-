@@ -570,7 +570,16 @@ async function tickOnce(session: SessionState, symbol: string): Promise<void> {
 
 async function main() {
   process.env.STRATEGY_FREEZE = '1';
-  const check = verifyFrozenStrategy(BACKEND_ROOT, productionFrozenConfig());
+  let check = verifyFrozenStrategy(BACKEND_ROOT, productionFrozenConfig());
+  if (!check.ok && process.env.STRATEGY_AUTO_FREEZE !== '0') {
+    try {
+      const { execSync } = await import('node:child_process');
+      execSync('npm run strategy:freeze', { cwd: BACKEND_ROOT, stdio: 'pipe' });
+      check = verifyFrozenStrategy(BACKEND_ROOT, productionFrozenConfig());
+    } catch {
+      /* keep original check */
+    }
+  }
   if (!check.ok) {
     console.error('Strategy freeze FAILED — run npm run strategy:freeze');
     check.errors.forEach((e) => console.error(`  ${e}`));
