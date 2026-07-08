@@ -479,17 +479,47 @@ class MomentumScanner:
     def snapshot_rows(self) -> list[dict[str, Any]]:
         rows = []
         for coin in self._coins.values():
-            # Include 24h movers immediately (miniTicker) so the app isn't empty while
-            # 3m/5m/15m tick history is still warming up.
-            hot_24h = abs(coin.pct_24h) >= 2.0
-            if coin.best_pct < 1.0 and not hot_24h and not coin.active() and not coin.short:
-                continue
+            # Live market view: include any coin with recent price + meaningful move,
+            # or an active strategy state — does not change entry/gain thresholds.
+            hot_24h = abs(coin.pct_24h) >= 1.0
+            hot_tf = max(abs(coin.pct_3m), abs(coin.pct_5m), abs(coin.pct_15m), abs(coin.best_pct)) >= 0.5
+            if not hot_tf and not hot_24h and not coin.active() and not coin.short:
+                if coin.price <= 0:
+                    continue
+                # Still surface top-priced tracked names sparingly via absolute change
+                if abs(coin.best_pct) < 0.35 and abs(coin.pct_24h) < 0.5:
+                    continue
             rows.append(self._row(coin))
         rows.sort(
-            key=lambda r: max(abs(r.get("pctGain") or 0), abs(r.get("pct24h") or 0) * 0.35),
+            key=lambda r: max(
+                abs(r.get("pctGain") or 0),
+                abs(r.get("pct3m") or 0),
+                abs(r.get("pct5m") or 0),
+                abs(r.get("pct15m") or 0),
+                abs(r.get("pct24h") or 0) * 0.35,
+            ),
             reverse=True,
         )
         return rows[:MAX_WATCHLIST]
+
+    def apply_24h_pct_map(self, pct_map: dict[str, float]) -> int:
+        """Refresh 24h % from REST ticker (does not change gain/retrace entry rules)."""
+        if not pct_map:
+            return 0
+        n = 0
+        for sym, pct in pct_map.items():
+            coin = self._coins.get(sym.upper())
+            if not coin:
+                continue
+            try:
+                coin.pct_24h = float(pct)
+                n += 1
+            except (TypeError, ValueError):
+                continue
+        if n:
+            self._last_broadcast = 0.0
+            self._maybe_broadcast()
+        return n
 
     def seed_history_from_klines(self, symbols: list[str] | None = None, limit_bars: int = 20) -> int:
         """

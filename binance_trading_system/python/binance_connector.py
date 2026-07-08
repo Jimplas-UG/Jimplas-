@@ -828,6 +828,28 @@ class BinanceConnector:
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         return {"ok": True, "closed": closed, "latency_ms": latency_ms, "broker": "binance"}
 
+    def ticker_24h_map(self) -> dict[str, float]:
+        """USDT-M 24h percent map — fills market view when miniTicker omits P (testnet)."""
+        try:
+            data = self._request("GET", "/fapi/v1/ticker/24hr", timeout=25.0)
+        except Exception as e:
+            log.warning("ticker_24h_map: %s", e)
+            return {}
+        out: dict[str, float] = {}
+        if not isinstance(data, list):
+            return out
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            sym = str(row.get("symbol") or "").upper()
+            if not sym.endswith("USDT"):
+                continue
+            try:
+                out[sym] = float(row.get("priceChangePercent") or 0)
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def list_usdt_perpetual_symbols(self) -> list[str]:
         data = self._request("GET", "/fapi/v1/exchangeInfo", timeout=45.0)
         out: list[str] = []

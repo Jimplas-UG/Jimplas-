@@ -35,11 +35,12 @@ def _parse_mini_ticker(msg: dict[str, Any]) -> tuple[str, float, int, float | No
         return None
     ts = int(msg.get("E") or msg.get("C") or time.time() * 1000)
     pct_24h: float | None = None
-    try:
-        if msg.get("P") is not None:
+    # Futures !miniTicker@arr: "P" = 24h percent change string.
+    if msg.get("P") is not None:
+        try:
             pct_24h = float(msg.get("P"))
-    except (TypeError, ValueError):
-        pct_24h = None
+        except (TypeError, ValueError):
+            pct_24h = None
     return sym, price, ts, pct_24h
 
 
@@ -196,6 +197,8 @@ class BinanceScannerStream:
             log.info("scanner WS connected")
             loop = asyncio.get_running_loop()
             pending: asyncio.Future | None = None
+            # Coalesce latest quote per symbol while worker is busy — never drop live prices.
+            pending_map: dict[str, tuple[str, float, int, float | None]] = {}
             async for raw in ws:
                 if not self._running:
                     break
@@ -204,18 +207,19 @@ class BinanceScannerStream:
                 except json.JSONDecodeError:
                     continue
                 raw_items = payload if isinstance(payload, list) else [payload]
-                batch: list[tuple[str, float, int, float | None]] = []
                 for item in raw_items:
                     if not isinstance(item, dict):
                         continue
                     parsed = _parse_mini_ticker(item)
                     if not parsed:
                         continue
-                    batch.append(parsed)
+                    sym, price, ts, pct_24h = parsed
+                    pending_map[sym] = (sym, price, ts, pct_24h)
                     self._tick_count += 1
-                if not batch:
+                if not pending_map:
                     continue
-                # Drop previous batch if worker is still busy — prefer latest prices over backlog.
                 if pending is not None and not pending.done():
                     continue
+                batch = list(pending_map.values())
+                pending_map.clear()
                 pending = loop.run_in_executor(_TICK_EXECUTOR, self._dispatch_ticks, batch)

@@ -183,7 +183,21 @@ async def lifespan(app: FastAPI):
         momentum_scanner.load_symbols(["BTCUSDT", "ETHUSDT", "XAUUSDT"])
         log.warning("scanner using fallback symbol list (3)")
 
+    async def refresh_24h_loop() -> None:
+        while True:
+            try:
+                await asyncio.sleep(45.0)
+                pct_map = await asyncio.to_thread(connector.ticker_24h_map)
+                n = await asyncio.to_thread(momentum_scanner.apply_24h_pct_map, pct_map)
+                if n:
+                    log.info("scanner refreshed 24h pct for %s symbols", n)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("24h refresh loop: %s", e)
+
     asyncio.create_task(load_scanner_symbols())
+    asyncio.create_task(refresh_24h_loop())
     await scanner_stream.start()
     try:
         snap = connector.status_snapshot(skip_ping=False)
