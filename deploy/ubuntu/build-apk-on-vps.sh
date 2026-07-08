@@ -102,8 +102,14 @@ fi
 grep -nE 'compileSdk|android.compileSdkVersion' "$FRONTEND/android/build.gradle" "$PROP" 2>/dev/null || true
 ls -la "$RES_DIR/splashscreen_logo.png" 2>/dev/null || echo "WARN: no splashscreen_logo.png"
 
-# 2GB RAM: keep Gradle lean + phone ABI only
-sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx1024m -XX:MaxMetaspaceSize=256m -XX:+HeapDumpOnOutOfMemoryError/' "$PROP" || true
+# 2GB RAM + 4GB swap: enough heap/metaspace for release; skip lint to save memory
+sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError/' "$PROP" || true
+if ! grep -q '^org.gradle.jvmargs=' "$PROP"; then
+  echo 'org.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m -XX:+HeapDumpOnOutOfMemoryError' >> "$PROP"
+fi
+if ! grep -q '^android.enableLint=' "$PROP"; then
+  echo 'android.enableLint=false' >> "$PROP"
+fi
 if ! grep -q 'reactNativeArchitectures' "$PROP"; then
   echo 'reactNativeArchitectures=armeabi-v7a,arm64-v8a' >> "$PROP"
 else
@@ -117,7 +123,9 @@ chmod +x gradlew
 ./gradlew -q printCompileSdk 2>/dev/null || \
   ./gradlew -q properties 2>/dev/null | grep -E 'compileSdk|android.compileSdkVersion' || true
 grep -nE 'android\.compileSdkVersion|compileSdkVersion' gradle.properties build.gradle app/build.gradle || true
-./gradlew assembleRelease --no-daemon --stacktrace -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
+./gradlew assembleRelease --no-daemon --stacktrace \
+  -PreactNativeArchitectures=armeabi-v7a,arm64-v8a \
+  -x lint -x lintVitalRelease -x lintVitalAnalyzeRelease
 
 OUT=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
 test -n "$OUT"
