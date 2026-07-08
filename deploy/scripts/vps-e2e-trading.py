@@ -18,6 +18,9 @@ git --no-pager log -1 --oneline
 ENVF=/etc/bilshenz.env
 grep -q '^FORWARD_DRY_RUN=' "$ENVF" && sed -i 's/^FORWARD_DRY_RUN=.*/FORWARD_DRY_RUN=0/' "$ENVF" || echo 'FORWARD_DRY_RUN=0' >> "$ENVF"
 grep -q '^SCANNER_EXEC=' "$ENVF" && sed -i 's/^SCANNER_EXEC=.*/SCANNER_EXEC=1/' "$ENVF" || echo 'SCANNER_EXEC=1' >> "$ENVF"
+grep -q '^SCANNER_TF_MIN=' "$ENVF" && sed -i 's/^SCANNER_TF_MIN=.*/SCANNER_TF_MIN=15/' "$ENVF" || echo 'SCANNER_TF_MIN=15' >> "$ENVF"
+grep -q '^SCANNER_GAIN_PCT=' "$ENVF" && sed -i 's/^SCANNER_GAIN_PCT=.*/SCANNER_GAIN_PCT=5.0/' "$ENVF" || echo 'SCANNER_GAIN_PCT=5.0' >> "$ENVF"
+grep -q '^SCANNER_RETRACE_PCT=' "$ENVF" && sed -i 's/^SCANNER_RETRACE_PCT=.*/SCANNER_RETRACE_PCT=0.7/' "$ENVF" || echo 'SCANNER_RETRACE_PCT=0.7' >> "$ENVF"
 
 # Kill leftover Gradle JVMs that steal RAM from trading
 pkill -f 'GradleDaemon' 2>/dev/null || true
@@ -26,6 +29,11 @@ pkill -f 'KotlinCompileDaemon' 2>/dev/null || true
 systemctl restart bilshenz-binance-api
 systemctl restart bilshenz-desk-api
 sleep 6
+
+echo === scanner unit test ===
+cd /opt/bilshenz/binance_trading_system/python
+python3 test_scanner_15m.py || { echo SCANNER_TEST_FAIL; exit 1; }
+cd /opt/bilshenz
 
 # Forward bot: ensure env + service for XAU strategy (no strategy logic change)
 if [[ ! -f /etc/tradingbot.env ]]; then
@@ -101,7 +109,7 @@ s=get('http://127.0.0.1:8791/v1/binance/api/scanner/snapshot', H)
 rows=s.get('rows') or []
 print('MARKET_ROWS', len(rows))
 for r in rows[:6]:
-  print(' ', r.get('symbol'), 'gain', r.get('pctGain'), '3m', r.get('pct3m'), '24h', r.get('pct24h'), r.get('status'))
+  print(' ', r.get('symbol'), 'gain', r.get('pctGain'), '15m', r.get('pct15m'), '24h', r.get('pct24h'), r.get('status'))
 t=get('http://127.0.0.1:8791/v1/binance/api/tick/XAUUSDT', H)
 print('XAU_TICK', t.get('bid'), t.get('ask'), t.get('source'))
 st=get('http://127.0.0.1:8791/v1/binance/api/status', H)
@@ -113,6 +121,16 @@ PY
 echo === forward log ===
 tail -n 25 /var/log/tradingbot/forward-bot.log 2>/dev/null | tr -cd '\11\12\15\40-\176' | tail -n 25 || echo NO_FORWARD_LOG
 free -h | head -2
+
+echo === apk build ===
+mkdir -p /var/log/bilshenz
+pkill -f build-apk-on-vps.sh 2>/dev/null || true
+pkill -f 'gradlew assembleRelease' 2>/dev/null || true
+nohup bash /opt/bilshenz/deploy/ubuntu/build-apk-on-vps.sh > /var/log/bilshenz/apk-build.out 2>&1 < /dev/null &
+sleep 5
+pgrep -af build-apk-on-vps || pgrep -af 'gradlew|expo' || echo APK_BUILD_NOT_STARTED
+tail -n 15 /var/log/bilshenz/apk-build.log 2>/dev/null || true
+curl -sI --max-time 8 http://127.0.0.1:8791/download/bilshenz.apk | head -3 || true
 """
 
 
@@ -137,7 +155,7 @@ def main() -> int:
     if err.strip():
         sys.stderr.write(err)
     client.close()
-    return 0 if "MARKET_ROWS" in out else 1
+    return 0 if "MARKET_ROWS" in out and "SCANNER_TEST_FAIL" not in out else 1
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ function pctColor(v, C) {
 }
 
 function activityScore(row) {
-  const vals = [row.pct3m, row.pct5m, row.pct15m, row.pctGain].map(Number).filter((v) => Number.isFinite(v));
+  const vals = [row.pct15m, row.pctGain, row.pct24h].map(Number).filter((v) => Number.isFinite(v));
   if (!vals.length) return 0;
   return Math.min(1, Math.max(...vals.map((v) => Math.abs(v))) / 12);
 }
@@ -58,11 +58,7 @@ function ActivityBar({ score, C }) {
   );
 }
 
-const TF_COLS = [
-  { key: 'pct3m', label: '3m' },
-  { key: 'pct5m', label: '5m' },
-  { key: 'pct15m', label: '15m' },
-];
+const TF_COLS = [{ key: 'pct15m', label: '15m' }];
 
 function MarketTableHeader({ C }) {
   return (
@@ -236,7 +232,7 @@ export default function TickScannerHome({
             ) : (
               <Text style={{ color: C.dim, fontSize: 12, textAlign: 'center', paddingVertical: 22, lineHeight: 18 }}>
                 {connected
-                  ? 'Engine live — ranking USDT-M movers by 3m / 5m / 15m and 24h change.'
+                  ? 'Engine live — ranking USDT-M movers by 15m tick move and 24h change.'
                   : 'Connect Binance to arm execution. Market scan loads in the background.'}
               </Text>
             )}

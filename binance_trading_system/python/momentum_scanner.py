@@ -1,7 +1,8 @@
 """
 Tick-by-tick multi-coin momentum scanner + retracement short strategy.
 
-Monitors 3m / 5m / 15m rolling % moves on every price tick (no candle close).
+Monitors 15m rolling % move on every price tick (no candle close).
+Entry: tick move >= 5% gain, then >= 0.7% retrace from peak → short.
 """
 
 from __future__ import annotations
@@ -35,8 +36,10 @@ ONE_TRADE_AT_A_TIME = os.environ.get("SCANNER_ONE_TRADE", "1").strip().lower() n
 PENDING_STALE_MS = int(os.environ.get("SCANNER_PENDING_STALE_MS", "120000"))
 PENDING_QUEUE_MS = int(os.environ.get("SCANNER_PENDING_QUEUE_MS", "1800000"))
 SIGNALS_PER_TF = int(os.environ.get("SCANNER_SIGNALS_PER_TF", "5"))
-SIGNAL_WINDOW_SEC = {"3m": 180, "5m": 300, "15m": 900}
-TIMEFRAMES_MIN = (3, 5, 15)
+SCANNER_TF_MIN = max(1, int(os.environ.get("SCANNER_TF_MIN", "15") or 15))
+TIMEFRAMES_MIN = (SCANNER_TF_MIN,)
+SCANNER_TF_LABEL = f"{SCANNER_TF_MIN}m"
+SIGNAL_WINDOW_SEC = {SCANNER_TF_LABEL: SCANNER_TF_MIN * 60}
 
 MAGIC_SHORT = 88001
 MAGIC_LONG1 = 88002
@@ -138,9 +141,7 @@ class MomentumScanner:
         self._last_exec_error: str | None = None
         self._session_ok_cache: tuple[float, tuple[bool, str]] | None = None
         self._tf_emit_times: dict[str, deque[float]] = {
-            "3m": deque(maxlen=SIGNALS_PER_TF + 2),
-            "5m": deque(maxlen=SIGNALS_PER_TF + 2),
-            "15m": deque(maxlen=SIGNALS_PER_TF + 2),
+            SCANNER_TF_LABEL: deque(maxlen=SIGNALS_PER_TF + 2),
         }
 
     def set_exec_enabled(self, enabled: bool) -> None:
@@ -242,7 +243,7 @@ class MomentumScanner:
         return True
 
     def _emit_signal(self, coin: CoinStrategy, event: str) -> None:
-        tf = coin.best_tf or "5m"
+        tf = coin.best_tf or SCANNER_TF_LABEL
         if event == "watch" and not self._can_emit_tf_signal(tf):
             return
         # Always surface pending/entry events — do not throttle execution-critical signals.
@@ -330,7 +331,7 @@ class MomentumScanner:
 
     def _entry_score(self, coin: CoinStrategy) -> float:
         """Rank pending candidates — highest momentum + confirmed retrace wins."""
-        tf_bonus = {"15m": 1.5, "5m": 1.0, "3m": 0.5}.get(coin.best_tf, 0.0)
+        tf_bonus = {f"{SCANNER_TF_MIN}m": 1.0}.get(coin.best_tf, 0.0)
         return coin.best_pct * 10.0 + coin.retrace_pct * 2.0 + tf_bonus
 
     def _pending_candidates(self) -> list[CoinStrategy]:
@@ -493,7 +494,7 @@ class MomentumScanner:
             # Live market view: include any coin with recent price + meaningful move,
             # or an active strategy state — does not change entry/gain thresholds.
             hot_24h = abs(coin.pct_24h) >= 1.0
-            hot_tf = max(abs(coin.pct_3m), abs(coin.pct_5m), abs(coin.pct_15m), abs(coin.best_pct)) >= 0.5
+            hot_tf = abs(coin.pct_15m) >= 0.5 or abs(coin.best_pct) >= 0.5
             if not hot_tf and not hot_24h and not coin.active() and not coin.short:
                 if coin.price <= 0:
                     continue
@@ -504,8 +505,6 @@ class MomentumScanner:
         rows.sort(
             key=lambda r: max(
                 abs(r.get("pctGain") or 0),
-                abs(r.get("pct3m") or 0),
-                abs(r.get("pct5m") or 0),
                 abs(r.get("pct15m") or 0),
                 abs(r.get("pct24h") or 0) * 0.35,
             ),
@@ -554,7 +553,7 @@ class MomentumScanner:
 
     def seed_history_from_klines(self, symbols: list[str] | None = None, limit_bars: int = 20) -> int:
         """
-        Seed ~15–20 minutes of 1m closes so rolling 3m/5m/15m % work immediately
+        Seed ~15–20 minutes of 1m closes so rolling 15m tick % works immediately
         instead of waiting for live ticks to accumulate.
         """
         if not self._enabled:
@@ -640,19 +639,13 @@ class MomentumScanner:
         return coin._history[0].price if coin._history else None
 
     def _rolling_pcts(self, coin: CoinStrategy, now_ms: int) -> tuple[float, float, float]:
-        out = []
-        for m in TIMEFRAMES_MIN:
-            old = self._price_at(coin, now_ms, m)
-            if old and old > 0:
-                out.append(((coin.price - old) / old) * 100.0)
-            else:
-                out.append(0.0)
-        return out[0], out[1], out[2]
+        m = TIMEFRAMES_MIN[0]
+        old = self._price_at(coin, now_ms, m)
+        pct = ((coin.price - old) / old) * 100.0 if old and old > 0 else 0.0
+        return 0.0, 0.0, pct
 
     def _best_move(self, coin: CoinStrategy) -> tuple[float, str]:
-        pairs = [(coin.pct_3m, "3m"), (coin.pct_5m, "5m"), (coin.pct_15m, "15m")]
-        best = max(pairs, key=lambda x: x[0])
-        return best[0], best[1]
+        return coin.pct_15m, SCANNER_TF_LABEL
 
     def _qty_for(self, symbol: str, price: float, leverage: int, partition_pct: float) -> float:
         if price <= 0:
