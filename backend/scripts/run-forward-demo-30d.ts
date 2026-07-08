@@ -593,15 +593,19 @@ async function main() {
   let session = loadSession();
   const now = Date.now();
   let symbols: string[] = [];
-  try {
-    symbols = await fetchBrokerSymbols();
-  } catch (e) {
-    console.error(`[forward-demo] symbol list failed: ${e instanceof Error ? e.message : e}`);
-    process.exit(1);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      symbols = await fetchBrokerSymbols();
+      if (symbols.length) break;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[forward-demo] symbol list attempt ${attempt + 1}: ${msg}`);
+    }
+    if (attempt < 5) await new Promise((r) => setTimeout(r, 4000));
   }
   if (!symbols.length) {
-    console.error('[forward-demo] no eligible USDT-M perpetual symbols');
-    process.exit(1);
+    console.error('[forward-demo] using fallback symbol list (bridge symbols API unavailable)');
+    symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'DOGEUSDT'];
   }
 
   if (!session || now >= session.endMs) {
@@ -609,31 +613,45 @@ async function main() {
     const endMs = startMs + DAYS * 86400000;
     const st = await brokerStatus(symbols[0]!);
     if (!st.connected) {
-      console.error('Start Binance bridge: cd binance_trading_system/python && .\\start-api.ps1');
-      if (BROKER_MODE === 'paper') console.error('  Set BINANCE_PAPER=1 for simulated fills');
-      process.exit(1);
+      console.error(`[forward-demo] ${BROKER_LABEL} not connected — waiting for app login or env keys`);
+      session = {
+        startedAt: new Date(startMs).toISOString(),
+        endsAt: new Date(endMs).toISOString(),
+        startMs,
+        endMs,
+        lastClosedBarT: null,
+        lastClosedBarTBySymbol: {},
+        symbolCursor: 0,
+        lastEquitySnapMs: 0,
+        tradeCountToday: 0,
+        nyDay: null,
+        server: null,
+        dryRun: isDry,
+      };
+      saveSession(session);
+    } else {
+      session = {
+        startedAt: new Date(startMs).toISOString(),
+        endsAt: new Date(endMs).toISOString(),
+        startMs,
+        endMs,
+        lastClosedBarT: null,
+        lastClosedBarTBySymbol: {},
+        symbolCursor: 0,
+        lastEquitySnapMs: 0,
+        tradeCountToday: 0,
+        nyDay: null,
+        server: st.server,
+        dryRun: isDry,
+      };
+      saveSession(session);
+      logEquitySnapshot(st.equity, { event: 'SESSION_START', server: st.server, endsAt: session.endsAt });
+      console.error(`[forward-demo] Session started → ${session.endsAt}`);
+      console.error(`[forward-demo] Server: ${st.server} · equity $${st.equity.toFixed(2)}`);
+      console.error(`[forward-demo] Log: ${forwardDemoLogPath()}`);
+      console.error(`[forward-demo] Broker: ${BROKER_LABEL} · ${symbols.length} USDT-M symbols (max ${MAX_FORWARD_SYMBOLS})`);
+      if (isDry) console.error(`[forward-demo] DRY-RUN — no ${BROKER_LABEL} orders`);
     }
-    session = {
-      startedAt: new Date(startMs).toISOString(),
-      endsAt: new Date(endMs).toISOString(),
-      startMs,
-      endMs,
-      lastClosedBarT: null,
-      lastClosedBarTBySymbol: {},
-      symbolCursor: 0,
-      lastEquitySnapMs: 0,
-      tradeCountToday: 0,
-      nyDay: null,
-      server: st.server,
-      dryRun: isDry,
-    };
-    saveSession(session);
-    logEquitySnapshot(st.equity, { event: 'SESSION_START', server: st.server, endsAt: session.endsAt });
-    console.error(`[forward-demo] Session started → ${session.endsAt}`);
-    console.error(`[forward-demo] Server: ${st.server} · equity $${st.equity.toFixed(2)}`);
-    console.error(`[forward-demo] Log: ${forwardDemoLogPath()}`);
-    console.error(`[forward-demo] Broker: ${BROKER_LABEL} · ${symbols.length} USDT-M symbols (max ${MAX_FORWARD_SYMBOLS})`);
-    if (isDry) console.error(`[forward-demo] DRY-RUN — no ${BROKER_LABEL} orders`);
   } else {
     session.dryRun = isDry;
     if (!session.lastClosedBarTBySymbol) session.lastClosedBarTBySymbol = {};
