@@ -61,12 +61,27 @@ const BROKER_MODE = (process.env.BROKER_MODE ?? 'binance').trim().toLowerCase();
 const BROKER_LABEL = BROKER_MODE === 'paper' ? 'Binance paper' : 'Binance';
 const BINANCE_API = (process.env.BINANCE_API_URL ?? 'http://127.0.0.1:8766').replace(/\/$/, '');
 const BROKER_API = BINANCE_API;
+const BRIDGE_TOKEN = (process.env.BRIDGE_TOKEN ?? '').trim();
 const SYMBOL = process.env.BINANCE_SYMBOL?.trim() || 'XAUUSDT';
 const M30_MS = 30 * 60 * 1000;
 const WARMUP_BARS = 200;
 const RISK_PCT = Math.max(0.0001, Math.min(0.05, Number(process.env.RISK_PCT ?? '0.005') || 0.005));
 const DAYS = 30;
 const POLL_SEC_DEFAULT = Math.max(15, parseInt(process.env.FORWARD_POLL_SEC ?? '45', 10) || 45);
+
+function brokerHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const h: Record<string, string> = { ...extra };
+  if (BRIDGE_TOKEN) h['X-Bridge-Token'] = BRIDGE_TOKEN;
+  return h;
+}
+
+async function brokerFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = {
+    ...(init.headers as Record<string, string> | undefined),
+    ...brokerHeaders(),
+  };
+  return fetch(`${BROKER_API}${path.startsWith('/') ? path : `/${path}`}`, { ...init, headers });
+}
 
 type SessionState = {
   startedAt: string;
@@ -110,7 +125,7 @@ async function brokerStatus(): Promise<{
   spreadPips: number;
   usdPerPip: number;
 }> {
-  const st = await fetch(`${BROKER_API}/api/status`);
+  const st = await brokerFetch('/api/status');
   if (!st.ok) throw new Error(`${BROKER_LABEL} status HTTP ${st.status}`);
   const j = (await st.json()) as {
     connected?: boolean;
@@ -120,7 +135,7 @@ async function brokerStatus(): Promise<{
   let spreadPips = 3.08;
   let usdPerPip = 10;
   try {
-    const specRes = await fetch(`${BROKER_API}/api/symbol/${encodeURIComponent(SYMBOL)}?pip_size=0.1`);
+    const specRes = await brokerFetch(`/api/symbol/${encodeURIComponent(SYMBOL)}?pip_size=0.1`);
     if (specRes.ok) {
       const spec = (await specRes.json()) as { spread_pips?: number; usd_per_pip_per_lot?: number };
       if (spec.spread_pips) spreadPips = spec.spread_pips;
@@ -140,11 +155,11 @@ async function brokerStatus(): Promise<{
 }
 
 async function fetchM30Bars(fromMs: number, toMs: number): Promise<Bar[]> {
-  const url = `${BROKER_API}/api/bars/${encodeURIComponent(SYMBOL)}?from_ms=${fromMs}&to_ms=${toMs}`;
-  const res = await fetch(url);
+  const url = `/api/bars/${encodeURIComponent(SYMBOL)}?from_ms=${fromMs}&to_ms=${toMs}`;
+  const res = await brokerFetch(url);
   if (!res.ok) {
-    const fallback = `${BROKER_API}/api/bars/${encodeURIComponent(SYMBOL)}?count=1500`;
-    const res2 = await fetch(fallback);
+    const fallback = `/api/bars/${encodeURIComponent(SYMBOL)}?count=1500`;
+    const res2 = await brokerFetch(fallback);
     if (!res2.ok) throw new Error(`${BROKER_LABEL} bars ${res2.status}`);
     const j2 = (await res2.json()) as { bars?: Bar[] };
     return (j2.bars ?? []).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t);

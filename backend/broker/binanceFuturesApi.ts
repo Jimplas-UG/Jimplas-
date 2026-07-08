@@ -12,10 +12,17 @@ function base(baseUrl: string): string {
   return baseUrl.replace(/\/$/, '');
 }
 
+function bridgeHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const h: Record<string, string> = { ...extra };
+  const token = (process.env.BRIDGE_TOKEN ?? '').trim();
+  if (token) h['X-Bridge-Token'] = token;
+  return h;
+}
+
 export async function fetchBinanceConnected(apiBaseUrl: string): Promise<boolean> {
   const b = base(apiBaseUrl);
   try {
-    const res = await fetch(`${b}/api/status`);
+    const res = await fetch(`${b}/api/status`, { headers: bridgeHeaders() });
     if (!res.ok) return false;
     const j = await res.json();
     return !!j.connected;
@@ -29,6 +36,7 @@ export async function postBinanceAttach(apiBaseUrl: string, timeoutMs = 15000): 
   try {
     const res = await fetch(`${b}/api/attach`, {
       method: 'POST',
+      headers: bridgeHeaders(),
       signal: AbortSignal.timeout(timeoutMs),
     });
     const j = await res.json().catch(() => ({}));
@@ -50,7 +58,9 @@ export async function fetchBinanceSymbolSpec(
 ): Promise<BinanceSymbolSpec | null> {
   const b = base(apiBaseUrl);
   try {
-    const res = await fetch(`${b}/api/symbol/${encodeURIComponent(symbol)}?pip_size=${pipSize}`);
+    const res = await fetch(`${b}/api/symbol/${encodeURIComponent(symbol)}?pip_size=${pipSize}`, {
+      headers: bridgeHeaders(),
+    });
     if (!res.ok) return null;
     const j = await res.json();
     return {
@@ -72,7 +82,9 @@ export async function fetchBinanceSymbolSpec(
 export async function fetchBinanceTick(apiBaseUrl: string, symbol = 'XAUUSDT'): Promise<BinanceTick | null> {
   const b = base(apiBaseUrl);
   try {
-    const res = await fetch(`${b}/api/tick/${encodeURIComponent(symbol)}`);
+    const res = await fetch(`${b}/api/tick/${encodeURIComponent(symbol)}`, {
+      headers: bridgeHeaders(),
+    });
     if (!res.ok) return null;
     return (await res.json()) as BinanceTick;
   } catch {
@@ -87,7 +99,9 @@ export async function fetchBinanceBarsM30(
 ): Promise<BinanceBar[]> {
   const b = base(apiBaseUrl);
   try {
-    const res = await fetch(`${b}/api/bars/${encodeURIComponent(symbol)}?count=${count}`);
+    const res = await fetch(`${b}/api/bars/${encodeURIComponent(symbol)}?count=${count}`, {
+      headers: bridgeHeaders(),
+    });
     if (!res.ok) return [];
     const j = await res.json();
     return Array.isArray(j.bars) ? j.bars : [];
@@ -101,7 +115,7 @@ export async function fetchBinanceAccount(
 ): Promise<{ balance: number; equity: number } | null> {
   const b = base(apiBaseUrl);
   try {
-    const res = await fetch(`${b}/api/status`);
+    const res = await fetch(`${b}/api/status`, { headers: bridgeHeaders() });
     if (!res.ok) return null;
     const j = await res.json();
     const a = j.account;
@@ -174,7 +188,7 @@ export async function postBinanceOrderFromIntent(
   try {
     const res = await fetch(`${b}/api/order`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: bridgeHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     });
     const text = await res.text();

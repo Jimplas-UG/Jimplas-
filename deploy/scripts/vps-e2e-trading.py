@@ -56,14 +56,22 @@ fi
 mkdir -p /var/log/tradingbot
 cd /opt/bilshenz/backend
 # Refresh freeze fingerprints only (does not change entry/exit parameters)
-npm run strategy:freeze >/tmp/strategy-freeze.out 2>&1 || cat /tmp/strategy-freeze.out
+cd /opt/bilshenz/backend
+npm run strategy:freeze >/tmp/strategy-freeze.out 2>&1 || { echo FREEZE_FAIL; cat /tmp/strategy-freeze.out; }
+# Ensure BRIDGE_TOKEN in tradingbot.env for forward bot bridge auth
+BRIDGE=$(grep '^BRIDGE_TOKEN=' /etc/bilshenz.env | cut -d= -f2- || true)
+if [[ -n "$BRIDGE" ]]; then
+  grep -q '^BRIDGE_TOKEN=' /etc/tradingbot.env && sed -i "s|^BRIDGE_TOKEN=.*|BRIDGE_TOKEN=$BRIDGE|" /etc/tradingbot.env || echo "BRIDGE_TOKEN=$BRIDGE" >> /etc/tradingbot.env
+fi
 if [[ -f /opt/bilshenz/deploy/systemd/bilshenz-forward-bot.service ]]; then
   cp -f /opt/bilshenz/deploy/systemd/bilshenz-forward-bot.service /etc/systemd/system/
   systemctl daemon-reload
   systemctl enable bilshenz-forward-bot 2>/dev/null || true
   systemctl restart bilshenz-forward-bot || true
 fi
-sleep 5
+sleep 8
+systemctl is-active bilshenz-forward-bot || true
+tail -n 15 /var/log/tradingbot/forward-bot.log 2>/dev/null | tr -cd '\11\12\15\40-\176' | tail -n 15
 cd /opt/bilshenz
 
 

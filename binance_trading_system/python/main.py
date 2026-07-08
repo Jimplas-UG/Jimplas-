@@ -184,6 +184,14 @@ async def lifespan(app: FastAPI):
         log.warning("scanner using fallback symbol list (3)")
 
     async def refresh_24h_loop() -> None:
+        # Immediate fill so market overview has live 24h % right after boot.
+        try:
+            pct_map = await asyncio.to_thread(connector.ticker_24h_map)
+            n = await asyncio.to_thread(momentum_scanner.apply_24h_pct_map, pct_map)
+            if n:
+                log.info("scanner initial 24h pct for %s symbols", n)
+        except Exception as e:
+            log.warning("initial 24h refresh: %s", e)
         while True:
             try:
                 await asyncio.sleep(45.0)
