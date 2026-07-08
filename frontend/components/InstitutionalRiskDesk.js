@@ -8,7 +8,6 @@ import {
   Text,
   View,
 } from 'react-native';
-import Slider from '@react-native-community/slider';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { fmtRiskUsd } from '../lib/riskDeskModel';
 import { PARTITION_PRESETS_USD, LEVERAGE_PRESETS, MARGIN_MODE_PRESETS } from '../lib/riskDeskDefaults';
@@ -35,30 +34,6 @@ function MetricTile({ label, value, sub, color, C }) {
       <Text style={[st.metricLab, { color: C.dim }]}>{label}</Text>
       <Text style={[st.metricVal, { color: color ?? C.text }]}>{value}</Text>
       {sub ? <Text style={[st.metricSub, { color: C.dim }]}>{sub}</Text> : null}
-    </View>
-  );
-}
-
-function PctSlider({ label, value, onChange, min, max, step, suffix, C }) {
-  return (
-    <View style={st.sliderBlock}>
-      <View style={st.sliderHdr}>
-        <Text style={[st.sliderLab, { color: C.dim }]}>{label}</Text>
-        <Text style={[st.sliderVal, { color: C.accentLight }]}>
-          {value.toFixed(step < 1 ? 1 : 0)}
-          {suffix}
-        </Text>
-      </View>
-      <Slider
-        minimumValue={min}
-        maximumValue={max}
-        step={step}
-        value={value}
-        onValueChange={onChange}
-        minimumTrackTintColor={C.accent}
-        maximumTrackTintColor={C.border}
-        thumbTintColor={C.accentLight}
-      />
     </View>
   );
 }
@@ -148,7 +123,7 @@ export default function InstitutionalRiskDesk({
       <View style={st.hero}>
         <Text style={[st.heroTitle, { color: C.text }]}>Risk settings</Text>
         <Text style={[st.heroSub, { color: C.dim }]}>
-          Capital allocation, leverage, and safety limits for automated execution
+          Tick scanner capital split — short 50%, long legs 40% each (USDT-M Futures)
         </Text>
       </View>
 
@@ -190,21 +165,21 @@ export default function InstitutionalRiskDesk({
         </View>
         <View style={st.metricGrid}>
           <MetricTile
-            label="Slot 1"
+            label="Short"
             value={`${config.shortPartitionPct}%`}
             sub={fmtRiskUsd(metrics.shortLegUsd)}
             color={C.accentLight}
             C={C}
           />
           <MetricTile
-            label="Slot 2"
+            label="Long 1"
             value={`${config.long1PartitionPct}%`}
             sub={fmtRiskUsd(metrics.long1LegUsd)}
             color={C.teal}
             C={C}
           />
           <MetricTile
-            label="Slot 3"
+            label="Long 2"
             value={`${config.long2PartitionPct}%`}
             sub={fmtRiskUsd(metrics.long2LegUsd)}
             color={C.amber}
@@ -225,31 +200,7 @@ export default function InstitutionalRiskDesk({
         </Text>
       </RiskCard>
 
-      {/* 2. Risk Controls */}
-      <RiskCard title="RISK CONTROLS" badge="LIMITS" C={C}>
-        <PctSlider label="Risk per trade" value={config.riskPerTradePct} onChange={(v) => onConfigChange({ riskPerTradePct: v })} min={0.1} max={5} step={0.1} suffix="%" C={C} />
-        <PctSlider label="Max daily loss" value={config.maxDailyLossPct} onChange={(v) => onConfigChange({ maxDailyLossPct: v })} min={0.5} max={25} step={0.5} suffix="%" C={C} />
-        <PctSlider label="Max weekly loss" value={config.maxWeeklyLossPct} onChange={(v) => onConfigChange({ maxWeeklyLossPct: v })} min={1} max={40} step={0.5} suffix="%" C={C} />
-        <PctSlider label="Max drawdown" value={config.maxDrawdownPct} onChange={(v) => onConfigChange({ maxDrawdownPct: v })} min={1} max={50} step={0.5} suffix="%" C={C} />
-        <View style={st.row2}>
-          <View style={st.stepper}>
-            <Text style={[st.sliderLab, { color: C.dim }]}>Max open positions</Text>
-            <View style={st.stepRow}>
-              <Pressable onPress={() => onConfigChange({ maxOpenPositions: Math.max(1, config.maxOpenPositions - 1) })} style={[st.stepBtn, { borderColor: C.border }]}>
-                <Text style={{ color: C.text }}>−</Text>
-              </Pressable>
-              <Text style={[st.stepVal, { color: C.accentLight }]}>{config.maxOpenPositions}</Text>
-              <Pressable onPress={() => onConfigChange({ maxOpenPositions: Math.min(20, config.maxOpenPositions + 1) })} style={[st.stepBtn, { borderColor: C.border }]}>
-                <Text style={{ color: C.text }}>+</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-        <PctSlider label="Max exposure / asset" value={config.maxExposurePerAssetPct} onChange={(v) => onConfigChange({ maxExposurePerAssetPct: v })} min={5} max={100} step={1} suffix="%" C={C} />
-        <PctSlider label="Max portfolio exposure" value={config.maxPortfolioExposurePct} onChange={(v) => onConfigChange({ maxPortfolioExposurePct: v })} min={10} max={100} step={1} suffix="%" C={C} />
-      </RiskCard>
-
-      {/* 3. Leverage Controls */}
+      {/* Leverage + margin (Binance Futures) */}
       <RiskCard title="LEVERAGE CONTROLS" badge={`${config.defaultLeverage}x · ${config.marginMode}`} C={C}>
         <View style={st.metricGrid}>
           <MetricTile label="Selected leverage" value={`${config.defaultLeverage}x`} color={C.accentLight} C={C} />
@@ -296,31 +247,24 @@ export default function InstitutionalRiskDesk({
         ) : null}
       </RiskCard>
 
-      {/* 4. Live Risk Dashboard */}
-      <RiskCard title="LIVE RISK DASHBOARD" badge={brokerConnected ? 'LIVE' : 'SIM'} C={C}>
+      {/* Live account + positions */}
+      <RiskCard title="BINANCE ACCOUNT" badge={brokerConnected ? 'LIVE' : 'OFFLINE'} C={C}>
         <View style={st.metricGrid}>
           <MetricTile label="Used margin" value={fmtRiskUsd(metrics.usedMargin)} C={C} />
           <MetricTile label="Free margin" value={fmtRiskUsd(metrics.freeMargin)} C={C} />
           <MetricTile label="Open exposure" value={fmtRiskUsd(metrics.openExposure)} sub={`${metrics.exposurePct.toFixed(1)}%`} C={C} />
-          <MetricTile label="Daily P&L" value={fmtRiskUsd(metrics.dailyPnl)} color={metrics.dailyPnl >= 0 ? C.green : C.red} C={C} />
-          <MetricTile label="Weekly P&L" value={fmtRiskUsd(metrics.weeklyPnl)} color={metrics.weeklyPnl >= 0 ? C.green : C.red} C={C} />
+          <MetricTile label="Floating P&L" value={fmtRiskUsd(metrics.dailyPnl)} color={metrics.dailyPnl >= 0 ? C.green : C.red} C={C} />
           <MetricTile label="Drawdown" value={`${metrics.drawdownPct.toFixed(1)}%`} color={metrics.drawdownPct >= config.maxDrawdownPct ? C.red : C.amber} C={C} />
-          <MetricTile label="Risk utilization" value={`${metrics.riskUtilizationPct.toFixed(0)}%`} C={C} />
-          <MetricTile
-            label="Liq. buffer"
-            value={metrics.liquidationBuffer != null ? `${metrics.liquidationBuffer.toFixed(1)}%` : '—'}
-            color={metrics.liquidationBuffer != null && metrics.liquidationBuffer < 5 ? C.red : C.green}
-            C={C}
-          />
         </View>
         {brokerConnected ? (
           <OpenPositionsPanel
             positions={brokerPositions ?? []}
             brokerDeals={brokerDeals ?? []}
-            livePrice={livePrice}
-            bid={bid}
-            ask={ask}
-            binanceBaseUrl={binanceBaseUrl}
+        livePrice={livePrice}
+        bid={bid}
+        ask={ask}
+        quoteSymbol={brokerPositions?.length === 1 ? brokerPositions[0]?.symbol : null}
+        binanceBaseUrl={binanceBaseUrl}
             brokerConnected={brokerConnected}
             onRefresh={onRefreshBroker}
             onCloseMessage={onBrokerCloseMsg}
@@ -328,7 +272,7 @@ export default function InstitutionalRiskDesk({
         ) : null}
       </RiskCard>
 
-      {/* 5. Safety Controls */}
+      {/* Safety */}
       <RiskCard title="SAFETY CONTROLS" badge="GUARD" C={C}>
         <Pressable
           onPress={() => {
@@ -345,24 +289,9 @@ export default function InstitutionalRiskDesk({
           </Text>
         </Pressable>
         <ToggleRow label="Pause new trades" value={config.pauseNewTrades} onChange={(v) => onConfigChange({ pauseNewTrades: v })} C={C} />
-        <ToggleRow label="Auto-stop on daily loss limit" value={config.autoStopDailyLoss} onChange={(v) => onConfigChange({ autoStopDailyLoss: v })} C={C} />
-        <ToggleRow label="Auto-stop on drawdown limit" value={config.autoStopDrawdown} onChange={(v) => onConfigChange({ autoStopDrawdown: v })} C={C} />
-        <ToggleRow label="Auto-stop on API errors (3+)" value={config.autoStopApiErrors} onChange={(v) => onConfigChange({ autoStopApiErrors: v })} C={C} />
         {config.apiErrorStreak > 0 ? (
           <Text style={[st.ruleNote, { color: C.amber }]}>API error streak: {config.apiErrorStreak}</Text>
         ) : null}
-      </RiskCard>
-
-      {/* 6. Analytics */}
-      <RiskCard title="ANALYTICS" badge={`${metrics.closedTrades} closed`} C={C}>
-        <View style={st.metricGrid}>
-          <MetricTile label="Win rate" value={metrics.winRatePct != null ? `${metrics.winRatePct.toFixed(1)}%` : '—'} C={C} />
-          <MetricTile label="Avg R:R" value={metrics.avgRiskReward != null ? `1 : ${metrics.avgRiskReward.toFixed(2)}` : '—'} C={C} />
-          <MetricTile label="Largest win" value={fmtRiskUsd(metrics.largestWin)} color={C.green} C={C} />
-          <MetricTile label="Largest loss" value={fmtRiskUsd(metrics.largestLoss)} color={C.red} C={C} />
-          <MetricTile label="Current drawdown" value={`${metrics.drawdownPct.toFixed(1)}%`} C={C} />
-          <MetricTile label="Peak equity" value={fmtRiskUsd(metrics.peakEquity)} C={C} />
-        </View>
       </RiskCard>
     </ScrollView>
   );

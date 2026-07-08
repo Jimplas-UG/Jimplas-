@@ -34,7 +34,7 @@ Do **not** set `EXPO_PUBLIC_DESK_REMOTE=0` in Windows user env — it forces Met
 3. Profile → API key + secret → **Connect Live** (or Testnet).
 4. **AUTO-EXECUTE SIGNALS** sends gated orders when connected; otherwise tap **EXEC** on the Trade tab.
 
-Public **XAUUSDT** quotes load without login. Orders require API keys with Futures + Read enabled (withdrawals off).
+Public **BTCUSDT** (and other USDT-M) quotes load without login. Orders require API keys with Futures + Read enabled (withdrawals off).
 
 ## Binance paper backtest
 

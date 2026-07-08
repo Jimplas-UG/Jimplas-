@@ -30,11 +30,13 @@ function jsonResponse(body, status = 200) {
   };
 }
 
+const MOCK_BTC_MID = 97250.0;
+
 export function mockDeskCompute(body = {}) {
   logMock('/v1/desk/compute', 'snapshot');
-  const bundle = body.bundle ?? buildSyntheticMarketBundle({ count: 320, anchorClose: 2654.2 });
+  const bundle = body.bundle ?? buildSyntheticMarketBundle({ count: 320, anchorClose: MOCK_BTC_MID });
   const last = bundle.m30?.[bundle.m30.length - 1];
-  const entry = last?.c ?? 2654.2;
+  const entry = last?.c ?? MOCK_BTC_MID;
   const sl = entry - 18;
   const tp1 = entry + 24;
   return ensureDeskSnapshot({
@@ -126,13 +128,14 @@ export function mockBinanceStatus() {
 
 
 export function mockBars(symbol = 'BTCUSDT', count = 320) {
-  const bars = buildSyntheticMarketBundle({ count, anchorClose: symbol.includes('DXY') ? 99.4 : 2654.2 }).m30;
+  const anchor = symbol.includes('DXY') ? 99.4 : MOCK_BTC_MID;
+  const bars = buildSyntheticMarketBundle({ count, anchorClose: anchor }).m30;
   return { symbol, timeframe: 'M30', bars };
 }
 
 export function mockTick(symbol = 'BTCUSDT') {
-  const mid = 2654.2;
-  return { symbol, bid: mid - 0.15, ask: mid + 0.15, time: Date.now() };
+  const mid = MOCK_BTC_MID;
+  return { symbol, bid: mid - 12.5, ask: mid + 12.5, time: Date.now() };
 }
 
 let mockHasOpenPosition = true;
@@ -147,9 +150,9 @@ export function mockPositions() {
         symbol: 'BTCUSDT',
         type: 'BUY',
         volume: 0.05,
-        price_open: 2648.5,
-        sl: 2630,
-        tp: 2678,
+        price_open: 96820.5,
+        sl: 96200,
+        tp: 98100,
         profit: 285.5,
         magic: 77002002,
       },
@@ -162,8 +165,8 @@ export function mockOrderOk(side = 'BUY') {
   return {
     ok: true,
     side,
-    fill_price: 2654.35,
-    intended_price: 2654.2,
+    fill_price: MOCK_BTC_MID + 15,
+    intended_price: MOCK_BTC_MID,
     spread_pips: 1.5,
     slippage_pips: 0.3,
     latency_ms: 42,
@@ -215,7 +218,7 @@ export function tryMockFetch(url, init = {}) {
     logMock('/api/close', 'closed');
     return jsonResponse({
       ok: true,
-      closed: [{ symbol: 'BTCUSDT', side: 'BUY', volume: 0.05, fill_price: 2654.35, profit: 285.5 }],
+      closed: [{ symbol: 'BTCUSDT', side: 'BUY', volume: 0.05, fill_price: MOCK_BTC_MID + 15, profit: 285.5 }],
       broker: 'mock',
     });
   }

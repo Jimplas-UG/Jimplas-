@@ -85,14 +85,14 @@ export function useDeskSession({ enabled = true, loadBars = true, pollTicks = tr
   );
 
   useEffect(() => {
-    if (!baseUrl?.trim() || !riskDesk.hydrated || !connected || !loadBars) return undefined;
+    if (!baseUrl?.trim() || !riskDesk.hydrated || !connected) return undefined;
     lastSyncKeyRef.current = '';
     void syncScannerRisk();
     return undefined;
   }, [baseUrl, connected, sessionEpoch, riskDesk.hydrated, syncScannerRisk]);
 
   useEffect(() => {
-    if (!baseUrl?.trim() || !riskDesk.hydrated || !connected || !loadBars) return undefined;
+    if (!baseUrl?.trim() || !riskDesk.hydrated || !connected) return undefined;
     const id = setInterval(() => {
       lastSyncKeyRef.current = '';
       void syncScannerRisk();

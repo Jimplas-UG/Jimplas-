@@ -125,7 +125,7 @@ export default function UIShowcaseScreen({ pad = 16 }) {
         <View style={st.sectionBody}>
           <BilshenzHeader />
           <View style={{ marginTop: 8 }}>
-            <GeoPoliticalTicker items={['DEV PREVIEW: MOCK API ON', 'XAUUSDT · NEW YORK SESSION', 'BSV3.2 UI SHOWCASE']} />
+            <GeoPoliticalTicker items={['DEV PREVIEW: MOCK API ON', 'BTCUSDT · USDT-M FUTURES', 'BSV3.2 UI SHOWCASE']} />
           </View>
         </View>
       </View>

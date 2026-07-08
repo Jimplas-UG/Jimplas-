@@ -12,6 +12,10 @@ export default function TradeScreen({ pad, desk, scanner, onOpenProfile }) {
   const { sessionExec } = useBinanceBridge();
   const { baseUrl, connected, brokerFeed, useBrokerSession, lastBrokerMsg, setLastBrokerMsg } = desk;
   const account = useBrokerSession ? brokerFeed.account : null;
+  const quoteSymbol =
+    scanner?.scannerMeta?.active_symbol ||
+    brokerFeed.resolvedSymbol ||
+    (useBrokerSession && brokerFeed.positions?.length === 1 ? brokerFeed.positions[0]?.symbol : null);
 
   return (
     <ScrollView
@@ -53,6 +57,7 @@ export default function TradeScreen({ pad, desk, scanner, onOpenProfile }) {
         livePrice={brokerFeed.price}
         bid={brokerFeed.bid}
         ask={brokerFeed.ask}
+        quoteSymbol={quoteSymbol}
         binanceBaseUrl={baseUrl}
         brokerConnected={connected}
         onRefresh={brokerFeed.refreshBrokerSnapshot}

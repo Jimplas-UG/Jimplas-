@@ -213,7 +213,7 @@ class PaperStore:
         return self._deals[-max(1, limit) :]
 
     def close_position(self, symbol: str | None = None, volume: float | None = None) -> dict[str, Any]:
-        sym = (symbol or "XAUUSDT").upper()
+        sym = (symbol or "BTCUSDT").upper()
         remaining: list[PaperPosition] = []
         closed: list[dict[str, Any]] = []
         for p in self._positions:

@@ -33,8 +33,8 @@ function AppContent() {
 
   const desk = useDeskSession({
     enabled: needsScanner || needsDesk,
-    loadBars: needsDesk,
-    pollTicks: needsDesk || tab === 'trade',
+    loadBars: false,
+    pollTicks: tab === 'trade' || tab === 'risk',
   });
   const tickScanner = useTickScanner(baseUrl, {
     enabled: !!baseUrl?.trim() && needsScanner,

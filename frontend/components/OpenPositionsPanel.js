@@ -2,7 +2,7 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { postBinanceClosePosition } from '../broker/binanceFuturesApi';
-import { TRADING_PAIR_LABEL } from '../lib/tradingSymbol';
+import { formatPairLabel } from '../lib/futuresSymbol';
 
 function fmtPx(n) {
   const x = Number(n);
@@ -31,11 +31,15 @@ export default function OpenPositionsPanel({
   ask,
   binanceBaseUrl,
   brokerConnected,
+  quoteSymbol,
   onRefresh,
   onCloseMessage,
 }) {
   const { colors: C, styles: appStyles } = useBilshenzTheme();
   const [closingKey, setClosingKey] = useState(null);
+  const pairLabel = formatPairLabel(
+    quoteSymbol || (positions.length === 1 ? positions[0]?.symbol : null) || 'BTCUSDT',
+  );
 
   const watchDeals = useMemo(() => {
     const rows = Array.isArray(brokerDeals) ? [...brokerDeals] : [];
@@ -57,7 +61,7 @@ export default function OpenPositionsPanel({
       const profitLbl = fmtUsd(profit);
       Alert.alert(
         'Close position?',
-        `${pos.type} ${pos.volume} ${pos.symbol ?? TRADING_PAIR_LABEL}\nEntry ${fmtPx(pos.price_open)} · Now ${fmtPx(livePrice)}\nFloating ${profitLbl}`,
+        `${pos.type} ${pos.volume} ${pos.symbol ?? pairLabel}\nEntry ${fmtPx(pos.price_open)} · Now ${fmtPx(livePrice)}\nFloating ${profitLbl}`,
         [
           { text: 'Cancel', style: 'cancel' },
           {
@@ -100,8 +104,8 @@ export default function OpenPositionsPanel({
     <View style={st.wrap}>
       <View style={[st.panel, { borderColor: C.border, backgroundColor: C.panel }]}>
         <View style={[st.head, { borderBottomColor: C.border }]}>
-          <Text style={[st.title, { color: C.text }]}>Live quote</Text>
-          <Text style={[st.badge, { color: C.accentLight }]}>{TRADING_PAIR_LABEL}</Text>
+          <Text style={[st.title, { color: C.text }]}>Futures quote</Text>
+          <Text style={[st.badge, { color: C.accentLight }]}>{pairLabel}</Text>
         </View>
         <View style={st.watchRow}>
           <WatchCell label="BID" value={fmtPx(bid)} color={C.red} />
@@ -109,7 +113,7 @@ export default function OpenPositionsPanel({
           <WatchCell label="ASK" value={fmtPx(ask)} color={C.green} />
         </View>
         <Text style={[st.watchHint, { color: C.dim }]}>
-          Live quote · updates while Binance is connected
+          USDT-M perpetual · updates while Binance is connected
         </Text>
       </View>
 

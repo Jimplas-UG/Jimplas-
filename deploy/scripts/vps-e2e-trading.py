@@ -115,7 +115,7 @@ rows=s.get('rows') or []
 print('MARKET_ROWS', len(rows))
 for r in rows[:6]:
   print(' ', r.get('symbol'), 'gain', r.get('pctGain'), r.get('timeframe'), '1m', r.get('pct1m'), '15m', r.get('pct15m'), r.get('status'))
-t=get('http://127.0.0.1:8791/v1/binance/api/tick/XAUUSDT', H)
+t=get('http://127.0.0.1:8791/v1/binance/api/tick/BTCUSDT', H)
 print('XAU_TICK', t.get('bid'), t.get('ask'), t.get('source'))
 st=get('http://127.0.0.1:8791/v1/binance/api/status', H)
 print('STATUS connected=',st.get('connected'),'can_execute=',st.get('can_execute'),'bal=',(st.get('account') or {}).get('balance'))

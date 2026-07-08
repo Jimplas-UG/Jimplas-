@@ -373,7 +373,7 @@ def _login_error_detail(err: str, testnet: bool) -> str:
 
 
 class OrderBody(BaseModel):
-    symbol: str = Field("XAUUSDT", max_length=20, pattern=r"^[A-Za-z0-9]+$")
+    symbol: str = Field(_DEFAULT_SYMBOL, max_length=20, pattern=r"^[A-Za-z0-9]+$")
     side: str = Field("BUY", pattern=r"^(BUY|SELL)$")
     volume: float = Field(0.001, ge=0.0001, le=1000.0)
     sl: float | None = Field(None, ge=0)
@@ -382,12 +382,12 @@ class OrderBody(BaseModel):
 
 
 class CloseBody(BaseModel):
-    symbol: str = Field("XAUUSDT", max_length=20, pattern=r"^[A-Za-z0-9]+$")
+    symbol: str = Field(_DEFAULT_SYMBOL, max_length=20, pattern=r"^[A-Za-z0-9]+$")
     volume: float | None = Field(None, ge=0.0001, le=1000.0)
 
 
 class MarginBody(BaseModel):
-    symbol: str = Field("XAUUSDT", max_length=20, pattern=r"^[A-Za-z0-9]+$")
+    symbol: str = Field(_DEFAULT_SYMBOL, max_length=20, pattern=r"^[A-Za-z0-9]+$")
     margin_type: str = Field("ISOLATED", pattern=r"^(ISOLATED|CROSS)$")
 
 
@@ -799,7 +799,7 @@ def api_margin(body: MarginBody):
 
 
 @app.get("/api/order/{order_id}")
-def api_order_status(order_id: int, symbol: str = "XAUUSDT"):
+def api_order_status(order_id: int, symbol: str = _DEFAULT_SYMBOL):
     """Poll order fill status for reconciliation."""
     if not connector.cfg.api_key:
         raise HTTPException(status_code=401, detail="not connected")

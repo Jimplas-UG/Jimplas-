@@ -145,7 +145,7 @@ class BinanceTickStream:
         base = TESTNET_WS if testnet else MAINNET_WS
         syms = sorted(self._symbols)
         if not syms:
-            syms = ["XAUUSDT"]
+            syms = ["BTCUSDT"]
         if len(syms) == 1:
             url = f"{base}/{syms[0].lower()}@bookTicker"
         else:

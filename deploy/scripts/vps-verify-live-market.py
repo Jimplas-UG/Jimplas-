@@ -39,7 +39,7 @@ nonzero24=sum(1 for r in rows if abs(float(r.get('pct24h') or 0))>0.01)
 print('nonzero_24h', nonzero24)
 for r in rows[:8]:
   print(' ', r.get('symbol'), 'g', r.get('pctGain'), '3m', r.get('pct3m'), '24h', r.get('pct24h'), r.get('status'))
-code,t=get('http://127.0.0.1:8791/v1/binance/api/tick/XAUUSDT', H)
+code,t=get('http://127.0.0.1:8791/v1/binance/api/tick/BTCUSDT', H)
 print('TICK', code, t if isinstance(t,dict) else t)
 code,st=get('http://127.0.0.1:8791/v1/binance/api/status', H)
 print('STATUS', code, {k: (st or {}).get(k) for k in ['connected','can_execute','exec_block','mode']})
