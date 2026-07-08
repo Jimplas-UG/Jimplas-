@@ -76,6 +76,17 @@ fi
 echo "desk=$EXPO_PUBLIC_DESK_API_URL binance=$EXPO_PUBLIC_BINANCE_API_URL hasKey=${EXPO_PUBLIC_DESK_API_KEY:+yes}"
 npx expo prebuild --platform android --clean
 
+# Enforce compileSdk 35 (splashscreen AAR metadata requires it)
+if [[ -f "$FRONTEND/android/build.gradle" ]]; then
+  sed -i 's/compileSdkVersion\s*=\s*[0-9]\+/compileSdkVersion = 35/' "$FRONTEND/android/build.gradle" || true
+  sed -i 's/compileSdk\s*[0-9]\+/compileSdk 35/' "$FRONTEND/android/build.gradle" || true
+fi
+if [[ -f "$FRONTEND/android/app/build.gradle" ]]; then
+  sed -i 's/compileSdkVersion\s*[0-9]\+/compileSdkVersion 35/' "$FRONTEND/android/app/build.gradle" || true
+  sed -i 's/compileSdk\s*[0-9]\+/compileSdk 35/' "$FRONTEND/android/app/build.gradle" || true
+fi
+grep -n 'compileSdk' "$FRONTEND/android/app/build.gradle" "$FRONTEND/android/build.gradle" 2>/dev/null || true
+
 # 2GB RAM: keep Gradle lean + phone ABI only
 sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx1024m -XX:MaxMetaspaceSize=256m -XX:+HeapDumpOnOutOfMemoryError/' "$FRONTEND/android/gradle.properties" || true
 if ! grep -q 'reactNativeArchitectures' "$FRONTEND/android/gradle.properties"; then
