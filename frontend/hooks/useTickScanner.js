@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fetchScannerSnapshot, subscribeScannerStream } from '../broker/binanceScannerApi';
+
+const CACHE_KEY = '@bilshenz_v1/scannerSnapshotCache';
+const CACHE_TTL_MS = 90_000;
 
 function applyPayload(setters, payload) {
   if (!payload) return;
   if (payload.scanner) setters.setScannerMeta(payload.scanner);
-  // First successful snapshot means the engine is live — don't block UI on empty movers.
   setters.setReady(true);
   setters.setError('');
   if (Array.isArray(payload.rows)) setters.setRows(payload.rows);
@@ -13,9 +16,38 @@ function applyPayload(setters, payload) {
   if (Array.isArray(payload.blocks)) setters.setBlocks(payload.blocks);
 }
 
+async function readSnapshotCache() {
+  try {
+    const raw = await AsyncStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.rows?.length || Date.now() - (parsed.ts || 0) > CACHE_TTL_MS) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function writeSnapshotCache(payload) {
+  if (!payload?.rows?.length) return;
+  try {
+    await AsyncStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({
+        ts: payload.ts || Date.now(),
+        rows: payload.rows,
+        scanner: payload.scanner,
+        signals: payload.signals,
+        blocks: payload.blocks,
+      }),
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
  * Live tick momentum scanner feed — WebSocket primary, REST bootstrap + reconnect fallback.
- * Pass sessionEpoch from BinanceBridgeContext to refresh exec state immediately after login.
  */
 export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, connected = false } = {}) {
   const [rows, setRows] = useState([]);
@@ -32,6 +64,7 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
       { setRows, setReady, setError, setLastTs, setScannerMeta, setSignals, setBlocks },
       payload,
     );
+    void writeSnapshotCache(payload);
   }, []);
 
   const refresh = useCallback(async () => {
@@ -56,12 +89,17 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
     booted.current = false;
 
     void (async () => {
+      const cached = await readSnapshotCache();
+      if (!cancelled && cached?.rows?.length) {
+        apply(cached);
+        booted.current = true;
+      }
       const snap = await fetchScannerSnapshot(baseUrl, 5000);
       if (cancelled) return;
       if (snap.ok) {
         apply(snap);
         booted.current = true;
-      } else if (!snap.ok) {
+      } else if (!booted.current) {
         setError(snap.error || 'Scanner unavailable');
       }
     })();
@@ -73,14 +111,6 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
         apply(payload);
       },
       {
-        onOpen: () => {
-          void fetchScannerSnapshot(baseUrl, 4000).then((snap) => {
-            if (!cancelled && snap.ok) {
-              booted.current = true;
-              apply(snap);
-            }
-          });
-        },
         onError: (msg) => {
           if (!booted.current) setError(msg || 'Scanner WS error');
         },
@@ -92,7 +122,7 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
       void fetchScannerSnapshot(baseUrl, 4000).then((snap) => {
         if (!cancelled && snap.ok) apply(snap);
       });
-    }, 3000);
+    }, 4000);
 
     return () => {
       cancelled = true;
@@ -101,16 +131,10 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
     };
   }, [baseUrl, enabled, apply]);
 
-  // Binance linked — pull fresh exec/session state without waiting for next tick broadcast.
   useEffect(() => {
     if (!enabled || !baseUrl?.trim() || !connected) return undefined;
     void refresh();
-    const id = setInterval(() => void refresh(), 2000);
-    const stop = setTimeout(() => clearInterval(id), 8000);
-    return () => {
-      clearInterval(id);
-      clearTimeout(stop);
-    };
+    return undefined;
   }, [baseUrl, connected, enabled, sessionEpoch, refresh]);
 
   return { rows, signals, blocks, ready, error, scannerMeta, lastTs, refresh };

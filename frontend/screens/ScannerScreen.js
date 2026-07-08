@@ -1,32 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { ScrollView } from 'react-native';
 import BinanceStatusStrip from '../components/BinanceStatusStrip';
 import TickScannerHome from '../components/scanner/TickScannerHome';
 import { PilotHeroBalance } from '../components/pilot/PilotUI';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
-import { fetchBinanceSession } from '../broker/binanceFuturesApi';
 import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
 
-export default function ScannerScreen({ pad, scanner, onOpenProfile, connected: connectedProp }) {
+export default function ScannerScreen({ pad, scanner, onOpenProfile, connected: connectedProp, account = null }) {
   const { colors: C, styles } = useBilshenzTheme();
-  const { baseUrl, connected: bridgeConnected, sessionExec } = useBinanceBridge();
+  const { connected: bridgeConnected, sessionExec } = useBinanceBridge();
   const connected = connectedProp ?? bridgeConnected;
-  const [account, setAccount] = useState(null);
-
-  useEffect(() => {
-    if (!connected || !baseUrl) {
-      setAccount(null);
-      return undefined;
-    }
-    let cancelled = false;
-    void (async () => {
-      const session = await fetchBinanceSession(baseUrl, 8000, 0);
-      if (!cancelled && session.ok) setAccount(session.account);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [connected, baseUrl]);
 
   return (
     <ScrollView

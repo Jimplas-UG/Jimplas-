@@ -89,6 +89,8 @@ class CoinStrategy:
     pct_5m: float = 0.0
     pct_15m: float = 0.0
     pct_24h: float = 0.0
+    quote_vol_24h: float = 0.0
+    funding_rate: float | None = None
     best_pct: float = 0.0
     best_tf: str = ""
     qualifying_pct: float = 0.0
@@ -404,7 +406,14 @@ class MomentumScanner:
                 if sym not in self._coins:
                     self._coins[sym] = CoinStrategy(symbol=sym)
 
-    def on_tick(self, symbol: str, price: float, ts_ms: int | None = None, pct_24h: float | None = None) -> None:
+    def on_tick(
+        self,
+        symbol: str,
+        price: float,
+        ts_ms: int | None = None,
+        pct_24h: float | None = None,
+        quote_vol_24h: float | None = None,
+    ) -> None:
         if not self._enabled:
             return
         sym = symbol.upper()
@@ -422,6 +431,8 @@ class MomentumScanner:
         coin.last_update_ms = now_ms
         if pct_24h is not None:
             coin.pct_24h = pct_24h
+        if quote_vol_24h is not None and quote_vol_24h >= 0:
+            coin.quote_vol_24h = quote_vol_24h
         if getattr(self._connector.cfg, "paper", False):
             try:
                 from paper_simulator import paper_store
@@ -501,6 +512,26 @@ class MomentumScanner:
             reverse=True,
         )
         return rows[:MAX_WATCHLIST]
+
+    def apply_volume_map(self, vol_map: dict[str, float]) -> int:
+        n = 0
+        for sym, vol in vol_map.items():
+            coin = self._coins.get(sym.upper())
+            if not coin:
+                continue
+            coin.quote_vol_24h = float(vol)
+            n += 1
+        return n
+
+    def apply_funding_rate_map(self, rate_map: dict[str, float]) -> int:
+        n = 0
+        for sym, rate in rate_map.items():
+            coin = self._coins.get(sym.upper())
+            if not coin:
+                continue
+            coin.funding_rate = rate
+            n += 1
+        return n
 
     def apply_24h_pct_map(self, pct_map: dict[str, float]) -> int:
         """Refresh 24h % from REST ticker (does not change gain/retrace entry rules)."""
@@ -586,6 +617,9 @@ class MomentumScanner:
             "pct5m": round(coin.pct_5m, 2),
             "pct15m": round(coin.pct_15m, 2),
             "pct24h": round(coin.pct_24h, 2),
+            "volume24h": round(coin.quote_vol_24h, 2),
+            "fundingRate": round(coin.funding_rate, 6) if coin.funding_rate is not None else None,
+            "direction": "up" if coin.pct_24h > 0.05 else "down" if coin.pct_24h < -0.05 else "flat",
             "timeframe": coin.best_tf,
             "highestPrice": round(coin.highest_price or 0, 8),
             "retracePct": round(coin.retrace_pct, 2),

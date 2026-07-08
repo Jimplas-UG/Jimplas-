@@ -227,7 +227,7 @@ export default function ScannerEngineVisual({ ready, execOn, connected, pulse = 
   const [tick, setTick] = useState(() => Date.now());
 
   useEffect(() => {
-    const id = setInterval(() => setTick(Date.now()), 40);
+    const id = setInterval(() => setTick(Date.now()), 250);
     return () => clearInterval(id);
   }, []);
 

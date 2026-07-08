@@ -860,6 +860,47 @@ class BinanceConnector:
                 continue
         return out
 
+    def ticker_24h_volume_map(self) -> dict[str, float]:
+        try:
+            data = self._request("GET", "/fapi/v1/ticker/24hr", timeout=25.0)
+        except Exception as e:
+            log.warning("ticker_24h_volume_map: %s", e)
+            return {}
+        out: dict[str, float] = {}
+        if not isinstance(data, list):
+            return out
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            sym = str(row.get("symbol") or "").upper()
+            if not sym.endswith("USDT"):
+                continue
+            try:
+                out[sym] = float(row.get("quoteVolume") or row.get("volume") or 0)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def funding_rate_map(self) -> dict[str, float]:
+        try:
+            data = self._request("GET", "/fapi/v1/premiumIndex", timeout=25.0)
+        except Exception as e:
+            log.warning("funding_rate_map: %s", e)
+            return {}
+        out: dict[str, float] = {}
+        rows = data if isinstance(data, list) else [data]
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sym = str(row.get("symbol") or "").upper()
+            if not sym.endswith("USDT"):
+                continue
+            try:
+                out[sym] = float(row.get("lastFundingRate") or 0)
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def list_usdt_perpetual_symbols(self) -> list[str]:
         data = self._request("GET", "/fapi/v1/exchangeInfo", timeout=45.0)
         out: list[str] = []
@@ -940,6 +981,16 @@ class BinanceConnector:
         if qty_err:
             return {"ok": False, "error": qty_err}
 
+        if self.cfg.api_key and not self.cfg.paper:
+            try:
+                acct = self._request("GET", "/fapi/v2/account", signed=True)
+                free = float(acct.get("availableBalance", 0))
+                notional = qty * intended
+                if free < notional / max(int(leverage), 1) * 1.1:
+                    return {"ok": False, "error": f"insufficient_margin free={free:.2f}"}
+            except Exception as e:
+                log.warning("order_market_leg margin check: %s", e)
+
         cid = f"{CLIENT_ID_PREFIX}_SC_{leg or magic}_{int(_time.time())}"[:36]
         params: dict[str, Any] = {
             "symbol": sym,
@@ -980,10 +1031,51 @@ class BinanceConnector:
 
             return paper_store.close_leg(symbol, magic, volume)
         sym = symbol.upper()
-        positions = [p for p in self.positions(sym) if int(p.get("magic", DEFAULT_MAGIC)) == int(magic)]
-        if not positions:
-            return self.close_position(sym, volume)
-        return self.close_position(sym, volume or positions[0].get("volume"))
+        qty = float(volume or 0)
+        if qty <= 0:
+            pos = self.positions(sym)
+            if not pos:
+                return {"ok": False, "error": "no_position"}
+            qty = float(pos[0].get("volume", 0))
+        if qty <= 0:
+            return {"ok": False, "error": "invalid_volume"}
+
+        magic_i = int(magic)
+        if magic_i == 88001:
+            close_side = "BUY"
+            hedge_side = "SHORT"
+        elif magic_i in (88002, 88003):
+            close_side = "SELL"
+            hedge_side = "LONG"
+        else:
+            return self.close_position(sym, qty)
+
+        tick = self.book_ticker(sym)
+        if not tick:
+            return {"ok": False, "error": f"no tick for {sym}"}
+        info = self.symbol_spec(sym)
+        qty = round_to_step(qty, info["stepSize"])
+        qty, qty_err = self._validate_order_qty(qty, tick["bid"], info)
+        if qty_err:
+            return {"ok": False, "error": qty_err}
+
+        import time as _time
+
+        params: dict[str, Any] = {
+            "symbol": sym,
+            "side": close_side,
+            "type": "MARKET",
+            "quantity": qty,
+            "reduceOnly": "true",
+            "newClientOrderId": f"{CLIENT_ID_PREFIX}_CL_{magic_i}_{int(_time.time())}"[:36],
+        }
+        if self._hedge_mode is True:
+            params["positionSide"] = hedge_side
+        try:
+            resp = self._request("POST", "/fapi/v1/order", params, signed=True)
+            return {"ok": True, "symbol": sym, "volume": qty, "order": resp.get("orderId"), "magic": magic_i}
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)}
 
 
 def config_from_env() -> BinanceConfig:

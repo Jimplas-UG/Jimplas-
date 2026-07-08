@@ -147,7 +147,9 @@ momentum_scanner = MomentumScanner(
 
 scanner_stream = BinanceScannerStream(
     get_testnet=lambda: connector.cfg.testnet,
-    on_tick=lambda sym, price, ts, pct_24h=None: momentum_scanner.on_tick(sym, price, ts, pct_24h),
+    on_tick=lambda sym, price, ts, pct_24h=None, quote_vol=None: momentum_scanner.on_tick(
+        sym, price, ts, pct_24h, quote_vol
+    ),
     load_symbols=lambda: connector.list_usdt_perpetual_symbols(),
     get_snapshot=lambda: momentum_scanner.full_snapshot(),
 )
@@ -188,18 +190,28 @@ async def lifespan(app: FastAPI):
         # Immediate fill so market overview has live 24h % right after boot.
         try:
             pct_map = await asyncio.to_thread(connector.ticker_24h_map)
+            vol_map = await asyncio.to_thread(connector.ticker_24h_volume_map)
+            fund_map = await asyncio.to_thread(connector.funding_rate_map)
             n = await asyncio.to_thread(momentum_scanner.apply_24h_pct_map, pct_map)
-            if n:
-                log.info("scanner initial 24h pct for %s symbols", n)
+            nv = await asyncio.to_thread(momentum_scanner.apply_volume_map, vol_map)
+            nf = await asyncio.to_thread(momentum_scanner.apply_funding_rate_map, fund_map)
+            if n or nv or nf:
+                log.info("scanner initial market stats pct=%s vol=%s fund=%s", n, nv, nf)
+                _flush_scanner_snapshot()
         except Exception as e:
             log.warning("initial 24h refresh: %s", e)
         while True:
             try:
                 await asyncio.sleep(45.0)
                 pct_map = await asyncio.to_thread(connector.ticker_24h_map)
+                vol_map = await asyncio.to_thread(connector.ticker_24h_volume_map)
+                fund_map = await asyncio.to_thread(connector.funding_rate_map)
                 n = await asyncio.to_thread(momentum_scanner.apply_24h_pct_map, pct_map)
-                if n:
-                    log.info("scanner refreshed 24h pct for %s symbols", n)
+                nv = await asyncio.to_thread(momentum_scanner.apply_volume_map, vol_map)
+                nf = await asyncio.to_thread(momentum_scanner.apply_funding_rate_map, fund_map)
+                if n or nv or nf:
+                    log.info("scanner refreshed market stats pct=%s vol=%s fund=%s", n, nv, nf)
+                    _flush_scanner_snapshot()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -433,8 +445,11 @@ def health():
 
 @app.get("/api/scanner/snapshot")
 def api_scanner_snapshot():
-    momentum_scanner.invalidate_session_cache()
+    global _scanner_payload
+    if _scanner_payload:
+        return {"ok": True, **_scanner_payload}
     payload = momentum_scanner.full_snapshot()
+    _scanner_payload = payload
     return {"ok": True, **payload}
 
 

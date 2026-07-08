@@ -303,14 +303,10 @@ export default function BinanceBridgePanel() {
     }
     if (connected && baseUrl) {
       void refresh();
-      stopPoll();
-      pollRef.current = setInterval(() => refresh(), 8000);
       return stopPoll;
     }
     if (sessionReady && baseUrl) {
       void refreshMarketData();
-      stopPoll();
-      pollRef.current = setInterval(() => refreshMarketData(), 8000);
       return stopPoll;
     }
     stopPoll();

@@ -5,6 +5,15 @@ import { PilotCard, PilotSectionTitle } from '../pilot/PilotUI';
 import ScannerEngineVisual from './ScannerEngineVisual';
 import { radius, spacing } from '../../theme/designTokens';
 
+function fmtVol(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '—';
+  if (v >= 1e9) return `${(v / 1e9).toFixed(1)}B`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e3) return `${(v / 1e3).toFixed(0)}K`;
+  return String(Math.round(v));
+}
+
 function fmtPct(n, decimals = 2) {
   const v = Number(n);
   if (!Number.isFinite(v) || Math.abs(v) < 0.02) return '—';
@@ -104,6 +113,17 @@ function MarketTableHeader({ C }) {
         }}>
         Flow
       </Text>
+      <Text
+        style={{
+          width: 44,
+          color: C.dim,
+          fontSize: 10,
+          fontWeight: '800',
+          letterSpacing: 0.6,
+          textAlign: 'right',
+        }}>
+        Vol
+      </Text>
     </View>
   );
 }
@@ -152,6 +172,17 @@ function MarketTableRow({ row, C }) {
       <View style={{ width: 40, alignItems: 'flex-end' }}>
         <ActivityBar score={score} C={C} />
       </View>
+      <Text
+        style={{
+          width: 44,
+          color: C.dim2,
+          fontSize: 10,
+          fontWeight: '700',
+          textAlign: 'right',
+          fontVariant: ['tabular-nums'],
+        }}>
+        {fmtVol(row.volume24h)}
+      </Text>
     </View>
   );
 }

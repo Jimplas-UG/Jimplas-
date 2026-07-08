@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import { View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { hideBootSplash } from './lib/bootSplash';
@@ -26,17 +26,31 @@ function AppContent() {
   const { colors: C, styles } = useBilshenzTheme();
   const insets = useSafeAreaInsets();
   const { baseUrl, connected, sessionEpoch } = useBinanceBridge();
-  const desk = useDeskSession();
+  const [tab, setTab] = useState('scanner');
+
+  const needsScanner = tab === 'scanner' || tab === 'trade';
+  const needsDesk = tab === 'risk' || tab === 'trade';
+
+  const desk = useDeskSession({
+    enabled: needsScanner || needsDesk,
+    loadBars: needsDesk,
+    pollTicks: needsDesk || tab === 'trade',
+  });
   const tickScanner = useTickScanner(baseUrl, {
-    enabled: !!baseUrl?.trim(),
+    enabled: !!baseUrl?.trim() && needsScanner,
     connected,
     sessionEpoch,
   });
+
   const { done: onboardingDone, markDone: markOnboardingDone } = useOnboardingDone();
-  const [tab, setTab] = useState('scanner');
 
   const pad = Math.max(16, Math.min(24, 14 + insets.left));
   const openProfile = useCallback(() => setTab('profile'), []);
+
+  const homeAccount = useMemo(() => {
+    if (!connected || !desk.brokerFeed?.account) return null;
+    return desk.brokerFeed.account;
+  }, [connected, desk.brokerFeed?.account]);
 
   useEffect(() => {
     hideBootSplash('app-content-ready');
@@ -50,6 +64,7 @@ function AppContent() {
         scanner={tickScanner}
         onOpenProfile={openProfile}
         connected={connected}
+        account={homeAccount}
       />
     );
   } else if (tab === 'risk') {

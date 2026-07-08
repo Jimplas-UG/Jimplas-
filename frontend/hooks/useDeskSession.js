@@ -14,7 +14,7 @@ const SCANNER_RISK_RESYNC_MS = 90000;
 /**
  * Shared Binance session — live feed, risk desk metrics, margin mode handler.
  */
-export function useDeskSession() {
+export function useDeskSession({ enabled = true, loadBars = true, pollTicks = true } = {}) {
   const { baseUrl, connected, sessionEpoch } = useBinanceBridge();
   const [lastBrokerMsg, setLastBrokerMsg] = useState('');
   const lastSyncKeyRef = useRef('');
@@ -22,9 +22,10 @@ export function useDeskSession() {
   const brokerFeed = useBrokerLiveFeed({
     baseUrl,
     connected,
-    enabled: !!baseUrl?.trim(),
+    enabled: enabled && !!baseUrl?.trim(),
     symbol: defaultSymbolForBroker(),
-    pollTicks: true,
+    pollTicks: enabled && pollTicks,
+    loadBars: enabled && loadBars,
   });
 
   const useBrokerSession = connected;
@@ -84,14 +85,14 @@ export function useDeskSession() {
   );
 
   useEffect(() => {
-    if (!baseUrl?.trim() || !riskDesk.hydrated || !connected) return undefined;
+    if (!baseUrl?.trim() || !riskDesk.hydrated || !connected || !loadBars) return undefined;
     lastSyncKeyRef.current = '';
     void syncScannerRisk();
     return undefined;
   }, [baseUrl, connected, sessionEpoch, riskDesk.hydrated, syncScannerRisk]);
 
   useEffect(() => {
-    if (!baseUrl?.trim() || !riskDesk.hydrated || !connected) return undefined;
+    if (!baseUrl?.trim() || !riskDesk.hydrated || !connected || !loadBars) return undefined;
     const id = setInterval(() => {
       lastSyncKeyRef.current = '';
       void syncScannerRisk();

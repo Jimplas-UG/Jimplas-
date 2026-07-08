@@ -22,10 +22,10 @@ TESTNET_WS = "wss://stream.binancefuture.com/ws"
 RECONNECT_MIN_SEC = 1.0
 RECONNECT_MAX_SEC = 30.0
 # Offload on_tick so asyncio can answer Binance WS keepalive pings (prevents 1011 timeouts).
-_TICK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scanner-tick")
+_TICK_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="scanner-tick")
 
 
-def _parse_mini_ticker(msg: dict[str, Any]) -> tuple[str, float, int, float | None] | None:
+def _parse_mini_ticker(msg: dict[str, Any]) -> tuple[str, float, int, float | None, float | None] | None:
     sym = str(msg.get("s") or "").upper()
     try:
         price = float(msg.get("c") or 0)
@@ -35,13 +35,18 @@ def _parse_mini_ticker(msg: dict[str, Any]) -> tuple[str, float, int, float | No
         return None
     ts = int(msg.get("E") or msg.get("C") or time.time() * 1000)
     pct_24h: float | None = None
-    # Futures !miniTicker@arr: "P" = 24h percent change string.
+    quote_vol: float | None = None
     if msg.get("P") is not None:
         try:
             pct_24h = float(msg.get("P"))
         except (TypeError, ValueError):
             pct_24h = None
-    return sym, price, ts, pct_24h
+    if msg.get("q") is not None:
+        try:
+            quote_vol = float(msg.get("q"))
+        except (TypeError, ValueError):
+            quote_vol = None
+    return sym, price, ts, pct_24h, quote_vol
 
 
 class BinanceScannerStream:
@@ -50,7 +55,7 @@ class BinanceScannerStream:
     def __init__(
         self,
         get_testnet: Callable[[], bool],
-        on_tick: Callable[[str, float, int, float | None], None],
+        on_tick: Callable[[str, float, int, float | None, float | None], None],
         load_symbols: Callable[[], list[str]] | None = None,
         get_snapshot: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
@@ -171,11 +176,11 @@ class BinanceScannerStream:
             await asyncio.sleep(backoff)
             backoff = min(RECONNECT_MAX_SEC, backoff * 1.8)
 
-    def _dispatch_ticks(self, items: list[tuple[str, float, int, float | None]]) -> None:
+    def _dispatch_ticks(self, items: list[tuple[str, float, int, float | None, float | None]]) -> None:
         """Runs in a worker thread — must not touch asyncio objects directly."""
-        for sym, price, ts, pct_24h in items:
+        for sym, price, ts, pct_24h, quote_vol in items:
             try:
-                self._on_tick(sym, price, ts, pct_24h)
+                self._on_tick(sym, price, ts, pct_24h, quote_vol)
             except Exception as e:
                 log.debug("on_tick %s: %s", sym, e)
 
@@ -198,7 +203,7 @@ class BinanceScannerStream:
             loop = asyncio.get_running_loop()
             pending: asyncio.Future | None = None
             # Coalesce latest quote per symbol while worker is busy — never drop live prices.
-            pending_map: dict[str, tuple[str, float, int, float | None]] = {}
+            pending_map: dict[str, tuple[str, float, int, float | None, float | None]] = {}
             async for raw in ws:
                 if not self._running:
                     break
@@ -213,8 +218,8 @@ class BinanceScannerStream:
                     parsed = _parse_mini_ticker(item)
                     if not parsed:
                         continue
-                    sym, price, ts, pct_24h = parsed
-                    pending_map[sym] = (sym, price, ts, pct_24h)
+                    sym, price, ts, pct_24h, quote_vol = parsed
+                    pending_map[sym] = (sym, price, ts, pct_24h, quote_vol)
                     self._tick_count += 1
                 if not pending_map:
                     continue

@@ -87,6 +87,7 @@ export function useBinanceLiveFeed({
   enabled = true,
   symbol = DEFAULT_CHART_SYMBOL,
   pollTicks = true,
+  loadBars = true,
   /** When true, load public quotes/bars even if API session is not logged in. */
   publicQuotes = true,
   onBridgeUrlResolved,
@@ -109,7 +110,7 @@ export function useBinanceLiveFeed({
   const everReadyRef = useRef(false);
 
   const sessionActive = !!connected;
-  const quotesActive = enabled && !!baseUrl?.trim() && (publicQuotes || sessionActive);
+  const quotesActive = enabled && !!baseUrl?.trim() && loadBars && (publicQuotes || sessionActive);
 
   const applyBars = useCallback((bars) => {
     if (!bars?.length) return false;
@@ -162,7 +163,7 @@ export function useBinanceLiveFeed({
   }, [symbol]);
 
   useEffect(() => {
-    if (!quotesActive) {
+    if (!enabled || !baseUrl?.trim()) {
       if (!enabled) {
         setFeedReady(false);
         everReadyRef.current = false;
@@ -171,6 +172,10 @@ export function useBinanceLiveFeed({
           setPositions([]);
         }
       }
+      return;
+    }
+    if (!loadBars) {
+      setFeedReady(true);
       return;
     }
     let cancelled = false;
@@ -258,7 +263,7 @@ export function useBinanceLiveFeed({
     return () => {
       cancelled = true;
     };
-  }, [quotesActive, sessionActive, baseUrl, symbol, applyBars, loadBars, reloadNonce]);
+  }, [enabled, loadBars, sessionActive, baseUrl, symbol, applyBars, reloadNonce, onBridgeUrlResolved]);
 
   const refreshFeed = useCallback(() => {
     setFeedError('');
