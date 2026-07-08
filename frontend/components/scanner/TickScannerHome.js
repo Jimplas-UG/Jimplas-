@@ -4,6 +4,22 @@ import { useBilshenzTheme } from '../../contexts/ThemeContext';
 import { PilotCard, PilotSectionTitle } from '../pilot/PilotUI';
 import ScannerEngineVisual from './ScannerEngineVisual';
 import { radius, spacing } from '../../theme/designTokens';
+import { isExecutionQueueStatus } from '../../lib/scannerExecution';
+
+function statusColor(status, C) {
+  if (status === 'Pending') return C.accentLight;
+  if (status === 'Watching') return C.amber;
+  if (status === 'Short' || status === 'Long1' || status === 'Long2') return C.teal;
+  return C.dim2;
+}
+
+function rowPriority(row) {
+  const status = row?.status || '';
+  if (status === 'Pending') return 0;
+  if (status === 'Watching') return 1;
+  if (status === 'Short' || status === 'Long1' || status === 'Long2') return 2;
+  return 3;
+}
 
 function fmtVol(n) {
   const v = Number(n);
@@ -75,7 +91,7 @@ function MarketTableHeader({ C }) {
         paddingHorizontal: 4,
         borderBottomWidth: 1,
         borderBottomColor: C.border,
-        minWidth: 340,
+        minWidth: 380,
       }}>
       <Text style={{ width: 64, color: C.dim, fontSize: 10, fontWeight: '800', letterSpacing: 0.8 }}>Asset</Text>
       {TF_COLS.map((col) => (
@@ -92,6 +108,17 @@ function MarketTableHeader({ C }) {
           {col.label}
         </Text>
       ))}
+      <Text
+        style={{
+          width: 56,
+          color: C.dim,
+          fontSize: 10,
+          fontWeight: '800',
+          letterSpacing: 0.6,
+          textAlign: 'right',
+        }}>
+        Status
+      </Text>
       <Text
         style={{
           width: 44,
@@ -140,7 +167,7 @@ function MarketTableRow({ row, C }) {
         paddingHorizontal: 4,
         borderBottomWidth: 1,
         borderBottomColor: C.border,
-        minWidth: 340,
+        minWidth: 380,
       }}>
       <Text style={{ width: 64, color: C.text, fontSize: 12, fontWeight: '800' }} numberOfLines={1}>
         {row.coin || row.symbol}
@@ -159,6 +186,17 @@ function MarketTableRow({ row, C }) {
           {fmtPct(row[col.key])}
         </Text>
       ))}
+      <Text
+        style={{
+          width: 56,
+          color: statusColor(row.status, C),
+          fontSize: 10,
+          fontWeight: '800',
+          textAlign: 'right',
+        }}
+        numberOfLines={1}>
+        {isExecutionQueueStatus(row.status) ? row.status : row.status === 'Scanning' ? '—' : row.status || '—'}
+      </Text>
       <Text
         style={{
           width: 44,
@@ -203,7 +241,13 @@ export default function TickScannerHome({
     (sessionExec?.canExecute === true || (sessionExec?.canExecute !== false && scannerMeta?.can_execute !== false));
 
   const marketRows = useMemo(() => {
-    return [...(rows || [])].sort((a, b) => activityScore(b) - activityScore(a)).slice(0, 24);
+    return [...(rows || [])]
+      .sort((a, b) => {
+        const pr = rowPriority(a) - rowPriority(b);
+        if (pr !== 0) return pr;
+        return activityScore(b) - activityScore(a);
+      })
+      .slice(0, 24);
   }, [rows]);
 
   const pulse = useMemo(() => {

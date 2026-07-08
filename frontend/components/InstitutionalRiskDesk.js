@@ -260,11 +260,12 @@ export default function InstitutionalRiskDesk({
           <OpenPositionsPanel
             positions={brokerPositions ?? []}
             brokerDeals={brokerDeals ?? []}
-        livePrice={livePrice}
-        bid={bid}
-        ask={ask}
-        quoteSymbol={brokerPositions?.length === 1 ? brokerPositions[0]?.symbol : null}
-        binanceBaseUrl={binanceBaseUrl}
+            livePrice={livePrice}
+            bid={bid}
+            ask={ask}
+            quoteSymbol={brokerPositions?.length === 1 ? brokerPositions[0]?.symbol : null}
+            hideQuote
+            binanceBaseUrl={binanceBaseUrl}
             brokerConnected={brokerConnected}
             onRefresh={onRefreshBroker}
             onCloseMessage={onBrokerCloseMsg}

@@ -1,21 +1,28 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { ScrollView, Text, View } from 'react-native';
 import BinanceStatusStrip from '../components/BinanceStatusStrip';
 import OpenPositionsPanel from '../components/OpenPositionsPanel';
+import ScannerExecutionPanel, { ScannerQuoteStrip } from '../components/scanner/ScannerExecutionPanel';
 import { PilotCard, PilotHeroBalance, PilotSectionTitle } from '../components/pilot/PilotUI';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
+import { pickPrimaryExecutionCandidate } from '../lib/scannerExecution';
 import { spacing } from '../theme/designTokens';
 
 export default function TradeScreen({ pad, desk, scanner, onOpenProfile }) {
   const { colors: C, styles } = useBilshenzTheme();
   const { sessionExec } = useBinanceBridge();
   const { baseUrl, connected, brokerFeed, useBrokerSession, lastBrokerMsg, setLastBrokerMsg } = desk;
+
   const account = useBrokerSession ? brokerFeed.account : null;
-  const quoteSymbol =
-    scanner?.scannerMeta?.active_symbol ||
-    brokerFeed.resolvedSymbol ||
-    (useBrokerSession && brokerFeed.positions?.length === 1 ? brokerFeed.positions[0]?.symbol : null);
+
+  const executionLead = useMemo(
+    () => pickPrimaryExecutionCandidate(scanner?.rows, scanner?.scannerMeta),
+    [scanner?.rows, scanner?.scannerMeta],
+  );
+
+  const positionSymbol =
+    useBrokerSession && brokerFeed.positions?.length === 1 ? brokerFeed.positions[0]?.symbol : null;
 
   return (
     <ScrollView
@@ -50,14 +57,23 @@ export default function TradeScreen({ pad, desk, scanner, onOpenProfile }) {
         </PilotCard>
       ) : null}
 
+      <ScannerExecutionPanel
+        rows={scanner?.rows}
+        scannerMeta={scanner?.scannerMeta}
+        ready={scanner?.ready}
+      />
+
+      {executionLead ? <ScannerQuoteStrip candidate={executionLead} /> : null}
+
       <PilotSectionTitle title="Open positions" />
       <OpenPositionsPanel
         positions={useBrokerSession ? brokerFeed.positions : []}
         brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : []}
-        livePrice={brokerFeed.price}
+        livePrice={executionLead?.price ?? brokerFeed.price}
         bid={brokerFeed.bid}
         ask={brokerFeed.ask}
-        quoteSymbol={quoteSymbol}
+        quoteSymbol={positionSymbol}
+        hideQuote
         binanceBaseUrl={baseUrl}
         brokerConnected={connected}
         onRefresh={brokerFeed.refreshBrokerSnapshot}

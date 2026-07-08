@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { buildBundleFromM30Bars } from '../lib/marketBundle';
-import { DEFAULT_CHART_SYMBOL } from '../lib/futuresSymbol';
+import { DEFAULT_CHART_SYMBOL, sanitizeFuturesSymbol } from '../lib/futuresSymbol';
 import { DISPLAY_PIP_SIZE } from '../security/deskConstants';
 import {
   fetchBinanceBarsM30,
@@ -49,7 +49,7 @@ function applyTickState(tk, setters) {
   if (Number.isFinite(tk.bid) && Number.isFinite(tk.ask)) {
     setSpreadPips(parseFloat(((tk.ask - tk.bid) / PIP).toFixed(2)));
   }
-  if (tk.symbol) setResolvedSymbol(tk.symbol);
+  if (tk.symbol) setResolvedSymbol(sanitizeFuturesSymbol(tk.symbol, DEFAULT_CHART_SYMBOL));
 }
 
 async function readBarCache(sym) {
@@ -110,7 +110,9 @@ export function useBinanceLiveFeed({
   const everReadyRef = useRef(false);
 
   const sessionActive = !!connected;
-  const quotesActive = enabled && !!baseUrl?.trim() && loadBars && (publicQuotes || sessionActive);
+  const bridgeActive = enabled && !!baseUrl?.trim() && (publicQuotes || sessionActive);
+  const quotesActive = bridgeActive;
+  const barsActive = bridgeActive && loadBars;
 
   const applyBars = useCallback((bars) => {
     if (!bars?.length) return false;
@@ -126,7 +128,7 @@ export function useBinanceLiveFeed({
   const loadBars = useCallback(
     async (count, { background = false } = {}) => {
       const b = baseUrl?.trim();
-      if (!b || !quotesActive) return false;
+      if (!b || !barsActive) return false;
       if (background && bgLoadRef.current) return false;
       if (background) bgLoadRef.current = true;
       try {
@@ -154,12 +156,12 @@ export function useBinanceLiveFeed({
         if (background) bgLoadRef.current = false;
       }
     },
-    [baseUrl, quotesActive, sessionActive, applyBars],
+    [baseUrl, barsActive, sessionActive, applyBars],
   );
 
   useEffect(() => {
-    symRef.current = symbol;
-    setResolvedSymbol(symbol);
+    symRef.current = sanitizeFuturesSymbol(symbol, DEFAULT_CHART_SYMBOL);
+    setResolvedSymbol(symRef.current);
   }, [symbol]);
 
   useEffect(() => {
@@ -175,8 +177,37 @@ export function useBinanceLiveFeed({
       return;
     }
     if (!loadBars) {
+      let cancelled = false;
+      const tickSetters = { setBid, setAsk, setPrice, setSpreadPips, setResolvedSymbol };
       setFeedReady(true);
-      return;
+      everReadyRef.current = true;
+
+      void (async () => {
+        let b = rewriteLocalhostBridgeUrl(baseUrl.trim());
+        if (b !== baseUrl.trim()) {
+          onBridgeUrlResolved?.(b);
+        }
+        const sym = symRef.current;
+        if (pollTicks) {
+          const tk = await fetchBinanceTick(b, sym);
+          if (!cancelled) applyTickState(tk, tickSetters);
+        }
+        if (sessionActive) {
+          const st = await fetchStatusAccount(b);
+          if (!cancelled && st.account) setAccount(st.account);
+        }
+        const spec = await fetchBinanceSymbolSpec(b, sym);
+        if (!cancelled && spec?.symbol) {
+          const clean = sanitizeFuturesSymbol(spec.symbol, sym);
+          symRef.current = clean;
+          setResolvedSymbol(clean);
+          setSymbolSpec(spec);
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+      };
     }
     let cancelled = false;
     const tickSetters = { setBid, setAsk, setPrice, setSpreadPips, setResolvedSymbol };
@@ -246,8 +277,9 @@ export function useBinanceLiveFeed({
         if (spec) {
           setSymbolSpec(spec);
           if (spec?.symbol) {
-            symRef.current = spec.symbol;
-            setResolvedSymbol(spec.symbol);
+            const clean = sanitizeFuturesSymbol(spec.symbol, symRef.current);
+            symRef.current = clean;
+            setResolvedSymbol(clean);
           }
         }
         if (sessionActive) {
@@ -263,7 +295,7 @@ export function useBinanceLiveFeed({
     return () => {
       cancelled = true;
     };
-  }, [enabled, loadBars, sessionActive, baseUrl, symbol, applyBars, reloadNonce, onBridgeUrlResolved]);
+  }, [enabled, loadBars, pollTicks, sessionActive, baseUrl, symbol, applyBars, reloadNonce, onBridgeUrlResolved]);
 
   const refreshFeed = useCallback(() => {
     setFeedError('');

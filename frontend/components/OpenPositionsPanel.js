@@ -32,6 +32,7 @@ export default function OpenPositionsPanel({
   binanceBaseUrl,
   brokerConnected,
   quoteSymbol,
+  hideQuote = false,
   onRefresh,
   onCloseMessage,
 }) {
@@ -102,22 +103,24 @@ export default function OpenPositionsPanel({
 
   return (
     <View style={st.wrap}>
-      <View style={[st.panel, { borderColor: C.border, backgroundColor: C.panel }]}>
-        <View style={[st.head, { borderBottomColor: C.border }]}>
-          <Text style={[st.title, { color: C.text }]}>Futures quote</Text>
-          <Text style={[st.badge, { color: C.accentLight }]}>{pairLabel}</Text>
+      {!hideQuote ? (
+        <View style={[st.panel, { borderColor: C.border, backgroundColor: C.panel }]}>
+          <View style={[st.head, { borderBottomColor: C.border }]}>
+            <Text style={[st.title, { color: C.text }]}>Futures quote</Text>
+            <Text style={[st.badge, { color: C.accentLight }]}>{pairLabel}</Text>
+          </View>
+          <View style={st.watchRow}>
+            <WatchCell label="BID" value={fmtPx(bid)} color={C.red} />
+            <WatchCell label="MID" value={fmtPx(livePrice)} color={C.text} large />
+            <WatchCell label="ASK" value={fmtPx(ask)} color={C.green} />
+          </View>
+          <Text style={[st.watchHint, { color: C.dim }]}>
+            USDT-M perpetual · updates while Binance is connected
+          </Text>
         </View>
-        <View style={st.watchRow}>
-          <WatchCell label="BID" value={fmtPx(bid)} color={C.red} />
-          <WatchCell label="MID" value={fmtPx(livePrice)} color={C.text} large />
-          <WatchCell label="ASK" value={fmtPx(ask)} color={C.green} />
-        </View>
-        <Text style={[st.watchHint, { color: C.dim }]}>
-          USDT-M perpetual · updates while Binance is connected
-        </Text>
-      </View>
+      ) : null}
 
-      <View style={[st.panel, { borderColor: C.border, backgroundColor: C.panel, marginTop: 10 }]}>
+      <View style={[st.panel, { borderColor: C.border, backgroundColor: C.panel, marginTop: hideQuote ? 0 : 10 }]}>
         <View style={[st.head, { borderBottomColor: C.border }]}>
           <Text style={[st.title, { color: C.text }]}>Open positions</Text>
           <Text style={[st.badge, { color: positions.length ? C.green : C.dim }]}>

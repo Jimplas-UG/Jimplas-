@@ -28,16 +28,13 @@ function AppContent() {
   const { baseUrl, connected, sessionEpoch } = useBinanceBridge();
   const [tab, setTab] = useState('scanner');
 
-  const needsScanner = tab === 'scanner' || tab === 'trade';
-  const needsDesk = tab === 'risk' || tab === 'trade';
-
   const desk = useDeskSession({
-    enabled: needsScanner || needsDesk,
+    enabled: !!baseUrl?.trim(),
     loadBars: false,
-    pollTicks: tab === 'trade' || tab === 'risk',
+    pollTicks: !!baseUrl?.trim(),
   });
   const tickScanner = useTickScanner(baseUrl, {
-    enabled: !!baseUrl?.trim() && needsScanner,
+    enabled: !!baseUrl?.trim(),
     connected,
     sessionEpoch,
   });
@@ -52,28 +49,17 @@ function AppContent() {
     return desk.brokerFeed.account;
   }, [connected, desk.brokerFeed?.account]);
 
+  const tabStyle = useCallback(
+    (name) => ({
+      flex: 1,
+      display: tab === name ? 'flex' : 'none',
+    }),
+    [tab],
+  );
+
   useEffect(() => {
     hideBootSplash('app-content-ready');
   }, []);
-
-  let body = null;
-  if (tab === 'scanner') {
-    body = (
-      <ScannerScreen
-        pad={pad}
-        scanner={tickScanner}
-        onOpenProfile={openProfile}
-        connected={connected}
-        account={homeAccount}
-      />
-    );
-  } else if (tab === 'risk') {
-    body = <RiskScreen pad={pad} desk={desk} onOpenProfile={openProfile} />;
-  } else if (tab === 'trade') {
-    body = <TradeScreen pad={pad} desk={desk} scanner={tickScanner} onOpenProfile={openProfile} />;
-  } else {
-    body = <ProfileScreen pad={pad} />;
-  }
 
   return (
     <SafeAreaView style={[styles.safeRoot, { backgroundColor: C.appBg }]} edges={['top', 'left', 'right']}>
@@ -82,7 +68,24 @@ function AppContent() {
       </View>
       <EmailVerificationBanner />
 
-      {body}
+      <View style={tabStyle('scanner')}>
+        <ScannerScreen
+          pad={pad}
+          scanner={tickScanner}
+          onOpenProfile={openProfile}
+          connected={connected}
+          account={homeAccount}
+        />
+      </View>
+      <View style={tabStyle('risk')}>
+        <RiskScreen pad={pad} desk={desk} onOpenProfile={openProfile} />
+      </View>
+      <View style={tabStyle('trade')}>
+        <TradeScreen pad={pad} desk={desk} scanner={tickScanner} onOpenProfile={openProfile} />
+      </View>
+      <View style={tabStyle('profile')}>
+        <ProfileScreen pad={pad} />
+      </View>
 
       <AppBottomNav tab={tab} onChange={setTab} bottomInset={insets.bottom} />
 

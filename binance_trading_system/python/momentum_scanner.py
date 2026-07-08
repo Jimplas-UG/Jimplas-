@@ -512,15 +512,23 @@ class MomentumScanner:
                     continue
             rows.append(self._row(coin))
         rows.sort(
-            key=lambda r: max(
-                abs(r.get("pctGain") or 0),
-                abs(r.get("pct1m") or 0),
-                abs(r.get("pct3m") or 0),
-                abs(r.get("pct5m") or 0),
-                abs(r.get("pct15m") or 0),
-                abs(r.get("pct24h") or 0) * 0.35,
-            ),
-            reverse=True,
+            key=lambda r: (
+                {
+                    STATUS_PENDING: 0,
+                    STATUS_WATCHING: 1,
+                    STATUS_SHORT: 2,
+                    STATUS_LONG1: 3,
+                    STATUS_LONG2: 4,
+                }.get(r.get("status"), 5),
+                -max(
+                    abs(r.get("pctGain") or 0),
+                    abs(r.get("pct1m") or 0),
+                    abs(r.get("pct3m") or 0),
+                    abs(r.get("pct5m") or 0),
+                    abs(r.get("pct15m") or 0),
+                    abs(r.get("pct24h") or 0) * 0.35,
+                ),
+            )
         )
         return rows[:MAX_WATCHLIST]
 

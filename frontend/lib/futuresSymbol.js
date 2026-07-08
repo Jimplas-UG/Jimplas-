@@ -17,6 +17,22 @@ export function isValidFuturesSymbol(symbol) {
   return /^[A-Z0-9]{2,20}USDT$/.test(s);
 }
 
+/** Block legacy gold / MT5 symbols from the Binance futures desk UI. */
+export function isLegacyGoldSymbol(symbol) {
+  const s = normalizeFuturesSymbol(symbol);
+  if (!s) return false;
+  return s === 'XAUUSDT' || s.startsWith('XAU') || s === 'PAXGUSDT';
+}
+
+/** Normalize to a Binance USDT-M symbol, falling back when legacy gold is passed. */
+export function sanitizeFuturesSymbol(symbol, fallback = DEFAULT_CHART_SYMBOL) {
+  const s = normalizeFuturesSymbol(symbol);
+  if (!s || isLegacyGoldSymbol(s) || !isValidFuturesSymbol(s)) {
+    return normalizeFuturesSymbol(fallback) || DEFAULT_CHART_SYMBOL;
+  }
+  return s;
+}
+
 /** e.g. BTCUSDT → BTC/USDT */
 export function formatPairLabel(symbol) {
   const s = normalizeFuturesSymbol(symbol);

@@ -26,6 +26,8 @@ grep -q '^SCANNER_LONG_PULLBACK_PCT=' "$ENVF" && sed -i 's/^SCANNER_LONG_PULLBAC
 grep -q '^SCANNER_SHORT_PARTITION_PCT=' "$ENVF" && sed -i 's/^SCANNER_SHORT_PARTITION_PCT=.*/SCANNER_SHORT_PARTITION_PCT=50/' "$ENVF" || echo 'SCANNER_SHORT_PARTITION_PCT=50' >> "$ENVF"
 grep -q '^SCANNER_LONG1_PARTITION_PCT=' "$ENVF" && sed -i 's/^SCANNER_LONG1_PARTITION_PCT=.*/SCANNER_LONG1_PARTITION_PCT=40/' "$ENVF" || echo 'SCANNER_LONG1_PARTITION_PCT=40' >> "$ENVF"
 grep -q '^SCANNER_LONG2_PARTITION_PCT=' "$ENVF" && sed -i 's/^SCANNER_LONG2_PARTITION_PCT=.*/SCANNER_LONG2_PARTITION_PCT=40/' "$ENVF" || echo 'SCANNER_LONG2_PARTITION_PCT=40' >> "$ENVF"
+grep -q '^BINANCE_SYMBOL=' "$ENVF" && sed -i 's/^BINANCE_SYMBOL=.*/BINANCE_SYMBOL=BTCUSDT/' "$ENVF" || echo 'BINANCE_SYMBOL=BTCUSDT' >> "$ENVF"
+if grep -q '^BINANCE_SYMBOL=.*XAU' "$ENVF" 2>/dev/null; then sed -i 's/^BINANCE_SYMBOL=.*/BINANCE_SYMBOL=BTCUSDT/' "$ENVF"; fi
 
 # Kill leftover Gradle JVMs that steal RAM from trading
 pkill -f 'GradleDaemon' 2>/dev/null || true
@@ -40,7 +42,7 @@ cd /opt/bilshenz/binance_trading_system/python
 python3 test_scanner_15m.py || { echo SCANNER_TEST_FAIL; exit 1; }
 cd /opt/bilshenz
 
-# Forward bot: ensure env + service for XAU strategy (no strategy logic change)
+# Forward bot: ensure env + service (Binance futures, no XAU default)
 if [[ ! -f /etc/tradingbot.env ]]; then
   cat > /etc/tradingbot.env <<EOF
 STRATEGY_FREEZE=1
@@ -63,6 +65,7 @@ fi
 grep -q '^BINANCE_API_URL=' /etc/tradingbot.env && sed -i 's|^BINANCE_API_URL=.*|BINANCE_API_URL=http://127.0.0.1:8766|' /etc/tradingbot.env || echo 'BINANCE_API_URL=http://127.0.0.1:8766' >> /etc/tradingbot.env
 grep -q '^BROKER_MODE=' /etc/tradingbot.env && sed -i 's/^BROKER_MODE=.*/BROKER_MODE=binance/' /etc/tradingbot.env || echo 'BROKER_MODE=binance' >> /etc/tradingbot.env
 grep -q '^FORWARD_DRY_RUN=' /etc/tradingbot.env && sed -i 's/^FORWARD_DRY_RUN=.*/FORWARD_DRY_RUN=0/' /etc/tradingbot.env || echo 'FORWARD_DRY_RUN=0' >> /etc/tradingbot.env
+grep -q '^BINANCE_SYMBOL=' /etc/tradingbot.env && sed -i 's/^BINANCE_SYMBOL=.*/BINANCE_SYMBOL=BTCUSDT/' /etc/tradingbot.env || echo 'BINANCE_SYMBOL=BTCUSDT' >> /etc/tradingbot.env
 # Keep DESK_API_KEY in sync for desk routes used by forward bot
 DESK_KEY=$(grep '^DESK_API_KEY=' /etc/bilshenz.env | cut -d= -f2- || true)
 if [[ -n "$DESK_KEY" ]]; then
@@ -116,7 +119,7 @@ print('MARKET_ROWS', len(rows))
 for r in rows[:6]:
   print(' ', r.get('symbol'), 'gain', r.get('pctGain'), r.get('timeframe'), '1m', r.get('pct1m'), '15m', r.get('pct15m'), r.get('status'))
 t=get('http://127.0.0.1:8791/v1/binance/api/tick/BTCUSDT', H)
-print('XAU_TICK', t.get('bid'), t.get('ask'), t.get('source'))
+print('BTC_TICK', t.get('bid'), t.get('ask'), t.get('source'))
 st=get('http://127.0.0.1:8791/v1/binance/api/status', H)
 print('STATUS connected=',st.get('connected'),'can_execute=',st.get('can_execute'),'bal=',(st.get('account') or {}).get('balance'))
 pos=get('http://127.0.0.1:8791/v1/binance/api/positions', H)
