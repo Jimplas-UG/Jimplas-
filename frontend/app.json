@@ -53,7 +53,8 @@
       "lang": "en"
     },
     "extra": {
-      "deskApiUrl": "http://127.0.0.1:8791",
+      "deskApiUrl": "http://157.245.33.42:8791",
+      "binanceApiUrl": "http://157.245.33.42:8791/v1/binance",
       "deskRemote": "1",
       "eas": {
         "projectId": "91d965de-38e5-4677-b383-946e37390e50"

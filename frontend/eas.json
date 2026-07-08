@@ -10,7 +10,8 @@
       "autoIncrement": true,
       "android": {
         "buildType": "apk",
-        "gradleCommand": ":app:assembleRelease"
+        "gradleCommand": ":app:assembleRelease",
+        "image": "latest"
       },
       "env": {
         "BABEL_ENV": "production",
@@ -18,7 +19,8 @@
         "EXPO_PUBLIC_DESK_LOCAL": "0",
         "EXPO_PUBLIC_DESK_REMOTE": "1",
         "EXPO_PUBLIC_DESK_API_URL": "http://157.245.33.42:8791",
-        "EXPO_PUBLIC_BINANCE_API_URL": "http://157.245.33.42:8791/v1/binance"
+        "EXPO_PUBLIC_BINANCE_API_URL": "http://157.245.33.42:8791/v1/binance",
+        "ORG_GRADLE_PROJECT_reactNativeArchitectures": "armeabi-v7a,arm64-v8a"
       }
     },
     "production-local": {
