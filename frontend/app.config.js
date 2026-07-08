@@ -47,7 +47,7 @@ module.exports = ({ config }) => {
         android: {
           minSdkVersion: 24,
           targetSdkVersion: 34,
-          compileSdkVersion: 34,
+          compileSdkVersion: 35,
           usesCleartextTraffic: true,
           enableMinifyInReleaseBuilds: false,
           enableShrinkResourcesInReleaseBuilds: false,
