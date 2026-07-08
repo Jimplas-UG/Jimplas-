@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import json
 import logging
 import math
 import os
 import re
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -70,6 +72,11 @@ class BinanceConnector:
         self._time_offset_ms = 0
         self._time_synced_at = 0.0
         self._hedge_mode: bool | None = None
+        self._all_specs_cache: dict[str, dict[str, Any]] = {}
+        self._all_specs_loaded_at = 0.0
+        self._prepared_cache: dict[tuple[str, int, str], float] = {}
+        self._http_conn: http.client.HTTPSConnection | None = None
+        self._http_host: str = ""
         if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper:
             self.sync_server_time(force=True)
 
@@ -94,6 +101,10 @@ class BinanceConnector:
             self.cfg.testnet = testnet
         if not same_creds:
             self._symbol_info = None
+            self._all_specs_cache = {}
+            self._all_specs_loaded_at = 0.0
+            self._prepared_cache = {}
+            self._close_http()
         self._connected = bool(self.cfg.api_key and self.cfg.api_secret) or self.cfg.paper
         if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper and not same_creds:
             self.sync_server_time(force=True)
@@ -121,6 +132,67 @@ class BinanceConnector:
         if signed and self.cfg.api_key:
             h["X-MBX-APIKEY"] = self.cfg.api_key
         return h
+
+    def _close_http(self) -> None:
+        if self._http_conn is not None:
+            try:
+                self._http_conn.close()
+            except Exception:
+                pass
+        self._http_conn = None
+        self._http_host = ""
+
+    def _http_host_name(self) -> str:
+        return urllib.parse.urlparse(self.base_url).netloc
+
+    def _request_keepalive(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        signed: bool = False,
+        timeout: float = 10.0,
+    ) -> Any:
+        """Signed/unsigned REST via persistent HTTPS connection (order hot path)."""
+        params = dict(params or {})
+        host = self._http_host_name()
+        if self._http_conn is None or self._http_host != host:
+            self._close_http()
+            ctx = ssl.create_default_context()
+            self._http_conn = http.client.HTTPSConnection(host, timeout=timeout, context=ctx)
+            self._http_host = host
+
+        if signed:
+            params["timestamp"] = self._server_timestamp_ms()
+            params["recvWindow"] = 60000
+            query = urllib.parse.urlencode(params)
+            sig = hmac.new(
+                self.cfg.api_secret.encode("utf-8"),
+                query.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            req_path = f"{path}?{query}&signature={sig}"
+        else:
+            qs = urllib.parse.urlencode(params) if params else ""
+            req_path = f"{path}" + (f"?{qs}" if qs else "")
+
+        headers = self._headers(signed)
+        try:
+            self._http_conn.request(method, req_path, headers=headers)
+            resp = self._http_conn.getresponse()
+            body = resp.read().decode("utf-8", errors="replace")
+            if resp.status >= 400:
+                try:
+                    detail = json.loads(body)
+                except json.JSONDecodeError:
+                    detail = {"msg": body}
+                msg = detail.get("msg") or detail.get("detail") or body
+                code = detail.get("code")
+                raise RuntimeError(f"{msg} (code={code}, http={resp.status})")
+            return json.loads(body) if body else {}
+        except Exception:
+            self._close_http()
+            raise
 
     def _request(
         self,
@@ -226,6 +298,183 @@ class BinanceConnector:
                 return self._symbol_info
         raise RuntimeError(f"Symbol {sym} not found on Binance Futures")
 
+    def _parse_symbol_filters(self, s: dict[str, Any]) -> dict[str, Any]:
+        sym = str(s.get("symbol", "")).upper()
+        filters = {f["filterType"]: f for f in s.get("filters", [])}
+        lot = filters.get("LOT_SIZE", {})
+        price_f = filters.get("PRICE_FILTER", {})
+        min_notional_f = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL", {})
+        min_notional = float(min_notional_f.get("notional", min_notional_f.get("minNotional", "5")))
+        return {
+            "symbol": sym,
+            "status": s.get("status"),
+            "pricePrecision": s.get("pricePrecision", 2),
+            "quantityPrecision": s.get("quantityPrecision", 3),
+            "tickSize": float(price_f.get("tickSize", "0.01")),
+            "stepSize": float(lot.get("stepSize", "0.001")),
+            "minQty": float(lot.get("minQty", "0.001")),
+            "maxQty": float(lot.get("maxQty", "1000")),
+            "minNotional": min_notional,
+            "contractType": s.get("contractType"),
+        }
+
+    def load_all_symbol_specs(self, force: bool = False) -> dict[str, dict[str, Any]]:
+        if self._all_specs_cache and not force and time.time() - self._all_specs_loaded_at < 3600:
+            return self._all_specs_cache
+        data = self._request("GET", "/fapi/v1/exchangeInfo", timeout=45.0)
+        cache: dict[str, dict[str, Any]] = {}
+        for s in data.get("symbols", []):
+            if s.get("status") != "TRADING":
+                continue
+            parsed = self._parse_symbol_filters(s)
+            cache[parsed["symbol"]] = parsed
+        self._all_specs_cache = cache
+        self._all_specs_loaded_at = time.time()
+        log.info("Cached %s Binance Futures symbol specs", len(cache))
+        return cache
+
+    def get_symbol_spec(self, symbol: str) -> dict[str, Any]:
+        sym = symbol.upper()
+        cache = self.load_all_symbol_specs()
+        if sym not in cache:
+            raise RuntimeError(f"Symbol {sym} not found on Binance Futures")
+        return dict(cache[sym])
+
+    def prepare_symbol_cached(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> None:
+        sym = symbol.upper()
+        key = (sym, int(leverage), margin_type.upper())
+        if key in self._prepared_cache and time.time() - self._prepared_cache[key] < 3600:
+            self.cfg.symbol = sym
+            self.cfg.leverage = int(leverage)
+            self.cfg.margin_type = margin_type.upper()
+            return
+        self.prepare_symbol(sym, leverage, margin_type)
+        self._prepared_cache[key] = time.time()
+
+    def _parse_order_error(self, exc: Exception) -> dict[str, Any]:
+        msg = str(exc)
+        http_m = re.search(r"http=(\d+)", msg)
+        code_m = re.search(r"code=(-?\d+)", msg)
+        http_code = int(http_m.group(1)) if http_m else None
+        binance_code = int(code_m.group(1)) if code_m else None
+        retryable = (
+            http_code in (408, 429, 500, 502, 503, 504)
+            or binance_code in (-1001, -1003, -1021)
+            or "timeout" in msg.lower()
+            or "timed out" in msg.lower()
+        )
+        return {
+            "error": msg,
+            "http_code": http_code,
+            "binance_code": binance_code,
+            "retryable": retryable,
+        }
+
+    def place_market_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        *,
+        client_order_id: str,
+        reference_price: float | None = None,
+        leverage: int = 5,
+    ) -> dict[str, Any]:
+        """Fast MARKET order — uses cached filters + optional WS reference price."""
+        import time as _time
+
+        if _truthy(os.environ.get("FORWARD_DRY_RUN")):
+            return {"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True, "retryable": False}
+        sym = symbol.upper()
+        side_u = side.upper()
+        if self.cfg.paper:
+            from paper_simulator import paper_store
+
+            r = paper_store.order_market_leg(sym, side_u, quantity, None, None, 88001)
+            return {
+                "ok": bool(r.get("ok")),
+                "fill_price": r.get("fill_price"),
+                "quantity": r.get("volume"),
+                "order_id": r.get("order"),
+                "error": r.get("error"),
+                "retryable": False,
+            }
+        if not self.cfg.api_key:
+            return {"ok": False, "error": "api_key_missing", "retryable": False}
+
+        info = self.get_symbol_spec(sym)
+        price = float(reference_price or 0)
+        if price <= 0:
+            tick = self.book_ticker(sym)
+            if not tick:
+                return {"ok": False, "error": f"no tick for {sym}", "retryable": True}
+            price = tick["ask"] if side_u == "BUY" else tick["bid"]
+        qty = round_to_step(float(quantity), info["stepSize"])
+        qty, qty_err = self._validate_order_qty(qty, price, info)
+        if qty_err:
+            return {"ok": False, "error": qty_err, "retryable": False}
+
+        self.cfg.symbol = sym
+        params: dict[str, Any] = {
+            "symbol": sym,
+            "side": side_u,
+            "type": "MARKET",
+            "quantity": qty,
+            "newClientOrderId": client_order_id[:36],
+        }
+        params.update(self._position_side_param(side_u))
+        t0 = _time.perf_counter()
+        try:
+            entry_resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
+        except Exception as e:
+            parsed = self._parse_order_error(e)
+            parsed["ok"] = False
+            parsed["latency_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
+            return parsed
+        fill = float(entry_resp.get("avgPrice") or price)
+        return {
+            "ok": True,
+            "symbol": sym,
+            "side": side_u,
+            "quantity": qty,
+            "fill_price": fill,
+            "order_id": entry_resp.get("orderId"),
+            "latency_ms": round((_time.perf_counter() - t0) * 1000, 1),
+            "retryable": False,
+        }
+
+    def place_tp_market(
+        self,
+        symbol: str,
+        entry_side: str,
+        stop_price: float,
+        quantity: float,
+        *,
+        client_id: str,
+    ) -> dict[str, Any]:
+        sym = symbol.upper()
+        info = self.get_symbol_spec(sym)
+        self.cfg.symbol = sym
+        sp = round_to_tick(float(stop_price), info["tickSize"])
+        qty = round_to_step(float(quantity), info["stepSize"])
+        exit_side = "SELL" if entry_side.upper() == "BUY" else "BUY"
+        params: dict[str, Any] = {
+            "symbol": sym,
+            "side": exit_side,
+            "type": "TAKE_PROFIT_MARKET",
+            "stopPrice": sp,
+            "quantity": qty,
+            "reduceOnly": "true",
+            "workingType": "MARK_PRICE",
+            "newClientOrderId": client_id[:36],
+        }
+        params.update(self._position_side_param(entry_side, reduce=True))
+        try:
+            resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
+            return {"ok": True, "order_id": resp.get("orderId")}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def symbol_spec(self, symbol: str | None = None, pip_size: float | None = None) -> dict[str, Any]:
         sym = (symbol or self.cfg.symbol).upper()
         if sym != self.cfg.symbol.upper():
@@ -289,8 +538,9 @@ class BinanceConnector:
             return
         self._ensure_margin_setup()
         try:
-            self.exchange_info()
+            self.load_all_symbol_specs(force=True)
             self.is_hedge_mode()
+            self.sync_server_time(force=True)
         except Exception as e:
             log.warning("warm_order_cache: %s", e)
 
@@ -970,12 +1220,12 @@ class BinanceConnector:
         if not self.cfg.api_key:
             return {"ok": False, "error": "api_key_missing"}
 
-        self.prepare_symbol(sym, leverage, "ISOLATED")
+        self.prepare_symbol_cached(sym, leverage, "ISOLATED")
         tick = self.book_ticker(sym)
         if not tick:
             return {"ok": False, "error": f"no tick for {sym}"}
         intended = tick["ask"] if side_u == "BUY" else tick["bid"]
-        info = self.symbol_spec(sym)
+        info = self.get_symbol_spec(sym)
         qty = round_to_step(volume, info["stepSize"])
         qty, qty_err = self._validate_order_qty(qty, intended, info)
         if qty_err:
@@ -992,23 +1242,26 @@ class BinanceConnector:
                 log.warning("order_market_leg margin check: %s", e)
 
         cid = f"{CLIENT_ID_PREFIX}_SC_{leg or magic}_{int(_time.time())}"[:36]
-        params: dict[str, Any] = {
-            "symbol": sym,
-            "side": side_u,
-            "type": "MARKET",
-            "quantity": qty,
-            "newClientOrderId": cid,
-        }
-        params.update(self._position_side_param(side_u))
-        t0 = _time.perf_counter()
-        try:
-            entry_resp = self._request("POST", "/fapi/v1/order", params, signed=True)
-        except RuntimeError as e:
-            return {"ok": False, "error": str(e), "latency_ms": round((_time.perf_counter() - t0) * 1000, 1)}
-        fill = float(entry_resp.get("avgPrice") or intended)
+        order_resp = self.place_market_order(
+            sym,
+            side_u,
+            qty,
+            client_order_id=cid,
+            reference_price=intended,
+            leverage=leverage,
+        )
+        if not order_resp.get("ok"):
+            return {
+                "ok": False,
+                "error": order_resp.get("error"),
+                "latency_ms": order_resp.get("latency_ms"),
+            }
+        fill = float(order_resp.get("fill_price") or intended)
         if tp is not None:
             try:
-                self._place_conditional(side_u, "TAKE_PROFIT_MARKET", float(tp), qty, f"{cid}_TP")
+                tp_resp = self.place_tp_market(sym, side_u, float(tp), qty, client_id=f"{cid}_TP")
+                if not tp_resp.get("ok"):
+                    log.warning("scanner TP %s: %s", sym, tp_resp.get("error"))
             except RuntimeError as e:
                 log.warning("scanner TP %s: %s", sym, e)
         return {
@@ -1018,8 +1271,8 @@ class BinanceConnector:
             "volume": qty,
             "intended_price": intended,
             "fill_price": fill,
-            "latency_ms": round((_time.perf_counter() - t0) * 1000, 1),
-            "order": entry_resp.get("orderId"),
+            "latency_ms": order_resp.get("latency_ms"),
+            "order": order_resp.get("order_id"),
             "magic": magic,
             "leg": leg,
             "broker": "binance",

@@ -16,6 +16,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from execution_engine import ExecutionEngine, ExecutionSignal
+
 log = logging.getLogger("momentum_scanner")
 
 GAIN_THRESHOLD_PCT = float(os.environ.get("SCANNER_GAIN_PCT", "5.0"))
@@ -146,6 +148,13 @@ class MomentumScanner:
         self._tf_emit_times: dict[str, deque[float]] = {
             f"{m}m": deque(maxlen=SIGNALS_PER_TF + 2) for m in TIMEFRAMES_MIN
         }
+        self._engine = ExecutionEngine(
+            connector,
+            session_ok=self._order_session_ok,
+            max_open_trades=lambda: 1 if self._one_at_a_time else 999,
+            open_trade_count=lambda: 1 if self._has_open_strategy() else 0,
+        )
+        self._last_exec_latency_ms: float | None = None
 
     def set_exec_enabled(self, enabled: bool) -> None:
         """No-op — execution is armed on Binance connect; halt via SCANNER_EXEC or FORWARD_DRY_RUN env."""
@@ -304,6 +313,7 @@ class MomentumScanner:
             "scanner": self.status(),
             "signals": list(self._recent_signals),
             "blocks": self.trade_blocks(),
+            "execution_events": self._engine.events()[:16],
             "ts": int(time.time() * 1000),
         }
 
@@ -364,7 +374,7 @@ class MomentumScanner:
         """One open strategy at a time — best qualifier enters; rest stay queued until close."""
         ok, reason = self._order_session_ok()
         if not ok:
-            if reason not in ("SCANNER_EXEC=0", "FORWARD_DRY_RUN"):
+            if reason:
                 self._last_exec_error = reason
             return
         if self._one_at_a_time and self._has_open_strategy():
@@ -400,6 +410,8 @@ class MomentumScanner:
             "long1_partition_pct": self._long1_pct,
             "long2_partition_pct": self._long2_pct,
             "long_pullback_pct": LONG_BOTH_PULLBACK_PCT,
+            "last_exec_latency_ms": self._last_exec_latency_ms,
+            "execution_events": self._engine.events()[:12],
         }
 
     def load_symbols(self, symbols: list[str]) -> None:
@@ -709,18 +721,24 @@ class MomentumScanner:
             entry = coin.price
             qty = self._qty_for(sym, entry, SHORT_LEVERAGE, self._short_pct)
             tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
-            r = self._connector.order_market_leg(
-                sym,
-                "SELL",
-                qty,
-                sl=None,
-                tp=tp,
+            signal = ExecutionSignal(
+                symbol=sym,
+                side="SELL",
+                quantity=qty,
+                reference_price=entry,
                 leverage=SHORT_LEVERAGE,
                 magic=MAGIC_SHORT,
                 leg="SHORT",
+                tp=tp,
+                signal_id=f"{sym}_SHORT_{coin.last_update_ms or int(time.time() * 1000)}",
+                partition_usd=self._partition_usd,
+                partition_pct=self._short_pct,
             )
-            if r.get("ok"):
-                fill = float(r.get("fill_price") or entry)
+            self._emit_signal(coin, "executing")
+            r = self._engine.execute(signal)
+            self._last_exec_latency_ms = r.latency_ms or None
+            if r.ok:
+                fill = float(r.fill_price or entry)
                 coin.short = LegPosition("SELL", fill, qty, SHORT_LEVERAGE, MAGIC_SHORT, tp)
                 coin.status = STATUS_SHORT
                 coin.long1_was_closed = False
@@ -729,12 +747,11 @@ class MomentumScanner:
                 coin.recovery_peak_price = None
                 self._last_exec_error = None
                 self._emit_signal(coin, "entered")
-                log.info("scanner SHORT %s qty=%s @ %s", sym, qty, fill)
+                log.info("scanner SHORT %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
             else:
-                err = str(r.get("error") or "order_failed")
+                err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym}: {err}"
-                log.warning("scanner SHORT failed %s: %s", sym, err)
-                # Keep pending so the next tick / queue pass can retry (e.g. margin, tick, rate limit).
+                log.warning("scanner SHORT failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
                 coin.status = STATUS_PENDING
         finally:
             self._in_flight.discard(sym)
@@ -750,11 +767,22 @@ class MomentumScanner:
             magic = MAGIC_LONG1 if leg == 1 else MAGIC_LONG2
             leg_pct = self._long1_pct if leg == 1 else self._long2_pct
             qty = self._qty_for(sym, entry, lev, leg_pct)
-            r = self._connector.order_market_leg(
-                sym, "BUY", qty, sl=None, tp=None, leverage=lev, magic=magic, leg=f"LONG{leg}"
+            signal = ExecutionSignal(
+                symbol=sym,
+                side="BUY",
+                quantity=qty,
+                reference_price=entry,
+                leverage=lev,
+                magic=magic,
+                leg=f"LONG{leg}",
+                signal_id=f"{sym}_LONG{leg}_{coin.last_update_ms or int(time.time() * 1000)}",
+                partition_usd=self._partition_usd,
+                partition_pct=leg_pct,
             )
-            if r.get("ok"):
-                fill = float(r.get("fill_price") or entry)
+            r = self._engine.execute(signal)
+            self._last_exec_latency_ms = r.latency_ms or None
+            if r.ok:
+                fill = float(r.fill_price or entry)
                 pos = LegPosition("BUY", fill, qty, lev, magic, None)
                 if leg == 1:
                     coin.long1 = pos
@@ -766,11 +794,11 @@ class MomentumScanner:
                     coin.status = STATUS_LONG2
                 self._last_exec_error = None
                 self._emit_signal(coin, f"long{leg}_entered")
-                log.info("scanner LONG%d %s qty=%s @ %s", leg, sym, qty, fill)
+                log.info("scanner LONG%d %s qty=%s @ %s order=%s latency_ms=%s", leg, sym, qty, fill, r.order_id, r.latency_ms)
             else:
-                err = str(r.get("error") or "order_failed")
+                err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym} LONG{leg}: {err}"
-                log.warning("scanner LONG%d failed %s: %s", leg, sym, err)
+                log.warning("scanner LONG%d failed %s: %s latency_ms=%s", leg, sym, err, r.latency_ms)
         finally:
             self._in_flight.discard(sym)
 

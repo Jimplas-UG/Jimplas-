@@ -14,6 +14,10 @@ function applyPayload(setters, payload) {
   if (payload.ts) setters.setLastTs(payload.ts);
   if (Array.isArray(payload.signals)) setters.setSignals(payload.signals);
   if (Array.isArray(payload.blocks)) setters.setBlocks(payload.blocks);
+  if (Array.isArray(payload.execution_events)) setters.setExecutionEvents(payload.execution_events);
+  if (Array.isArray(payload.scanner?.execution_events)) {
+    setters.setExecutionEvents(payload.scanner.execution_events);
+  }
 }
 
 async function readSnapshotCache() {
@@ -39,6 +43,7 @@ async function writeSnapshotCache(payload) {
         scanner: payload.scanner,
         signals: payload.signals,
         blocks: payload.blocks,
+        execution_events: payload.execution_events || payload.scanner?.execution_events,
       }),
     );
   } catch {
@@ -53,6 +58,7 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
   const [rows, setRows] = useState([]);
   const [signals, setSignals] = useState([]);
   const [blocks, setBlocks] = useState([]);
+  const [executionEvents, setExecutionEvents] = useState([]);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState('');
   const [scannerMeta, setScannerMeta] = useState(null);
@@ -61,7 +67,7 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
 
   const apply = useCallback((payload) => {
     applyPayload(
-      { setRows, setReady, setError, setLastTs, setScannerMeta, setSignals, setBlocks },
+      { setRows, setReady, setError, setLastTs, setScannerMeta, setSignals, setBlocks, setExecutionEvents },
       payload,
     );
     void writeSnapshotCache(payload);
@@ -81,6 +87,7 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
       setRows([]);
       setSignals([]);
       setBlocks([]);
+      setExecutionEvents([]);
       setReady(false);
       return undefined;
     }
@@ -137,5 +144,5 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
     return undefined;
   }, [baseUrl, connected, enabled, sessionEpoch, refresh]);
 
-  return { rows, signals, blocks, ready, error, scannerMeta, lastTs, refresh };
+  return { rows, signals, blocks, executionEvents, ready, error, scannerMeta, lastTs, refresh };
 }

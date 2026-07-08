@@ -12,7 +12,7 @@ os.environ.setdefault("SCANNER_RETRACE_PCT", "0.7")
 os.environ.setdefault("SCANNER_LONG1_PCT", "2.0")
 os.environ.setdefault("SCANNER_LONG2_PCT", "4.0")
 os.environ.setdefault("SCANNER_LONG_PULLBACK_PCT", "0.5")
-os.environ.setdefault("SCANNER_EXEC", "0")
+os.environ.setdefault("SCANNER_EXEC", "1")
 
 from momentum_scanner import (  # noqa: E402
     GAIN_THRESHOLD_PCT,
@@ -37,11 +37,28 @@ class FakeConnector:
         self.closed: list[dict] = []
 
     def symbol_spec(self, symbol: str, pip_size: float = 0.01) -> dict:
-        return {"stepSize": 0.001, "minQty": 0.001}
+        return {"stepSize": 0.001, "minQty": 0.001, "minNotional": 5.0}
+
+    def get_symbol_spec(self, symbol: str) -> dict:
+        return self.symbol_spec(symbol)
+
+    def prepare_symbol_cached(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> None:
+        pass
+
+    def place_market_order(self, symbol, side, quantity, **kwargs) -> dict:
+        self.orders.append({"sym": symbol, "side": side, "qty": quantity, **kwargs})
+        return {
+            "ok": True,
+            "fill_price": 100.0,
+            "quantity": quantity,
+            "order_id": len(self.orders),
+        }
+
+    def place_tp_market(self, *args, **kwargs) -> dict:
+        return {"ok": True, "order_id": 999}
 
     def order_market_leg(self, sym, side, qty, **kwargs) -> dict:
-        self.orders.append({"sym": sym, "side": side, "qty": qty, **kwargs})
-        return {"ok": True}
+        return self.place_market_order(sym, side, qty, **kwargs)
 
     def close_leg(self, sym, magic, qty) -> dict:
         self.closed.append({"sym": sym, "magic": magic, "qty": qty})
@@ -56,22 +73,30 @@ def _seed_base(sc: MomentumScanner, sym: str, base: float = 100.0) -> None:
 
 
 def test_multi_tf_gain_then_retrace_pending() -> None:
-    sc = MomentumScanner(FakeConnector(), lambda: True)
-    sym = "TESTUSDT"
-    base = 100.0
-    _seed_base(sc, sym, base)
-    spike = base * 1.055
-    sc.on_tick(sym, spike)
-    coin = sc._coins[sym]
-    assert coin.status == STATUS_WATCHING
-    assert coin.best_pct >= GAIN_THRESHOLD_PCT
-    assert coin.best_tf in ("1m", "3m", "5m", "15m")
+    prev = os.environ.get("SCANNER_EXEC")
+    os.environ["SCANNER_EXEC"] = "0"
+    try:
+        sc = MomentumScanner(FakeConnector(), lambda: True)
+        sym = "TESTUSDT"
+        base = 100.0
+        _seed_base(sc, sym, base)
+        spike = base * 1.055
+        sc.on_tick(sym, spike)
+        coin = sc._coins[sym]
+        assert coin.status == STATUS_WATCHING
+        assert coin.best_pct >= GAIN_THRESHOLD_PCT
+        assert coin.best_tf in ("1m", "3m", "5m", "15m")
 
-    retrace_price = spike * (1.0 - 0.008)
-    sc.on_tick(sym, retrace_price)
-    assert coin.retrace_pct >= RETRACE_ENTRY_PCT
-    assert coin.status == STATUS_PENDING
-    print("OK entry: >=5% gain + >=0.7% retrace -> PENDING")
+        retrace_price = spike * (1.0 - 0.008)
+        sc.on_tick(sym, retrace_price)
+        assert coin.retrace_pct >= RETRACE_ENTRY_PCT
+        assert coin.status == STATUS_PENDING
+        print("OK entry: >=5% gain + >=0.7% retrace -> PENDING")
+    finally:
+        if prev is None:
+            os.environ.pop("SCANNER_EXEC", None)
+        else:
+            os.environ["SCANNER_EXEC"] = prev
 
 
 def test_long1_opens_and_pullback_close() -> None:

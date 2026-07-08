@@ -61,6 +61,7 @@ export default function TradeScreen({ pad, desk, scanner, onOpenProfile }) {
         rows={scanner?.rows}
         scannerMeta={scanner?.scannerMeta}
         ready={scanner?.ready}
+        executionEvents={scanner?.executionEvents}
       />
 
       {executionLead ? <ScannerQuoteStrip candidate={executionLead} /> : null}

@@ -96,7 +96,7 @@ function Meta({ label, value, color, C }) {
   );
 }
 
-export default function ScannerExecutionPanel({ rows, scannerMeta, ready }) {
+export default function ScannerExecutionPanel({ rows, scannerMeta, ready, executionEvents = [] }) {
   const { colors: C } = useBilshenzTheme();
 
   const candidates = useMemo(() => pickExecutionCandidates(rows), [rows]);
@@ -132,6 +132,59 @@ export default function ScannerExecutionPanel({ rows, scannerMeta, ready }) {
           </Text>
         </View>
       )}
+
+      {executionEvents?.length ? (
+        <View style={{ marginTop: spacing.md }}>
+          <Text style={{ color: C.dim, fontSize: 10, fontWeight: '800', letterSpacing: 0.6, marginBottom: 8 }}>
+            EXECUTION LOG
+          </Text>
+          {executionEvents.slice(0, 6).map((evt) => (
+            <View
+              key={`${evt.ts}-${evt.symbol}-${evt.stage}-${evt.client_order_id || ''}`}
+              style={{
+                borderWidth: 1,
+                borderColor: C.border,
+                borderRadius: radius.md,
+                padding: spacing.sm,
+                marginBottom: spacing.xs,
+                backgroundColor: evt.stage === 'filled' ? 'rgba(0,230,118,0.06)' : C.panel2,
+              }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                <Text style={{ color: C.text, fontSize: 11, fontWeight: '800' }}>
+                  {evt.coin || evt.symbol} · {evt.side}
+                </Text>
+                <Text
+                  style={{
+                    color:
+                      evt.stage === 'filled'
+                        ? C.green
+                        : evt.stage === 'sending'
+                          ? C.amber
+                          : evt.error
+                            ? C.red
+                            : C.accentLight,
+                    fontSize: 10,
+                    fontWeight: '800',
+                  }}>
+                  {String(evt.stage || '').toUpperCase()}
+                </Text>
+              </View>
+              {evt.fill_price != null ? (
+                <Text style={{ color: C.dim, fontSize: 10, marginTop: 4 }}>
+                  Fill {fmtPx(evt.fill_price)}
+                  {evt.latency_ms != null ? ` · ${Number(evt.latency_ms).toFixed(0)}ms` : ''}
+                  {evt.order_id ? ` · #${evt.order_id}` : ''}
+                </Text>
+              ) : null}
+              {evt.error ? (
+                <Text style={{ color: C.red, fontSize: 10, marginTop: 4 }} numberOfLines={2}>
+                  {evt.error}
+                </Text>
+              ) : null}
+            </View>
+          ))}
+        </View>
+      ) : null}
     </PilotCard>
   );
 }
