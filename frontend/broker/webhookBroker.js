@@ -1,4 +1,4 @@
-import { TRADING_SYMBOL } from '../lib/tradingSymbol';
+import { DEFAULT_CHART_SYMBOL } from '../lib/futuresSymbol';
 
 function trimSnippet(s, max = 400) {
   const t = s.replace(/\s+/g, ' ').trim();
@@ -59,7 +59,7 @@ export function buildBrokerOrderIntent(trade, opts) {
   return {
     source: 'bilshenz_v3',
     intentAtIso,
-    symbol: opts.symbol?.trim() || TRADING_SYMBOL,
+    symbol: opts.symbol?.trim() || DEFAULT_CHART_SYMBOL,
     side: trade.side,
     setup,
     entry: trade.entry,

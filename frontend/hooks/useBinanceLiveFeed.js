@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { buildBundleFromM30Bars } from '../lib/marketBundle';
-import { TRADING_SYMBOL } from '../lib/tradingSymbol';
+import { DEFAULT_CHART_SYMBOL } from '../lib/futuresSymbol';
 import { DISPLAY_PIP_SIZE } from '../security/deskConstants';
 import {
   fetchBinanceBarsM30,
@@ -85,7 +85,7 @@ export function useBinanceLiveFeed({
   baseUrl,
   connected,
   enabled = true,
-  symbol = TRADING_SYMBOL,
+  symbol = DEFAULT_CHART_SYMBOL,
   pollTicks = true,
   /** When true, load public quotes/bars even if API session is not logged in. */
   publicQuotes = true,
@@ -111,10 +111,10 @@ export function useBinanceLiveFeed({
   const sessionActive = !!connected;
   const quotesActive = enabled && !!baseUrl?.trim() && (publicQuotes || sessionActive);
 
-  const applyBars = useCallback((gold) => {
-    if (!gold?.length) return false;
-    setMarketBundle(buildBundleFromM30Bars(gold));
-    const last = gold[gold.length - 1];
+  const applyBars = useCallback((bars) => {
+    if (!bars?.length) return false;
+    setMarketBundle(buildBundleFromM30Bars(bars));
+    const last = bars[bars.length - 1];
     if (last?.c != null) setPrice(parseFloat(Number(last.c).toFixed(2)));
     setFeedReady(true);
     everReadyRef.current = true;
@@ -286,7 +286,7 @@ export function useBinanceLiveFeed({
     };
 
     const refreshPositions = async () => {
-      const p = await fetchBinancePositions(b, sym);
+      const p = await fetchBinancePositions(b);
       if (!cancelled) setPositions(p);
     };
 
@@ -313,7 +313,7 @@ export function useBinanceLiveFeed({
     const [st, d, p] = await Promise.all([
       fetchStatusAccount(b),
       fetchBinanceDeals(b, 100),
-      fetchBinancePositions(b, sym),
+      fetchBinancePositions(b),
     ]);
     if (st.account) setAccount(st.account);
     else if (!st.connected) setAccount(null);

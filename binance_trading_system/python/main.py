@@ -28,6 +28,7 @@ from momentum_scanner import MomentumScanner
 from scanner_stream import BinanceScannerStream
 from app_config import ensure_valid_or_exit, load_settings
 from logging_setup import setup_logging
+from session_store import clear_binance_session, load_binance_session, save_binance_session
 
 _settings = load_settings()
 setup_logging(_settings.log_dir, os.environ.get("LOG_LEVEL", "INFO"))
@@ -37,14 +38,14 @@ log.info("Bilshenz env=%s paper=%s testnet=%s", _settings.env, _settings.paper, 
 BRIDGE_TOKEN = _settings.bridge_token or os.environ.get("BRIDGE_TOKEN", "").strip()
 _PUBLIC_PATHS = frozenset({"/health", "/ping", "/docs", "/openapi.json"})
 # Unsigned Binance market data — safe without bridge token (home M30 feed).
-_PUBLIC_QUOTE_PREFIXES = ("/api/tick/", "/api/bars/", "/api/symbol/", "/api/scanner/")
+_PUBLIC_QUOTE_PREFIXES = ("/api/tick/", "/api/bars/", "/api/symbol/", "/api/scanner/", "/api/symbols")
 
 
 def _is_public_quote(path: str) -> bool:
     return any(path.startswith(p) for p in _PUBLIC_QUOTE_PREFIXES)
 _SENSITIVE_PATHS = frozenset({"/api/login", "/api/order", "/api/close", "/api/attach", "/api/logout", "/api/margin", "/api/scanner/close"})
 _rate_buckets: dict[str, list[float]] = defaultdict(list)
-_DEFAULT_SYMBOL = os.environ.get("BINANCE_SYMBOL", "XAUUSDT").upper()
+_DEFAULT_SYMBOL = (os.environ.get("BINANCE_SYMBOL") or "BTCUSDT").strip().upper()
 
 
 def _rate_ok(client_key: str, max_per_min: int = 20) -> bool:
@@ -180,7 +181,7 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 log.warning("scanner symbol load attempt %s: %s", attempt + 1, e)
             await asyncio.sleep(2.0 * (attempt + 1))
-        momentum_scanner.load_symbols(["BTCUSDT", "ETHUSDT", "XAUUSDT"])
+        momentum_scanner.load_symbols(["BTCUSDT", "ETHUSDT", "BNBUSDT"])
         log.warning("scanner using fallback symbol list (3)")
 
     async def refresh_24h_loop() -> None:
@@ -207,6 +208,53 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(load_scanner_symbols())
     asyncio.create_task(refresh_24h_loop())
     await scanner_stream.start()
+
+    async def restore_persisted_session() -> None:
+        if connector._connected:
+            return
+        if _truthy(os.environ.get("BINANCE_PAPER", "0")):
+            connector.cfg.paper = True
+            connector.configure(
+                os.environ.get("BINANCE_API_KEY", ""),
+                os.environ.get("BINANCE_API_SECRET", ""),
+                connector.cfg.testnet,
+            )
+            if connector.status_snapshot().get("connected"):
+                log.info("Binance paper session restored from env")
+                _flush_scanner_snapshot()
+            return
+        stored = await asyncio.to_thread(load_binance_session)
+        if stored:
+            try:
+                acct, err = await asyncio.to_thread(
+                    _attempt_binance_login,
+                    stored["api_key"],
+                    stored["api_secret"],
+                    bool(stored.get("testnet", True)),
+                )
+                if acct is not None:
+                    log.info("Binance session restored from persisted credentials")
+                    _flush_scanner_snapshot()
+                    return
+                log.warning("persisted Binance session invalid: %s", err)
+                await asyncio.to_thread(clear_binance_session)
+            except Exception as e:
+                log.warning("persisted session restore failed: %s", e)
+        # Fall back to env keys when no persisted session
+        env_key = os.environ.get("BINANCE_API_KEY", "").strip()
+        env_secret = os.environ.get("BINANCE_API_SECRET", "").strip()
+        if env_key and env_secret:
+            try:
+                acct, err = await asyncio.to_thread(
+                    _attempt_binance_login, env_key, env_secret, connector.cfg.testnet
+                )
+                if acct is not None:
+                    log.info("Binance session restored from env credentials")
+                    _flush_scanner_snapshot()
+            except Exception as e:
+                log.warning("env session restore failed: %s", e)
+
+    await restore_persisted_session()
     try:
         snap = connector.status_snapshot(skip_ping=False)
         if snap.get("connected"):
@@ -509,6 +557,7 @@ def api_login(body: LoginBody):
         )
 
     threading.Thread(target=connector.warm_order_cache, daemon=True).start()
+    save_binance_session(body.api_key, body.api_secret, resolved_testnet)
 
     def _post_login_seed() -> None:
         try:
@@ -576,9 +625,38 @@ def api_logout():
     connector.cfg.paper = _truthy(os.environ.get("BINANCE_PAPER", "0"))
     connector.configure("", "", prev_testnet)
     connector._connected = False
+    clear_binance_session()
     momentum_scanner.invalidate_session_cache()
     _flush_scanner_snapshot()
     return {"ok": True}
+
+
+@app.get("/api/symbols")
+def api_symbols(refresh: bool = False):
+    """All TRADING USDT-M perpetual symbols from Binance exchangeInfo."""
+    try:
+        syms = connector.list_usdt_perpetual_symbols() if not refresh else connector.list_usdt_perpetual_symbols()
+        return {"ok": True, "symbols": syms, "count": len(syms)}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e)[:200]) from e
+
+
+@app.get("/api/symbols/{symbol}/validate")
+def api_validate_symbol(symbol: str):
+    sym = symbol.upper().strip()
+    if not sym.endswith("USDT"):
+        return {"ok": False, "symbol": sym, "valid": False, "reason": "not_usdt_quote"}
+    try:
+        eligible = connector.list_usdt_perpetual_symbols()
+        valid = sym in eligible
+        return {
+            "ok": True,
+            "symbol": sym,
+            "valid": valid,
+            "reason": None if valid else "not_listed_or_not_trading",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e)[:200]) from e
 
 
 @app.get("/api/status")

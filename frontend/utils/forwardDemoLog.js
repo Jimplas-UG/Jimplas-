@@ -17,7 +17,7 @@ export async function logForwardDemoEvent(event) {
       body: JSON.stringify({
         ts: new Date(now).toISOString(),
         tsMs: now,
-        symbol: 'XAUUSDT',
+        symbol: 'BTCUSDT',
         ...event,
       }),
     });

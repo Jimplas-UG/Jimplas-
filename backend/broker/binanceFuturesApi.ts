@@ -53,7 +53,7 @@ export async function postBinanceAttach(apiBaseUrl: string, timeoutMs = 15000): 
 
 export async function fetchBinanceSymbolSpec(
   apiBaseUrl: string,
-  symbol = 'XAUUSDT',
+  symbol = 'BTCUSDT',
   pipSize = 0.1,
 ): Promise<BinanceSymbolSpec | null> {
   const b = base(apiBaseUrl);
@@ -94,7 +94,7 @@ export async function fetchBinanceTick(apiBaseUrl: string, symbol = 'XAUUSDT'): 
 
 export async function fetchBinanceBarsM30(
   apiBaseUrl: string,
-  symbol = 'XAUUSDT',
+  symbol = 'BTCUSDT',
   count = 320,
 ): Promise<BinanceBar[]> {
   const b = base(apiBaseUrl);

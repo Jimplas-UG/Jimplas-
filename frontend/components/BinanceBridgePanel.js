@@ -14,7 +14,7 @@ import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { PilotCard } from './pilot/PilotUI';
 import StaticHexLogo from './logo/StaticHexLogo';
 import ErrorState from './ui/ErrorState';
-import { TRADING_SYMBOL } from '../lib/tradingSymbol';
+import { DEFAULT_CHART_SYMBOL, formatPairLabel } from '../lib/futuresSymbol';
 import {
   binanceFetch,
   fetchBinancePositions,
@@ -139,8 +139,8 @@ export default function BinanceBridgePanel() {
     if (!b) return;
     try {
       const [tkRes, pos] = await Promise.all([
-        binanceFetch(b, `/api/tick/${TRADING_SYMBOL}`, {}, 5000),
-        fetchBinancePositions(b, TRADING_SYMBOL),
+        binanceFetch(b, `/api/tick/${DEFAULT_CHART_SYMBOL}`, {}, 5000),
+        fetchBinancePositions(b),
       ]);
       if (tkRes.ok) setTick(await tkRes.json());
       setPositions(pos);
@@ -188,10 +188,10 @@ export default function BinanceBridgePanel() {
       }
       if (!session.ok && !account) return;
 
-      const tkRes = await binanceFetch(b, `/api/tick/${TRADING_SYMBOL}`, {}, 10000);
+      const tkRes = await binanceFetch(b, `/api/tick/${DEFAULT_CHART_SYMBOL}`, {}, 10000);
       if (tkRes.ok) setTick(await tkRes.json());
 
-      const pos = await fetchBinancePositions(b, TRADING_SYMBOL);
+      const pos = await fetchBinancePositions(b);
       setPositions(pos);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -331,7 +331,7 @@ export default function BinanceBridgePanel() {
           if (!cancelled) setFeedLive(false);
           return;
         }
-        const tkRes = await binanceFetch(b, `/api/tick/${TRADING_SYMBOL}`, {}, 8000);
+        const tkRes = await binanceFetch(b, `/api/tick/${DEFAULT_CHART_SYMBOL}`, {}, 8000);
         if (!cancelled) {
           setFeedLive(tkRes.ok);
           if (tkRes.ok) setTick(await tkRes.json());
@@ -502,7 +502,8 @@ export default function BinanceBridgePanel() {
             <Text style={[st.bannerStatus, { color: statusColor }]}>{statusText}</Text>
             {(sessionLive || feedLive) && tick ? (
               <Text style={[st.bannerSub, { color: C.dim }]}>
-                {TRADING_SYMBOL} {(tick.bid + tick.ask) / 2} · spread {spreadPips}p
+                {formatPairLabel(DEFAULT_CHART_SYMBOL)} {(tick.bid + tick.ask) / 2} · spread {spreadPips}p
+                {positions.length ? ` · ${positions.length} open position${positions.length === 1 ? '' : 's'}` : ''}
               </Text>
             ) : null}
           </View>
@@ -511,7 +512,7 @@ export default function BinanceBridgePanel() {
 
       <PilotCard style={{ padding: 12, marginBottom: 10 }}>
         {[
-          { ok: feedLive || sessionLive, label: 'Bridge & XAUUSDT quotes' },
+          { ok: feedLive || sessionLive, label: 'Bridge & live futures quotes' },
           { ok: sessionLive, label: 'Futures API logged in' },
           { ok: sessionLive && sessionReady, label: 'Ready to send orders' },
         ].map((step) => (

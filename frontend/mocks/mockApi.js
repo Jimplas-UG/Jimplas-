@@ -125,12 +125,12 @@ export function mockBinanceStatus() {
 }
 
 
-export function mockBars(symbol = 'XAUUSDT', count = 320) {
+export function mockBars(symbol = 'BTCUSDT', count = 320) {
   const bars = buildSyntheticMarketBundle({ count, anchorClose: symbol.includes('DXY') ? 99.4 : 2654.2 }).m30;
   return { symbol, timeframe: 'M30', bars };
 }
 
-export function mockTick(symbol = 'XAUUSDT') {
+export function mockTick(symbol = 'BTCUSDT') {
   const mid = 2654.2;
   return { symbol, bid: mid - 0.15, ask: mid + 0.15, time: Date.now() };
 }
@@ -144,7 +144,7 @@ export function mockPositions() {
     positions: [
       {
         ticket: 1001,
-        symbol: 'XAUUSDT',
+        symbol: 'BTCUSDT',
         type: 'BUY',
         volume: 0.05,
         price_open: 2648.5,
@@ -199,12 +199,12 @@ export function tryMockFetch(url, init = {}) {
     return jsonResponse(mockBinanceStatus());
   }
   if (u.includes('/api/bars/')) {
-    const sym = decodeURIComponent(u.split('/api/bars/')[1]?.split('?')[0] || 'XAUUSDT');
+    const sym = decodeURIComponent(u.split('/api/bars/')[1]?.split('?')[0] || 'BTCUSDT');
     const count = parseInt(new URL(u, 'http://x').searchParams.get('count') || '320', 10);
     return jsonResponse(mockBars(sym, count));
   }
   if (u.includes('/api/tick/')) {
-    const sym = decodeURIComponent(u.split('/api/tick/')[1]?.split('?')[0] || 'XAUUSDT');
+    const sym = decodeURIComponent(u.split('/api/tick/')[1]?.split('?')[0] || 'BTCUSDT');
     return jsonResponse(mockTick(sym));
   }
   if (u.includes('/api/positions')) {
@@ -215,7 +215,7 @@ export function tryMockFetch(url, init = {}) {
     logMock('/api/close', 'closed');
     return jsonResponse({
       ok: true,
-      closed: [{ symbol: 'XAUUSDT', side: 'BUY', volume: 0.05, fill_price: 2654.35, profit: 285.5 }],
+      closed: [{ symbol: 'BTCUSDT', side: 'BUY', volume: 0.05, fill_price: 2654.35, profit: 285.5 }],
       broker: 'mock',
     });
   }
@@ -227,7 +227,7 @@ export function tryMockFetch(url, init = {}) {
       mockMarginType = 'ISOLATED';
     }
     logMock('/api/margin', mockMarginType);
-    return jsonResponse({ ok: true, margin_type: mockMarginType, symbol: 'XAUUSDT' });
+    return jsonResponse({ ok: true, margin_type: mockMarginType, symbol: 'BTCUSDT' });
   }
   if (u.includes('/api/order') && method === 'POST') {
     let side = 'BUY';

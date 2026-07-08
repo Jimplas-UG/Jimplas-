@@ -78,12 +78,6 @@ export function BinanceBridgeProvider({ children }) {
       const session = await fetchBinanceSession(url, SESSION_TIMEOUT_MS, 0);
       if (cancelled) return;
       if (session.ok) {
-        const creds = await loadStoredBinanceCredentials();
-        const mode = getBrokerMode();
-        if (mode !== 'paper' && !hasBinanceCredentials(creds)) {
-          await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '0');
-          return;
-        }
         setSessionExec(execFromBridgeSession(session));
         setConnected(true);
         setSessionEpoch((n) => n + 1);
@@ -91,15 +85,11 @@ export function BinanceBridgeProvider({ children }) {
         return;
       }
 
-      const hadSession = conn === '1';
       const creds = await loadStoredBinanceCredentials();
       const mode = getBrokerMode();
       const canLogin = mode === 'paper' || hasBinanceCredentials(creds);
-      const shouldRestore = canLogin && (hadSession || mode === 'paper');
-      if (!shouldRestore) {
-        if (hadSession && !canLogin) {
-          await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '0');
-        }
+      if (!canLogin) {
+        if (conn === '1') await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '0');
         return;
       }
 
@@ -200,8 +190,8 @@ export function BinanceBridgeProvider({ children }) {
       if (restored.hardFail) markConnected(false);
       /* transient failure — stay connected, retry on next tick */
     };
-    const boot = setTimeout(tick, 60000);
-    const id = setInterval(tick, 60000);
+    const boot = setTimeout(tick, 3000);
+    const id = setInterval(tick, 30000);
     return () => {
       cancelled = true;
       clearTimeout(boot);

@@ -62,7 +62,7 @@ const BROKER_LABEL = BROKER_MODE === 'paper' ? 'Binance paper' : 'Binance';
 const BINANCE_API = (process.env.BINANCE_API_URL ?? 'http://127.0.0.1:8766').replace(/\/$/, '');
 const BROKER_API = BINANCE_API;
 const BRIDGE_TOKEN = (process.env.BRIDGE_TOKEN ?? '').trim();
-const SYMBOL = process.env.BINANCE_SYMBOL?.trim() || 'XAUUSDT';
+const MAX_FORWARD_SYMBOLS = Math.max(1, parseInt(process.env.FORWARD_MAX_SYMBOLS ?? '40', 10) || 40);
 const M30_MS = 30 * 60 * 1000;
 const WARMUP_BARS = 200;
 const RISK_PCT = Math.max(0.0001, Math.min(0.05, Number(process.env.RISK_PCT ?? '0.005') || 0.005));
@@ -89,12 +89,51 @@ type SessionState = {
   startMs: number;
   endMs: number;
   lastClosedBarT: number | null;
+  lastClosedBarTBySymbol?: Record<string, number>;
+  symbolCursor?: number;
   lastEquitySnapMs: number;
   tradeCountToday: number;
   nyDay: string | null;
   server: string | null;
   dryRun: boolean;
 };
+
+let brokerSymbols: string[] = [];
+let brokerSymbolsLoadedAt = 0;
+
+async function fetchBrokerSymbols(): Promise<string[]> {
+  const now = Date.now();
+  if (brokerSymbols.length && now - brokerSymbolsLoadedAt < 3600_000) return brokerSymbols;
+  const envList = (process.env.FORWARD_SYMBOLS ?? process.env.BINANCE_SYMBOLS ?? '').trim();
+  if (envList && envList !== '*') {
+    brokerSymbols = envList.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+    brokerSymbolsLoadedAt = now;
+    return brokerSymbols;
+  }
+  const res = await brokerFetch('/api/symbols');
+  if (!res.ok) throw new Error(`${BROKER_LABEL} symbols HTTP ${res.status}`);
+  const j = (await res.json()) as { symbols?: string[] };
+  brokerSymbols = (j.symbols ?? []).slice(0, MAX_FORWARD_SYMBOLS);
+  brokerSymbolsLoadedAt = now;
+  return brokerSymbols;
+}
+
+function nextSymbol(session: SessionState, symbols: string[]): string | null {
+  if (!symbols.length) return null;
+  const idx = (session.symbolCursor ?? 0) % symbols.length;
+  session.symbolCursor = (idx + 1) % symbols.length;
+  return symbols[idx] ?? null;
+}
+
+function lastBarForSymbol(session: SessionState, symbol: string): number | null {
+  return session.lastClosedBarTBySymbol?.[symbol] ?? session.lastClosedBarT ?? null;
+}
+
+function setLastBarForSymbol(session: SessionState, symbol: string, barT: number): void {
+  if (!session.lastClosedBarTBySymbol) session.lastClosedBarTBySymbol = {};
+  session.lastClosedBarTBySymbol[symbol] = barT;
+  session.lastClosedBarT = barT;
+}
 
 function readArg(name: string, def: string): string {
   const a = process.argv.find((x) => x.startsWith(`--${name}=`));
@@ -113,11 +152,11 @@ function effectiveDryRun(safety: SafetyState): boolean {
   return false;
 }
 
-function orderIdempotencyKey(barT: number, side: string, setup: string): string {
-  return `${barT}:${side}:${setup}`;
+function orderIdempotencyKey(symbol: string, barT: number, side: string, setup: string): string {
+  return `${symbol}:${barT}:${side}:${setup}`;
 }
 
-async function brokerStatus(): Promise<{
+async function brokerStatus(symbol: string): Promise<{
   connected: boolean;
   trade_allowed: boolean;
   equity: number;
@@ -135,7 +174,7 @@ async function brokerStatus(): Promise<{
   let spreadPips = 3.08;
   let usdPerPip = 10;
   try {
-    const specRes = await brokerFetch(`/api/symbol/${encodeURIComponent(SYMBOL)}?pip_size=0.1`);
+    const specRes = await brokerFetch(`/api/symbol/${encodeURIComponent(symbol)}?pip_size=0.1`);
     if (specRes.ok) {
       const spec = (await specRes.json()) as { spread_pips?: number; usd_per_pip_per_lot?: number };
       if (spec.spread_pips) spreadPips = spec.spread_pips;
@@ -154,11 +193,11 @@ async function brokerStatus(): Promise<{
   };
 }
 
-async function fetchM30Bars(fromMs: number, toMs: number): Promise<Bar[]> {
-  const url = `/api/bars/${encodeURIComponent(SYMBOL)}?from_ms=${fromMs}&to_ms=${toMs}`;
+async function fetchM30Bars(symbol: string, fromMs: number, toMs: number): Promise<Bar[]> {
+  const url = `/api/bars/${encodeURIComponent(symbol)}?from_ms=${fromMs}&to_ms=${toMs}`;
   const res = await brokerFetch(url);
   if (!res.ok) {
-    const fallback = `/api/bars/${encodeURIComponent(SYMBOL)}?count=1500`;
+    const fallback = `/api/bars/${encodeURIComponent(symbol)}?count=1500`;
     const res2 = await brokerFetch(fallback);
     if (!res2.ok) throw new Error(`${BROKER_LABEL} bars ${res2.status}`);
     const j2 = (await res2.json()) as { bars?: Bar[] };
@@ -232,19 +271,20 @@ function lotsForRisk(equity: number, slPips: number, usdPerPip: number): number 
 }
 
 async function binanceQuantityForIntent(
+  symbol: string,
   equity: number,
   entry: number | null | undefined,
   sl: number | null | undefined,
   pipSize: number,
 ): Promise<number> {
   const riskUsd = equity * RISK_PCT;
-  const spec = await fetchBinanceSymbolSpec(BINANCE_API, SYMBOL, pipSize);
+  const spec = await fetchBinanceSymbolSpec(BINANCE_API, symbol, pipSize);
   if (!spec || entry == null || sl == null) return spec?.minQty ?? 0.001;
   const qty = quantityFromRiskUsd(riskUsd, entry, sl, spec);
   return qty > 0 ? qty : spec.minQty;
 }
 
-async function tickOnce(session: SessionState): Promise<void> {
+async function tickOnce(session: SessionState, symbol: string): Promise<void> {
   const now = Date.now();
   if (now >= session.endMs) {
     console.error('[forward-demo] 30-day window complete');
@@ -256,7 +296,7 @@ async function tickOnce(session: SessionState): Promise<void> {
 
   if (safety.failsafe) {
     try {
-      const probe = await brokerStatus();
+      const probe = await brokerStatus(symbol);
       if (probe.connected && probe.trade_allowed) {
         safety.failsafe = false;
         safety.failsafeReason = null;
@@ -279,7 +319,7 @@ async function tickOnce(session: SessionState): Promise<void> {
 
   let status: Awaited<ReturnType<typeof brokerStatus>>;
   try {
-    status = await brokerStatus();
+    status = await brokerStatus(symbol);
     if (!status.connected) {
       const reason = recordApiFailure(safety, `${BROKER_LABEL} not connected`);
       saveSafetyState(safety);
@@ -317,7 +357,7 @@ async function tickOnce(session: SessionState): Promise<void> {
   const fetchFrom = now - 90 * 86400000;
   let m30All: Bar[];
   try {
-    m30All = await fetchM30Bars(fetchFrom, now + M30_MS);
+    m30All = await fetchM30Bars(symbol, fetchFrom, now + M30_MS);
     recordApiSuccess(safety);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -332,7 +372,7 @@ async function tickOnce(session: SessionState): Promise<void> {
     return;
   }
   if (m30All.length < WARMUP_BARS + 5) {
-    console.error(`[forward-demo] Too few bars (${m30All.length})`);
+    console.error(`[forward-demo] ${symbol} too few bars (${m30All.length})`);
     saveSafetyState(safety);
     return;
   }
@@ -342,8 +382,9 @@ async function tickOnce(session: SessionState): Promise<void> {
   const signalIdx = cfg.signalOnClosedBarOnly !== false && n >= 2 ? n - 2 : n - 1;
   const bar = bundle.m30[signalIdx]!;
 
-  if (session.lastClosedBarT === bar.t) {
-    console.error(`[forward-demo] ${new Date().toISOString().slice(11, 19)} waiting for new M30 bar (last: ${new Date(bar.t).toISOString().slice(11, 16)})`);
+  const prevBarT = lastBarForSymbol(session, symbol);
+  if (prevBarT === bar.t) {
+    console.error(`[forward-demo] ${symbol} ${new Date().toISOString().slice(11, 19)} waiting for new M30 bar (last: ${new Date(bar.t).toISOString().slice(11, 16)})`);
     return;
   }
 
@@ -367,11 +408,11 @@ async function tickOnce(session: SessionState): Promise<void> {
   if (dailyLossBreached(safety, status.equity)) {
     logForwardMissed({ reason: 'daily loss limit', barTimeMs: bar.t });
     void publishTradeBlocked({
-      symbol: SYMBOL,
+      symbol,
       blockedBy: ['daily_loss_limit'],
     });
-    console.error(`[forward-demo] ${new Date(bar.t).toISOString()} blocked: daily loss limit`);
-    session.lastClosedBarT = bar.t;
+    console.error(`[forward-demo] ${symbol} ${new Date(bar.t).toISOString()} blocked: daily loss limit`);
+    setLastBarForSymbol(session, symbol, bar.t);
     saveJournal(journalRows);
     saveSession(session);
     saveSafetyState(safety);
@@ -394,7 +435,7 @@ async function tickOnce(session: SessionState): Promise<void> {
   const trade = snap.trade;
   const gate = canExecuteTrade(snap, trade);
 
-  session.lastClosedBarT = bar.t;
+  setLastBarForSymbol(session, symbol, bar.t);
   saveJournal(journalRows);
   saveSession(session);
   saveSafetyState(safety);
@@ -403,12 +444,12 @@ async function tickOnce(session: SessionState): Promise<void> {
     if (snap.signals?.anyBuy || snap.signals?.anySell) {
       logForwardMissed({ reason: gate.reason, barTimeMs: bar.t });
       void publishTradeBlocked({
-        symbol: SYMBOL,
+        symbol,
         direction: trade?.side === 'BUY' ? 'long' : trade?.side === 'SELL' ? 'short' : null,
         blockedBy: [gate.reason],
       });
     }
-    console.error(`[forward-demo] ${new Date(bar.t).toISOString()} blocked: ${gate.reason}`);
+    console.error(`[forward-demo] ${symbol} ${new Date(bar.t).toISOString()} blocked: ${gate.reason}`);
     return;
   }
 
@@ -416,7 +457,7 @@ async function tickOnce(session: SessionState): Promise<void> {
     barTimeMs: bar.t,
     runMode: 'live',
     trigger: 'auto',
-    symbol: SYMBOL,
+    symbol,
   });
   if (!intent) return;
 
@@ -438,10 +479,10 @@ async function tickOnce(session: SessionState): Promise<void> {
     intent.entry != null && intent.sl != null
       ? Math.abs(intent.entry - intent.sl) / cfg.pipSize
       : 20;
-  const volume = await binanceQuantityForIntent(status.equity, intent.entry, intent.sl, cfg.pipSize);
+  const volume = await binanceQuantityForIntent(symbol, status.equity, intent.entry, intent.sl, cfg.pipSize);
   const setup =
     intent.setup === 'P1' || intent.setup === 'P2' || intent.setup === 'P3' ? intent.setup : 'NONE';
-  const idemKey = orderIdempotencyKey(bar.t, intent.side, setup);
+  const idemKey = orderIdempotencyKey(symbol, bar.t, intent.side, setup);
 
   if (isDuplicateOrder(safety, bar.t, idemKey)) {
     logForwardMissed({ reason: 'duplicate order guard', barTimeMs: bar.t });
@@ -456,9 +497,7 @@ async function tickOnce(session: SessionState): Promise<void> {
       : envDryRunEnabled()
         ? 'FORWARD_DRY_RUN'
         : 'dry-run';
-    console.error(
-      `[forward-demo] DRY (${why}) ${intent.side} ${intent.setup} @ ${intent.entry?.toFixed(2)} vol=${volume} bar=${new Date(bar.t).toISOString()}`
-    );
+    console.error(`[forward-demo] ${symbol} DRY (${why}) ${intent.side} ${intent.setup} @ ${intent.entry?.toFixed(2)} vol=${volume} bar=${new Date(bar.t).toISOString()}`)
     session.tradeCountToday += 1;
     session.dryRun = true;
     saveSession(session);
@@ -473,7 +512,7 @@ async function tickOnce(session: SessionState): Promise<void> {
     binanceBaseUrl: BINANCE_API,
     binanceQuantity: volume,
     riskUsd,
-    symbol: SYMBOL,
+    symbol,
   });
 
   if (r.anyOk) {
@@ -502,9 +541,9 @@ async function tickOnce(session: SessionState): Promise<void> {
       { maxJournalRows: 5000 }
     );
     saveJournal(next.rows);
-    console.error(`[forward-demo] EXEC ${intent.side} ${intent.setup} vol=${volume} · ${r.summary}`);
+    console.error(`[forward-demo] EXEC ${symbol} ${intent.side} ${intent.setup} vol=${volume} · ${r.summary}`);
     void publishTradeExecuted({
-      symbol: SYMBOL,
+      symbol,
       direction: intent.side === 'BUY' ? 'long' : 'short',
       lotSize: volume,
       entryPrice: intent.entry ?? bar.c,
@@ -544,10 +583,22 @@ async function main() {
 
   let session = loadSession();
   const now = Date.now();
+  let symbols: string[] = [];
+  try {
+    symbols = await fetchBrokerSymbols();
+  } catch (e) {
+    console.error(`[forward-demo] symbol list failed: ${e instanceof Error ? e.message : e}`);
+    process.exit(1);
+  }
+  if (!symbols.length) {
+    console.error('[forward-demo] no eligible USDT-M perpetual symbols');
+    process.exit(1);
+  }
+
   if (!session || now >= session.endMs) {
     const startMs = now;
     const endMs = startMs + DAYS * 86400000;
-    const st = await brokerStatus();
+    const st = await brokerStatus(symbols[0]!);
     if (!st.connected) {
       console.error('Start Binance bridge: cd binance_trading_system/python && .\\start-api.ps1');
       if (BROKER_MODE === 'paper') console.error('  Set BINANCE_PAPER=1 for simulated fills');
@@ -559,6 +610,8 @@ async function main() {
       startMs,
       endMs,
       lastClosedBarT: null,
+      lastClosedBarTBySymbol: {},
+      symbolCursor: 0,
       lastEquitySnapMs: 0,
       tradeCountToday: 0,
       nyDay: null,
@@ -570,10 +623,11 @@ async function main() {
     console.error(`[forward-demo] Session started → ${session.endsAt}`);
     console.error(`[forward-demo] Server: ${st.server} · equity $${st.equity.toFixed(2)}`);
     console.error(`[forward-demo] Log: ${forwardDemoLogPath()}`);
-    console.error(`[forward-demo] Broker: ${BROKER_LABEL} · symbol ${SYMBOL}`);
+    console.error(`[forward-demo] Broker: ${BROKER_LABEL} · ${symbols.length} USDT-M symbols (max ${MAX_FORWARD_SYMBOLS})`);
     if (isDry) console.error(`[forward-demo] DRY-RUN — no ${BROKER_LABEL} orders`);
   } else {
     session.dryRun = isDry;
+    if (!session.lastClosedBarTBySymbol) session.lastClosedBarTBySymbol = {};
     saveSession(session);
     console.error(`[forward-demo] Resuming session → ${session.endsAt}`);
   }
@@ -590,7 +644,16 @@ async function main() {
   const runTick = async () => {
     const s = loadSession();
     if (!s) return;
-    await tickOnce(s);
+    let syms = symbols;
+    try {
+      if (Date.now() - brokerSymbolsLoadedAt > 3600_000) syms = await fetchBrokerSymbols();
+    } catch {
+      /* keep last list */
+    }
+    const sym = nextSymbol(s, syms);
+    if (!sym) return;
+    await tickOnce(s, sym);
+    saveSession(s);
   };
 
   await runTick();

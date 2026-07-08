@@ -5,7 +5,7 @@ import { useRiskDesk } from './useRiskDesk';
 import { postBinanceMarginMode } from '../broker/binanceFuturesApi';
 import { syncScannerBridgeState } from '../lib/scannerRiskSync';
 import { defaultSymbolForBroker } from '../lib/brokerMode';
-import { TRADING_SYMBOL } from '../lib/tradingSymbol';
+import { DEFAULT_CHART_SYMBOL } from '../lib/futuresSymbol';
 import { resolveAccountEquity } from '../utils/riskSizing';
 import { SIM_DESK_EQUITY } from '../security/deskConstants';
 
@@ -70,7 +70,7 @@ export function useDeskSession() {
       riskDesk.updateConfig({ marginMode: next });
       if (!useBrokerSession || !baseUrl) return;
       const r = await postBinanceMarginMode(baseUrl, {
-        symbol: brokerFeed.resolvedSymbol || TRADING_SYMBOL,
+        symbol: brokerFeed.resolvedSymbol || DEFAULT_CHART_SYMBOL,
         marginType: next,
       });
       if (r.ok) {

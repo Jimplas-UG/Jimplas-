@@ -1,4 +1,4 @@
-import { TRADING_SYMBOL } from './tradingSymbol';
+import { DEFAULT_CHART_SYMBOL } from './futuresSymbol';
 
 /** Binance Futures — live keys or paper simulator. */
 export function getBrokerMode() {
@@ -16,5 +16,5 @@ export function isBinanceBroker() {
 }
 
 export function defaultSymbolForBroker() {
-  return TRADING_SYMBOL;
+  return DEFAULT_CHART_SYMBOL;
 }

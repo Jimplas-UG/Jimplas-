@@ -43,7 +43,7 @@ class BinanceTickStream:
     def __init__(
         self,
         get_testnet: Callable[[], bool],
-        default_symbol: str = "XAUUSDT",
+        default_symbol: str = "BTCUSDT",
     ) -> None:
         self._get_testnet = get_testnet
         self._symbols: set[str] = {default_symbol.upper()}

@@ -36,7 +36,7 @@ class BinanceConfig:
     api_key: str = ""
     api_secret: str = ""
     testnet: bool = True
-    symbol: str = "XAUUSDT"
+    symbol: str = ""
     leverage: int = 10
     margin_type: str = "ISOLATED"
     paper: bool = False
@@ -991,7 +991,7 @@ def config_from_env() -> BinanceConfig:
         api_key=os.environ.get("BINANCE_API_KEY", ""),
         api_secret=os.environ.get("BINANCE_API_SECRET", ""),
         testnet=_truthy(os.environ.get("BINANCE_TESTNET", "1")),
-        symbol=os.environ.get("BINANCE_SYMBOL", "XAUUSDT").upper(),
+        symbol=os.environ.get("BINANCE_SYMBOL", "BTCUSDT").upper() or "BTCUSDT",
         leverage=int(os.environ.get("BINANCE_LEVERAGE", "10")),
         margin_type=os.environ.get("BINANCE_MARGIN_TYPE", "ISOLATED").upper(),
         paper=_truthy(os.environ.get("BINANCE_PAPER", "0")),

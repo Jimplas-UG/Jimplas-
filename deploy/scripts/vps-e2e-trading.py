@@ -35,7 +35,9 @@ PRODUCTION_MODE=1
 PRODUCTION_NO_EXPIRY=1
 BROKER_MODE=binance
 BINANCE_API_URL=http://127.0.0.1:8766
-BINANCE_SYMBOL=XAUUSDT
+BINANCE_SYMBOL=BTCUSDT
+FORWARD_SYMBOLS=*
+FORWARD_MAX_SYMBOLS=40
 FORWARD_DRY_RUN=0
 FORWARD_POLL_SEC=45
 RISK_PCT=0.005
@@ -53,7 +55,8 @@ DESK_KEY=$(grep '^DESK_API_KEY=' /etc/bilshenz.env | cut -d= -f2- || true)
 if [[ -n "$DESK_KEY" ]]; then
   grep -q '^DESK_API_KEY=' /etc/tradingbot.env && sed -i "s|^DESK_API_KEY=.*|DESK_API_KEY=$DESK_KEY|" /etc/tradingbot.env || echo "DESK_API_KEY=$DESK_KEY" >> /etc/tradingbot.env
 fi
-mkdir -p /var/log/tradingbot
+mkdir -p /var/lib/bilshenz /var/log/tradingbot
+grep -q '^BINANCE_SESSION_FILE=' /etc/bilshenz.env || echo 'BINANCE_SESSION_FILE=/var/lib/bilshenz/binance-session.json' >> /etc/bilshenz.env
 cd /opt/bilshenz/backend
 # Refresh freeze fingerprints only (does not change entry/exit parameters)
 cd /opt/bilshenz/backend

@@ -1,5 +1,2 @@
-/** Canonical gold perpetual symbol — Binance USD-M Futures. */
-export const TRADING_SYMBOL = 'XAUUSDT';
-
-/** Display label for headers and compact price strips. */
-export const TRADING_PAIR_LABEL = 'XAU/USDT';
+/** @deprecated Import from futuresSymbol.js */
+export { DEFAULT_CHART_SYMBOL, TRADING_SYMBOL, TRADING_PAIR_LABEL, formatPairLabel, normalizeFuturesSymbol, isValidFuturesSymbol, baseAsset } from './futuresSymbol';

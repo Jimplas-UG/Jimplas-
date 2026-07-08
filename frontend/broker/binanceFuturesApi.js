@@ -1,5 +1,5 @@
 import { getDeskApiUrl } from '../lib/envConfig';
-import { TRADING_SYMBOL } from '../lib/tradingSymbol';
+import { DEFAULT_CHART_SYMBOL, formatPairLabel, normalizeFuturesSymbol } from '../lib/futuresSymbol';
 import { getDefaultBinanceBridgeUrl, binanceBridgeUrlCandidates } from '../utils/binanceApiUrl';
 
 function trimSnippet(s, max = 400) {
@@ -189,7 +189,33 @@ export async function postBinanceLogin(apiBaseUrl, body, timeoutMs = 45000) {
   }
 }
 
-export async function fetchBinanceSymbolSpec(apiBaseUrl, symbol = TRADING_SYMBOL, pipSize = 0.1) {
+export async function fetchBinanceSymbols(apiBaseUrl, { refresh = false } = {}) {
+  const b = base(apiBaseUrl);
+  try {
+    const qs = refresh ? '?refresh=1' : '';
+    const res = await binanceFetch(b, `/api/symbols${qs}`, {}, 30000);
+    if (!res.ok) return [];
+    const j = await res.json();
+    return Array.isArray(j.symbols) ? j.symbols : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function validateFuturesSymbol(apiBaseUrl, symbol) {
+  const sym = normalizeFuturesSymbol(symbol);
+  if (!sym) return { valid: false, symbol: sym, reason: 'empty' };
+  const b = base(apiBaseUrl);
+  try {
+    const res = await binanceFetch(b, `/api/symbols/${encodeURIComponent(sym)}/validate`, {}, 15000);
+    if (!res.ok) return { valid: false, symbol: sym, reason: `http_${res.status}` };
+    return await res.json();
+  } catch {
+    return { valid: false, symbol: sym, reason: 'network' };
+  }
+}
+
+export async function fetchBinanceSymbolSpec(apiBaseUrl, symbol = DEFAULT_CHART_SYMBOL, pipSize = 0.1) {
   const b = base(apiBaseUrl);
   try {
     const res = await binanceFetch(b, `/api/symbol/${encodeURIComponent(symbol)}?pip_size=${pipSize}`);
@@ -208,7 +234,7 @@ export async function fetchBinanceSymbolSpec(apiBaseUrl, symbol = TRADING_SYMBOL
   }
 }
 
-export async function fetchBinanceTick(apiBaseUrl, symbol = TRADING_SYMBOL) {
+export async function fetchBinanceTick(apiBaseUrl, symbol = DEFAULT_CHART_SYMBOL) {
   const b = base(apiBaseUrl);
   try {
     const res = await binanceFetch(b, `/api/tick/${encodeURIComponent(symbol)}`);
@@ -246,7 +272,7 @@ export async function fetchBinancePositions(apiBaseUrl, symbol) {
 
 export async function fetchBinanceBarsM30(
   apiBaseUrl,
-  symbol = TRADING_SYMBOL,
+  symbol = DEFAULT_CHART_SYMBOL,
   count = 320,
   timeoutMs,
   { retries = 3 } = {},
@@ -350,7 +376,7 @@ function firstReachableBridge(urls, timeoutMs) {
 }
 
 /** Pick first bridge URL that responds to /health — cached + preferred URL first. */
-export async function pickReachableBinanceBridgeUrl(preferred = '', _symbol = TRADING_SYMBOL) {
+export async function pickReachableBinanceBridgeUrl(preferred = '', _symbol = DEFAULT_CHART_SYMBOL) {
   const pref = String(preferred || '').trim().replace(/\/$/, '');
 
   if (cachedBridgeUrl) {
@@ -378,7 +404,7 @@ export function rememberBridgeUrl(url) {
   if (u) cachedBridgeUrl = u;
 }
 
-export async function postBinanceClosePosition(apiBaseUrl, { symbol = TRADING_SYMBOL, volume } = {}) {
+export async function postBinanceClosePosition(apiBaseUrl, { symbol = DEFAULT_CHART_SYMBOL, volume } = {}) {
   const b = base(apiBaseUrl);
   const connected = await fetchBinanceConnected(b);
   if (!connected) {
@@ -427,7 +453,7 @@ export async function postBinanceOrderFromIntent(intent, opts) {
   if (!connected) {
     return { ok: false, status: 0, bodySnippet: 'Binance API not connected', connected: false };
   }
-  const sym = opts.symbol ?? intent.symbol ?? TRADING_SYMBOL;
+  const sym = opts.symbol ?? intent.symbol ?? DEFAULT_CHART_SYMBOL;
   const body = {
     symbol: sym,
     side,
@@ -474,7 +500,7 @@ export async function postBinanceOrderFromIntent(intent, opts) {
 }
 
 /** Poll order fill status after market order (reconciliation). */
-export async function postBinanceMarginMode(apiBaseUrl, { symbol = TRADING_SYMBOL, marginType = 'ISOLATED' } = {}) {
+export async function postBinanceMarginMode(apiBaseUrl, { symbol = DEFAULT_CHART_SYMBOL, marginType = 'ISOLATED' } = {}) {
   const b = base(apiBaseUrl);
   const connected = await fetchBinanceConnected(b);
   if (!connected) {
@@ -516,7 +542,7 @@ export async function postBinanceMarginMode(apiBaseUrl, { symbol = TRADING_SYMBO
   }
 }
 
-export async function fetchBinanceOrderStatus(apiBaseUrl, orderId, symbol = TRADING_SYMBOL, timeoutMs = 15000) {
+export async function fetchBinanceOrderStatus(apiBaseUrl, orderId, symbol = DEFAULT_CHART_SYMBOL, timeoutMs = 15000) {
   const b = base(apiBaseUrl);
   try {
     const res = await binanceFetch(

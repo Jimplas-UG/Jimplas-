@@ -81,7 +81,7 @@ export function mapBinanceDealsToHistRows(deals) {
       outcome = 'OPEN';
       kind = 'open';
     }
-    return [timeStr, dir, 'BZX', priceStr, volStr, d.symbol ?? 'XAUUSDT', resultStr, outcome, side, kind];
+    return [timeStr, dir, 'BZX', priceStr, volStr, d.symbol ?? 'BTCUSDT', resultStr, outcome, side, kind];
   });
 }
 
