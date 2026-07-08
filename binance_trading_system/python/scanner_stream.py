@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 import websockets
@@ -20,6 +21,8 @@ MAINNET_WS = "wss://fstream.binance.com/ws"
 TESTNET_WS = "wss://stream.binancefuture.com/ws"
 RECONNECT_MIN_SEC = 1.0
 RECONNECT_MAX_SEC = 30.0
+# Offload on_tick so asyncio can answer Binance WS keepalive pings (prevents 1011 timeouts).
+_TICK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scanner-tick")
 
 
 def _parse_mini_ticker(msg: dict[str, Any]) -> tuple[str, float, int, float | None] | None:
@@ -167,15 +170,32 @@ class BinanceScannerStream:
             await asyncio.sleep(backoff)
             backoff = min(RECONNECT_MAX_SEC, backoff * 1.8)
 
+    def _dispatch_ticks(self, items: list[tuple[str, float, int, float | None]]) -> None:
+        """Runs in a worker thread — must not touch asyncio objects directly."""
+        for sym, price, ts, pct_24h in items:
+            try:
+                self._on_tick(sym, price, ts, pct_24h)
+            except Exception as e:
+                log.debug("on_tick %s: %s", sym, e)
+
     async def _connect_and_listen(self) -> None:
         testnet = self._get_testnet()
         base = TESTNET_WS if testnet else MAINNET_WS
         url = f"{base}/!miniTicker@arr"
         log.info("connecting scanner WS %s testnet=%s", url, testnet)
-        async with websockets.connect(url, ping_interval=20, ping_timeout=30, close_timeout=5) as ws:
+        # Longer ping timeout: under load the loop must still answer keepalives.
+        async with websockets.connect(
+            url,
+            ping_interval=15,
+            ping_timeout=60,
+            close_timeout=5,
+            max_queue=32,
+        ) as ws:
             self._ws_connected = True
             self._last_error = None
             log.info("scanner WS connected")
+            loop = asyncio.get_running_loop()
+            pending: asyncio.Future | None = None
             async for raw in ws:
                 if not self._running:
                     break
@@ -183,16 +203,19 @@ class BinanceScannerStream:
                     payload = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                items = payload if isinstance(payload, list) else [payload]
-                for item in items:
+                raw_items = payload if isinstance(payload, list) else [payload]
+                batch: list[tuple[str, float, int, float | None]] = []
+                for item in raw_items:
                     if not isinstance(item, dict):
                         continue
                     parsed = _parse_mini_ticker(item)
                     if not parsed:
                         continue
-                    sym, price, ts, pct_24h = parsed
+                    batch.append(parsed)
                     self._tick_count += 1
-                    try:
-                        self._on_tick(sym, price, ts, pct_24h)
-                    except Exception as e:
-                        log.debug("on_tick %s: %s", sym, e)
+                if not batch:
+                    continue
+                # Drop previous batch if worker is still busy — prefer latest prices over backlog.
+                if pending is not None and not pending.done():
+                    continue
+                pending = loop.run_in_executor(_TICK_EXECUTOR, self._dispatch_ticks, batch)

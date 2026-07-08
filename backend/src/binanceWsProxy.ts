@@ -21,12 +21,13 @@ function wsAuthOk(req: IncomingMessage, url: URL): boolean {
 
 function upstreamWsUrl(pathname: string, search: string): string {
   const rest = pathname.replace(/^\/v1\/binance/, '') || '/';
-  let url = `${BINANCE_WS}${rest}${search}`;
-  if (BRIDGE_TOKEN && !url.includes('token=')) {
-    const sep = url.includes('?') ? '&' : '?';
-    url = `${url}${sep}token=${encodeURIComponent(BRIDGE_TOKEN)}`;
-  }
-  return url;
+  // Client auth is DESK_API_KEY; Python bridge expects BRIDGE_TOKEN.
+  // Always strip client token and inject bridge token so WS upgrades never 403.
+  const incoming = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
+  incoming.delete('token');
+  if (BRIDGE_TOKEN) incoming.set('token', BRIDGE_TOKEN);
+  const qs = incoming.toString();
+  return `${BINANCE_WS}${rest}${qs ? `?${qs}` : ''}`;
 }
 
 export function attachBinanceWebSocketProxy(

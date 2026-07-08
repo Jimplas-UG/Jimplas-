@@ -20,8 +20,8 @@ export const STORAGE_BINANCE_SECRET = '@bilshenz_v1/binanceApiSecret';
 export const STORAGE_BINANCE_TESTNET = '@bilshenz_v1/binanceTestnet';
 const MIGRATION_FLAG = '@bilshenz_v1/binanceSecureMigrated';
 
-const CONNECT_TIMEOUT_MS = 12000;
-const FAST_LOGIN_TIMEOUT_MS = 7000;
+const CONNECT_TIMEOUT_MS = 45000;
+const FAST_LOGIN_TIMEOUT_MS = 35000;
 
 const SECURE_KEYS = {
   apiKey: 'bilshenz.binance.apiKey',
@@ -164,7 +164,8 @@ export async function connectBinanceBridge({
     return { ok: false, url: baseUrl, error: 'Cannot reach Binance bridge' };
   }
 
-  const loginTimeout = fast ? FAST_LOGIN_TIMEOUT_MS : timeoutMs;
+  // Login does time sync + account verify (+ optional env auto-detect). Never use sub‑10s.
+  const loginTimeout = Math.max(timeoutMs || CONNECT_TIMEOUT_MS, FAST_LOGIN_TIMEOUT_MS);
 
   if (clearSession) {
     void binanceFetch(url, '/api/logout', { method: 'POST' }, 2000).catch(() => {});
@@ -186,15 +187,26 @@ export async function connectBinanceBridge({
       return { ok: false, url, error: 'Enter API key and secret' };
     }
 
-    const attempt = autoDetectEnv
+    let attempt = autoDetectEnv
       ? await loginOnce(url, key, secret, testnet, loginTimeout, true)
       : await loginOnce(url, key, secret, testnet, loginTimeout, false);
+
+    // One retry on transient abort/timeout (common on mobile networks).
+    if (!attempt.ok && isTransientBridgeError(attempt.detail)) {
+      await new Promise((r) => setTimeout(r, 800));
+      attempt = await loginOnce(url, key, secret, testnet, loginTimeout, autoDetectEnv);
+    }
+
     login = attempt;
     resolvedTestnet = attempt.testnet ?? testnet;
     autoDetected = !!attempt.auto_detected;
 
     if (!login.ok) {
-      return { ok: false, url, error: login.detail || 'Login failed', testnet: resolvedTestnet };
+      const raw = login.detail || 'Login failed';
+      const friendly = /abort/i.test(raw)
+        ? 'Connection timed out reaching Binance via VPS — tap Retry. Check Testnet vs Mainnet matches your key.'
+        : raw;
+      return { ok: false, url, error: friendly, testnet: resolvedTestnet };
     }
 
     void saveStoredBinanceCredentials(key, secret, resolvedTestnet);

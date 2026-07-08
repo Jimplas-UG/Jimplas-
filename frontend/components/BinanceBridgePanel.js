@@ -388,6 +388,7 @@ export default function BinanceBridgePanel() {
         apiSecret: secret,
         testnet,
         mode,
+        timeoutMs: 45000,
         autoDetectEnv: true,
         clearSession: false,
         fast: true,

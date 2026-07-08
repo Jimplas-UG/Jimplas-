@@ -791,7 +791,9 @@ class MomentumScanner:
         if not self._on_snapshot:
             return
         now = time.time()
-        if now - self._last_broadcast < 0.25:
+        # Throttle harder under miniTicker load so REST/login/WS ping stay responsive.
+        min_gap = 1.0
+        if now - self._last_broadcast < min_gap:
             return
         self._last_broadcast = now
         try:

@@ -317,25 +317,15 @@ def ping():
 
 @app.get("/health")
 def health():
+    """Lightweight liveness — never block on positions / heavy Binance calls."""
     import shutil
 
     mode = "paper" if connector.cfg.paper else ("testnet" if connector.cfg.testnet else "live")
-    st = connector.status_snapshot(skip_ping=True)
-    positions = []
-    try:
-        if st.get("connected"):
-            positions = connector.positions()
-    except Exception:
-        pass
+    connected = bool(getattr(connector, "_connected", False) and connector.cfg.api_key)
+    if connector.cfg.paper:
+        connected = True
     disk = shutil.disk_usage("/")
     mem: dict = {}
-    try:
-        import resource
-
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        mem = {"rss_mb": round(usage.ru_maxrss / 1024, 1)}
-    except Exception:
-        pass
     try:
         import psutil  # optional
 
@@ -359,9 +349,9 @@ def health():
         "service": "bilshenz-binance-bridge",
         "env": _settings.env,
         "mode": mode,
-        "connected": bool(st.get("connected")),
-        "hedge_mode": connector.is_hedge_mode() if st.get("connected") else None,
-        "open_positions": len(positions),
+        "connected": connected,
+        "hedge_mode": None,
+        "open_positions": None,
         "binance_latency_ms": latency_ms,
         "disk_free_gb": round(disk.free / 1024**3, 2),
         "memory": mem,
@@ -441,6 +431,7 @@ async def ws_scanner(websocket: WebSocket):
 
 
 def _attempt_binance_login(api_key: str, api_secret: str, testnet: bool) -> tuple[dict[str, Any] | None, str | None]:
+    t0 = time.perf_counter()
     connector.cfg.paper = False
     connector.configure(api_key, api_secret, testnet)
     try:
@@ -448,17 +439,36 @@ def _attempt_binance_login(api_key: str, api_secret: str, testnet: bool) -> tupl
         connector._connected = acct is not None
         if acct is not None:
             momentum_scanner.invalidate_session_cache()
+            log.info(
+                "login ok env=%s latency_ms=%.0f bal=%s",
+                "testnet" if testnet else "mainnet",
+                (time.perf_counter() - t0) * 1000,
+                (acct or {}).get("balance"),
+            )
         return acct, None
     except Exception as e:
         connector._connected = False
+        log.warning(
+            "login failed env=%s latency_ms=%.0f err=%s",
+            "testnet" if testnet else "mainnet",
+            (time.perf_counter() - t0) * 1000,
+            e,
+        )
         return None, str(e)
 
 
 @app.post("/api/login")
 def api_login(body: LoginBody):
     """Fast login — time sync + account verify; alt env in one request when enabled."""
+    t0 = time.perf_counter()
     resolved_testnet = bool(body.testnet)
     auto_detected = False
+    log.info(
+        "login attempt key=%s… testnet=%s auto_detect=%s",
+        (body.api_key or "")[:6],
+        resolved_testnet,
+        body.auto_detect_env,
+    )
     acct, err = _attempt_binance_login(body.api_key, body.api_secret, resolved_testnet)
 
     if acct is None and body.auto_detect_env and _is_key_env_mismatch(err or ""):
@@ -480,7 +490,6 @@ def api_login(body: LoginBody):
 
     def _post_login_seed() -> None:
         try:
-            # Prioritize symbols already on the watch/pending queue after connect.
             hot = [
                 c.symbol
                 for c in momentum_scanner._coins.values()
@@ -494,6 +503,12 @@ def api_login(body: LoginBody):
     threading.Thread(target=_post_login_seed, daemon=True).start()
     _flush_scanner_snapshot()
     st = momentum_scanner.status()
+    log.info(
+        "login success total_ms=%.0f can_execute=%s block=%s",
+        (time.perf_counter() - t0) * 1000,
+        st.get("can_execute"),
+        st.get("exec_block"),
+    )
     return {
         "ok": True,
         "account": acct,

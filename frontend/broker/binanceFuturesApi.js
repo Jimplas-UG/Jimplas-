@@ -144,7 +144,7 @@ export async function postBinanceAttach(apiBaseUrl, timeoutMs = 15000) {
   }
 }
 
-export async function postBinanceLogin(apiBaseUrl, body, timeoutMs = 12000) {
+export async function postBinanceLogin(apiBaseUrl, body, timeoutMs = 45000) {
   const b = base(apiBaseUrl);
   try {
     const res = await binanceFetch(
@@ -160,8 +160,8 @@ export async function postBinanceLogin(apiBaseUrl, body, timeoutMs = 12000) {
     const j = await res.json().catch(() => ({}));
     if (!res.ok) {
       let detail = parseApiDetail(j, `HTTP ${res.status}`);
-      if (res.status === 401 && /unauthorized/i.test(detail)) {
-        detail = 'Bridge auth failed — add EXPO_PUBLIC_BRIDGE_TOKEN in .env.local (must match PC bridge BRIDGE_TOKEN).';
+      if (res.status === 401 && /unauthorized/i.test(detail) && !/invalid|api-key|signature|permission/i.test(detail)) {
+        detail = 'Bridge auth failed — APK must include DESK_API_KEY matching the VPS.';
       } else if (res.status === 401 && /invalid|api-key|permission|ip/i.test(detail)) {
         detail = `${detail} — check Testnet vs Mainnet toggle matches where you created the key, and enable Futures + Read permissions.`;
       }
@@ -178,7 +178,14 @@ export async function postBinanceLogin(apiBaseUrl, body, timeoutMs = 12000) {
       exec_block: j.exec_block ?? null,
     };
   } catch (e) {
-    return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/abort/i.test(msg)) {
+      return {
+        ok: false,
+        detail: 'Aborted — login took too long (VPS↔Binance). Tap Retry Connect.',
+      };
+    }
+    return { ok: false, detail: msg };
   }
 }
 
