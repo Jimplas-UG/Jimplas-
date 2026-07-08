@@ -13,6 +13,7 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "splash": {
+      "image": "./assets/splash-icon.png",
       "backgroundColor": "#000000",
       "resizeMode": "contain"
     },
@@ -20,7 +21,9 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#000000"
+          "image": "./assets/splash-icon.png",
+          "backgroundColor": "#000000",
+          "imageWidth": 200
         }
       ],
       [

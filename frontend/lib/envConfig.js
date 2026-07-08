@@ -21,11 +21,17 @@ function isLocalhostUrl(url) {
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(String(url || '').trim());
 }
 
+const PROD_DESK_DEFAULT = 'http://157.245.33.42:8791';
+
 export function getDeskApiUrl() {
   const fromEnv = process.env.EXPO_PUBLIC_DESK_API_URL?.trim();
   if (fromEnv) return stripTrailingSlash(fromEnv);
   const fromExtra = extra('deskApiUrl');
   if (fromExtra) return stripTrailingSlash(fromExtra);
+  // Release / production standalone builds must never fall back to localhost.
+  if (typeof __DEV__ === 'undefined' || __DEV__ === false) {
+    return PROD_DESK_DEFAULT;
+  }
   return 'http://127.0.0.1:8791';
 }
 
@@ -44,6 +50,9 @@ export function getBinanceApiUrl() {
     return `${stripTrailingSlash(desk)}/v1/binance`;
   }
 
+  if (typeof __DEV__ === 'undefined' || __DEV__ === false) {
+    return `${PROD_DESK_DEFAULT}/v1/binance`;
+  }
   return 'http://127.0.0.1:8766';
 }
 

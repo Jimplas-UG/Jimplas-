@@ -76,28 +76,47 @@ fi
 echo "desk=$EXPO_PUBLIC_DESK_API_URL binance=$EXPO_PUBLIC_BINANCE_API_URL hasKey=${EXPO_PUBLIC_DESK_API_KEY:+yes}"
 npx expo prebuild --platform android --clean
 
-# Enforce compileSdk 35 (splashscreen AAR metadata requires it)
-if [[ -f "$FRONTEND/android/build.gradle" ]]; then
-  sed -i 's/compileSdkVersion\s*=\s*[0-9]\+/compileSdkVersion = 35/' "$FRONTEND/android/build.gradle" || true
-  sed -i 's/compileSdk\s*[0-9]\+/compileSdk 35/' "$FRONTEND/android/build.gradle" || true
+# Enforce compileSdk 35 via gradle.properties (Expo reads android.compileSdkVersion from here)
+PROP="$FRONTEND/android/gradle.properties"
+touch "$PROP"
+if grep -q '^android.compileSdkVersion=' "$PROP"; then
+  sed -i 's/^android.compileSdkVersion=.*/android.compileSdkVersion=35/' "$PROP"
+else
+  echo 'android.compileSdkVersion=35' >> "$PROP"
 fi
-if [[ -f "$FRONTEND/android/app/build.gradle" ]]; then
-  sed -i 's/compileSdkVersion\s*[0-9]\+/compileSdkVersion 35/' "$FRONTEND/android/app/build.gradle" || true
-  sed -i 's/compileSdk\s*[0-9]\+/compileSdk 35/' "$FRONTEND/android/app/build.gradle" || true
+if grep -q '^android.targetSdkVersion=' "$PROP"; then
+  sed -i 's/^android.targetSdkVersion=.*/android.targetSdkVersion=34/' "$PROP"
+else
+  echo 'android.targetSdkVersion=34' >> "$PROP"
 fi
-grep -n 'compileSdk' "$FRONTEND/android/app/build.gradle" "$FRONTEND/android/build.gradle" 2>/dev/null || true
+# Ensure splash drawable exists (expo-splash-screen expects splashscreen_logo)
+RES_DIR="$FRONTEND/android/app/src/main/res/drawable"
+mkdir -p "$RES_DIR"
+if [[ ! -f "$RES_DIR/splashscreen_logo.png" ]]; then
+  if [[ -f "$FRONTEND/assets/splash-icon.png" ]]; then
+    cp -f "$FRONTEND/assets/splash-icon.png" "$RES_DIR/splashscreen_logo.png"
+  elif [[ -f "$FRONTEND/assets/icon.png" ]]; then
+    cp -f "$FRONTEND/assets/icon.png" "$RES_DIR/splashscreen_logo.png"
+  fi
+fi
+grep -nE 'compileSdk|android.compileSdkVersion' "$FRONTEND/android/build.gradle" "$PROP" 2>/dev/null || true
+ls -la "$RES_DIR/splashscreen_logo.png" 2>/dev/null || echo "WARN: no splashscreen_logo.png"
 
 # 2GB RAM: keep Gradle lean + phone ABI only
-sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx1024m -XX:MaxMetaspaceSize=256m -XX:+HeapDumpOnOutOfMemoryError/' "$FRONTEND/android/gradle.properties" || true
-if ! grep -q 'reactNativeArchitectures' "$FRONTEND/android/gradle.properties"; then
-  echo 'reactNativeArchitectures=armeabi-v7a,arm64-v8a' >> "$FRONTEND/android/gradle.properties"
+sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx1024m -XX:MaxMetaspaceSize=256m -XX:+HeapDumpOnOutOfMemoryError/' "$PROP" || true
+if ! grep -q 'reactNativeArchitectures' "$PROP"; then
+  echo 'reactNativeArchitectures=armeabi-v7a,arm64-v8a' >> "$PROP"
 else
-  sed -i 's/^reactNativeArchitectures=.*/reactNativeArchitectures=armeabi-v7a,arm64-v8a/' "$FRONTEND/android/gradle.properties"
+  sed -i 's/^reactNativeArchitectures=.*/reactNativeArchitectures=armeabi-v7a,arm64-v8a/' "$PROP"
 fi
 echo "sdk.dir=$SDK" > "$FRONTEND/android/local.properties"
 
 cd "$FRONTEND/android"
 chmod +x gradlew
+# Double-check effective compileSdk before assemble
+./gradlew -q printCompileSdk 2>/dev/null || \
+  ./gradlew -q properties 2>/dev/null | grep -E 'compileSdk|android.compileSdkVersion' || true
+grep -nE 'android\.compileSdkVersion|compileSdkVersion' gradle.properties build.gradle app/build.gradle || true
 ./gradlew assembleRelease --no-daemon --stacktrace -PreactNativeArchitectures=armeabi-v7a,arm64-v8a
 
 OUT=$(find app/build/outputs/apk/release -name '*.apk' | head -1)

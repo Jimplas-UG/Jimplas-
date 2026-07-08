@@ -7,7 +7,7 @@ import time
 HOST = os.environ.get("VPS_HOST", "157.245.33.42")
 USER = os.environ.get("VPS_USER", "root")
 PASSWORD = os.environ.get("VPS_PASSWORD", "")
-MAX_MIN = int(os.environ.get("POLL_MINUTES", "45"))
+MAX_MIN = int(os.environ.get("POLL_MINUTES", "55"))
 
 
 def main() -> int:
@@ -21,31 +21,38 @@ def main() -> int:
     client.connect(HOST, username=USER, password=PASSWORD, timeout=30, look_for_keys=False, allow_agent=False)
 
     for i in range(MAX_MIN):
-        cmd = (
-            "curl -s --max-time 5 http://127.0.0.1:8791/download; echo; "
-            "ls -lh /opt/bilshenz/frontend/dist/bilshenz-release.apk 2>/dev/null || echo NO_APK; "
-            "pgrep -af 'build-apk-on-vps|GradleWrapperMain|gradlew' || echo NO_BUILD; "
-            "tail -n 8 /var/log/bilshenz/apk-build.log 2>/dev/null | tr -cd '\\11\\12\\15\\40-\\176' | tail -n 8"
-        )
-        _, stdout, _ = client.exec_command(cmd, get_pty=True, timeout=60)
+        cmd = r"""
+curl -s --max-time 5 http://127.0.0.1:8791/download; echo
+ls -lh /opt/bilshenz/frontend/dist/bilshenz-release.apk 2>/dev/null || echo NO_APK
+if [[ -f /var/run/bilshenz-apk-build.pid ]]; then
+  pid=$(cat /var/run/bilshenz-apk-build.pid)
+  if kill -0 "$pid" 2>/dev/null; then echo BUILD_PID_ALIVE=$pid; else echo BUILD_PID_DEAD=$pid; fi
+else
+  echo NO_PID_FILE
+fi
+pgrep -c -f '/opt/bilshenz/deploy/ubuntu/build-apk-on-vps.sh' || true
+tail -n 12 /var/log/bilshenz/apk-build.log 2>/dev/null | tr -cd '\11\12\15\40-\176' | tail -n 12
+"""
+        _, stdout, _ = client.exec_command(cmd, timeout=60)
         out = stdout.read().decode("utf-8", errors="replace")
         print(f"=== poll {i+1}/{MAX_MIN} ===")
-        sys.stdout.buffer.write(out.encode("utf-8", errors="replace"))
+        print(out)
+        sys.stdout.flush()
         if '"ok":true' in out.replace(" ", "") or '"ok": true' in out:
-            if "NO_APK" not in out or "bilshenz-release.apk" in out:
-                # require actual size hint
-                if "M " in out or "apkUrl" in out:
-                    print("APK_READY")
-                    client.close()
-                    return 0
+            if "bilshenz-release.apk" in out and "NO_APK" not in out.splitlines()[1]:
+                print("APK_READY")
+                client.close()
+                return 0
         if "BUILD FAILED" in out or "FAILURE:" in out:
-            print("BUILD_FAILED")
+            # Only fail if process is dead
+            if "BUILD_PID_DEAD" in out or "NO_PID_FILE" in out:
+                print("BUILD_FAILED")
+                client.close()
+                return 2
+        if "=== DONE" in out and "bilshenz-release.apk" in out:
+            print("APK_READY")
             client.close()
-            return 2
-        if "NO_BUILD" in out and "NO_APK" in out and i > 2:
-            # maybe finished poorly
-            if "DONE" in out or "PHONE http" in out:
-                pass
+            return 0
         time.sleep(60)
 
     client.close()
