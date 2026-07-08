@@ -21,7 +21,10 @@ def main() -> int:
     print(f"Running on {HOST} (15-30 min)...")
     stdin, stdout, stderr = client.exec_command(cmd, get_pty=True, timeout=3600)
     for line in iter(stdout.readline, ""):
-        print(line, end="")
+        try:
+            print(line, end="")
+        except UnicodeEncodeError:
+            print(line.encode("ascii", errors="replace").decode("ascii"), end="")
     err = stderr.read().decode("utf-8", errors="replace")
     if err:
         print(err, file=sys.stderr)
