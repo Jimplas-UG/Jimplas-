@@ -112,26 +112,82 @@ h1{font-size:1.25rem;margin:0 0 8px}
   res.end(html);
 }
 
-function serveApkDownload(res: http.ServerResponse, apkPath: string, downloadName?: string): void {
+function serveApkDownload(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  apkPath: string,
+  downloadName?: string,
+): void {
   const stat = fs.statSync(apkPath);
+  const total = stat.size;
   const manifest = readReleaseManifest();
   const fname =
     downloadName ||
     manifest?.apkFile ||
     `bilshenz-v${manifest?.versionName ?? 'release'}.apk`;
-  res.writeHead(200, {
+  const baseHeaders: Record<string, string | number> = {
     'Content-Type': 'application/vnd.android.package-archive',
     'Content-Disposition': `attachment; filename="${fname}"`,
-    'Content-Length': stat.size,
+    'Accept-Ranges': 'bytes',
     'Cache-Control': 'no-store, no-cache, must-revalidate',
-    'Pragma': 'no-cache',
+    Pragma: 'no-cache',
+    Connection: 'close',
     'X-Bilshenz-Build': manifest?.buildTime ?? '',
     'X-Bilshenz-Commit': manifest?.gitShort ?? manifest?.gitCommit ?? '',
     'X-Bilshenz-Version': manifest?.versionName ?? '',
     'X-Bilshenz-VersionCode': manifest?.versionCode != null ? String(manifest.versionCode) : '',
     'X-Bilshenz-SHA256': manifest?.sha256 ?? '',
+  };
+
+  const range = String(req.headers.range ?? '');
+  const rangeMatch = /^bytes=(\d+)-(\d*)$/i.exec(range);
+  if (rangeMatch) {
+    const start = Number(rangeMatch[1]);
+    const end = rangeMatch[2] ? Number(rangeMatch[2]) : total - 1;
+    if (start >= total || end >= total || start > end) {
+      res.writeHead(416, {
+        'Content-Range': `bytes */${total}`,
+        Connection: 'close',
+      });
+      res.end();
+      return;
+    }
+    const chunk = end - start + 1;
+    res.writeHead(206, {
+      ...baseHeaders,
+      'Content-Length': chunk,
+      'Content-Range': `bytes ${start}-${end}/${total}`,
+    });
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    const stream = fs.createReadStream(apkPath, { start, end });
+    stream.on('error', () => {
+      if (!res.headersSent) res.writeHead(500);
+      res.end();
+    });
+    stream.pipe(res);
+    return;
+  }
+
+  res.writeHead(200, {
+    ...baseHeaders,
+    'Content-Length': total,
   });
-  fs.createReadStream(apkPath).pipe(res);
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  const stream = fs.createReadStream(apkPath);
+  stream.on('error', () => {
+    if (!res.headersSent) res.writeHead(500);
+    res.end();
+  });
+  res.on('close', () => {
+    if (!stream.destroyed) stream.destroy();
+  });
+  stream.pipe(res);
 }
 
 const PORT = Number(process.env.DESK_API_PORT) || 8791;
@@ -322,7 +378,7 @@ const server = http.createServer(async (req, res) => {
     (urlEarly.pathname === '/download/bilshenz.apk' ||
       urlEarly.pathname === '/download/bilshenz-release.apk' ||
       urlEarly.pathname.startsWith('/download/bilshenz-v')) &&
-    req.method === 'GET'
+    (req.method === 'GET' || req.method === 'HEAD')
   ) {
     let apkPath = resolveApkPath();
     if (urlEarly.pathname.startsWith('/download/bilshenz-v')) {
@@ -348,7 +404,7 @@ const server = http.createServer(async (req, res) => {
       );
       return;
     }
-    serveApkDownload(res, apkPath, path.basename(apkPath));
+    serveApkDownload(req, res, apkPath, path.basename(apkPath));
     return;
   }
 
