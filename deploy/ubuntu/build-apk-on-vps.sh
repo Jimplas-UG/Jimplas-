@@ -116,6 +116,10 @@ fi
 
 echo "desk=$EXPO_PUBLIC_DESK_API_URL binance=$EXPO_PUBLIC_BINANCE_API_URL commit=$GIT_SHORT"
 
+echo "==> Python trading tests"
+cd "$APP_DIR/binance_trading_system/python"
+python3 run_all_tests.py || { echo "FATAL: trading tests failed"; exit 1; }
+
 echo "==> Release preflight (bundle + assets)"
 cd "$FRONTEND"
 SKIP_GIT_CHECK=1 node scripts/verify-release-build.js || { echo "FATAL: verify-release-build failed"; exit 1; }

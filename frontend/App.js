@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
-import { View } from 'react-native';
+import { ActivityIndicator, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { hideBootSplash } from './lib/bootSplash';
 import { shouldPlayOpening } from './lib/devPreview';
@@ -10,9 +10,6 @@ import AuthGate from './components/auth/AuthGate';
 import OnboardingGate, { useOnboardingDone } from './components/OnboardingGate';
 import AppBottomNav from './components/AppBottomNav';
 import ScannerScreen from './screens/ScannerScreen';
-import RiskScreen from './screens/RiskScreen';
-import TradeScreen from './screens/TradeScreen';
-import ProfileScreen from './screens/ProfileScreen';
 import { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';
 import { AuthProvider } from './contexts/AuthContext';
 import { BinanceBridgeProvider, useBinanceBridge } from './contexts/BinanceBridgeContext';
@@ -20,21 +17,43 @@ import { DevPreviewProvider } from './contexts/DevPreviewContext';
 import { useTickScanner } from './hooks/useTickScanner';
 import { useDeskSession } from './hooks/useDeskSession';
 
+const RiskScreenLazy = lazy(() => import('./screens/RiskScreen'));
+const TradeScreenLazy = lazy(() => import('./screens/TradeScreen'));
+const ProfileScreenLazy = lazy(() => import('./screens/ProfileScreen'));
+
 const AppOpeningSplashLazy = lazy(() => import('./components/AppOpeningSplash'));
+
+function TabFallback() {
+  const { colors: C } = useBilshenzTheme();
+  return (
+    <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: C.appBg }}>
+      <ActivityIndicator color={C.goldL} />
+    </View>
+  );
+}
 
 function AppContent() {
   const { colors: C, styles } = useBilshenzTheme();
   const insets = useSafeAreaInsets();
   const { baseUrl, connected, sessionEpoch } = useBinanceBridge();
   const [tab, setTab] = useState('scanner');
+  const [mounted, setMounted] = useState({ scanner: true });
+
+  const onTabChange = useCallback((name) => {
+    setTab(name);
+    setMounted((m) => (m[name] ? m : { ...m, [name]: true }));
+  }, []);
+
+  const deskEnabled = !!baseUrl?.trim() && (tab === 'risk' || tab === 'trade');
+  const scannerEnabled = !!baseUrl?.trim() && (tab === 'scanner' || tab === 'trade');
 
   const desk = useDeskSession({
-    enabled: !!baseUrl?.trim(),
+    enabled: deskEnabled,
     loadBars: false,
-    pollTicks: !!baseUrl?.trim(),
+    pollTicks: deskEnabled,
   });
   const tickScanner = useTickScanner(baseUrl, {
-    enabled: !!baseUrl?.trim(),
+    enabled: scannerEnabled,
     connected,
     sessionEpoch,
   });
@@ -68,26 +87,40 @@ function AppContent() {
       </View>
       <EmailVerificationBanner />
 
-      <View style={tabStyle('scanner')}>
-        <ScannerScreen
-          pad={pad}
-          scanner={tickScanner}
-          onOpenProfile={openProfile}
-          connected={connected}
-          account={homeAccount}
-        />
-      </View>
-      <View style={tabStyle('risk')}>
-        <RiskScreen pad={pad} desk={desk} onOpenProfile={openProfile} />
-      </View>
-      <View style={tabStyle('trade')}>
-        <TradeScreen pad={pad} desk={desk} scanner={tickScanner} onOpenProfile={openProfile} />
-      </View>
-      <View style={tabStyle('profile')}>
-        <ProfileScreen pad={pad} />
-      </View>
+      {mounted.scanner ? (
+        <View style={tabStyle('scanner')}>
+          <ScannerScreen
+            pad={pad}
+            scanner={tickScanner}
+            onOpenProfile={openProfile}
+            connected={connected}
+            account={homeAccount}
+          />
+        </View>
+      ) : null}
+      {mounted.risk ? (
+        <View style={tabStyle('risk')}>
+          <Suspense fallback={<TabFallback />}>
+            <RiskScreenLazy pad={pad} desk={desk} onOpenProfile={openProfile} active={tab === 'risk'} />
+          </Suspense>
+        </View>
+      ) : null}
+      {mounted.trade ? (
+        <View style={tabStyle('trade')}>
+          <Suspense fallback={<TabFallback />}>
+            <TradeScreenLazy pad={pad} desk={desk} scanner={tickScanner} onOpenProfile={openProfile} active={tab === 'trade'} />
+          </Suspense>
+        </View>
+      ) : null}
+      {mounted.profile ? (
+        <View style={tabStyle('profile')}>
+          <Suspense fallback={<TabFallback />}>
+            <ProfileScreenLazy pad={pad} />
+          </Suspense>
+        </View>
+      ) : null}
 
-      <AppBottomNav tab={tab} onChange={setTab} bottomInset={insets.bottom} />
+      <AppBottomNav tab={tab} onChange={onTabChange} bottomInset={insets.bottom} />
 
       <OnboardingGate
         visible={onboardingDone === false}

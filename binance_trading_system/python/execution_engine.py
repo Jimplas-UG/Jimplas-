@@ -49,6 +49,7 @@ class ExecutionSignal:
     sl: float | None = None
     tp: float | None = None
     signal_id: str = ""
+    signal_ts_ms: int = 0
     margin_type: str = "ISOLATED"
     partition_usd: float = 0.0
     partition_pct: float = 0.0
@@ -64,6 +65,7 @@ class ExecutionResult:
     order_id: int | None = None
     client_order_id: str = ""
     latency_ms: float = 0.0
+    signal_to_ack_ms: float | None = None
     error: str = ""
     http_code: int | None = None
     binance_code: int | None = None
@@ -82,6 +84,7 @@ class ExecutionResult:
             "order_id": self.order_id,
             "client_order_id": self.client_order_id,
             "latency_ms": self.latency_ms,
+            "signal_to_ack_ms": self.signal_to_ack_ms,
             "error": self.error or None,
             "http_code": self.http_code,
             "binance_code": self.binance_code,
@@ -148,6 +151,9 @@ class ExecutionEngine:
         self._last_error: str | None = None
         self._account_cache: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._account_cache_ts = 0.0
+        self._isolation_check: Callable[[str], tuple[bool, str]] | None = None
+        self._close_pending_check: Callable[[str], bool] | None = None
+        self._latency_ring: deque[dict[str, Any]] = deque(maxlen=32)
 
     @property
     def last_error(self) -> str | None:
@@ -155,6 +161,18 @@ class ExecutionEngine:
 
     def events(self) -> list[dict[str, Any]]:
         return [e.to_dict() for e in self._events]
+
+    def latency_stats(self) -> list[dict[str, Any]]:
+        return list(self._latency_ring)
+
+    def set_isolation_hooks(
+        self,
+        *,
+        can_open: Callable[[str], tuple[bool, str]] | None = None,
+        close_pending: Callable[[str], bool] | None = None,
+    ) -> None:
+        self._isolation_check = can_open
+        self._close_pending_check = close_pending
 
     def _emit(
         self,
@@ -268,19 +286,27 @@ class ExecutionEngine:
             log.warning("margin cache refresh: %s", e)
             return self._account_cache[0]
 
-    def execute(self, signal: ExecutionSignal) -> ExecutionResult:
+    def execute(self, signal: ExecutionSignal, *, manual: bool = False) -> ExecutionResult:
         t0 = time.perf_counter()
         sym = signal.symbol.upper()
         side = signal.side.upper()
         result = ExecutionResult(ok=False, symbol=sym, side=side, quantity=float(signal.quantity))
 
-        ok_env, env_reason = self._validate_env()
-        if not ok_env:
-            result.error = env_reason
+        if _env_truthy("FORWARD_DRY_RUN"):
+            result.error = "FORWARD_DRY_RUN"
             result.stage = "blocked_env"
-            self._log_failure(signal, reason=env_reason, retry_decision="no_retry_env")
-            self._emit(signal, "blocked", error=env_reason)
+            self._log_failure(signal, reason=result.error, retry_decision="no_retry_env")
+            self._emit(signal, "blocked", error=result.error)
             return result
+
+        if not manual:
+            ok_env, env_reason = self._validate_env()
+            if not ok_env:
+                result.error = env_reason
+                result.stage = "blocked_env"
+                self._log_failure(signal, reason=env_reason, retry_decision="no_retry_env")
+                self._emit(signal, "blocked", error=env_reason)
+                return result
 
         ok_sess, sess_reason = self._validate_session()
         if not ok_sess:
@@ -296,6 +322,22 @@ class ExecutionEngine:
             self._log_failure(signal, reason=result.error)
             self._emit(signal, "validation_failed", error=result.error)
             return result
+
+        if self._close_pending_check and self._close_pending_check(sym):
+            result.error = "close_pending"
+            result.stage = "blocked_close_pending"
+            self._log_failure(signal, reason=result.error, retry_decision="no_retry_close")
+            self._emit(signal, "blocked", error=result.error)
+            return result
+
+        if self._isolation_check:
+            ok_iso, iso_reason = self._isolation_check(sym)
+            if not ok_iso:
+                result.error = iso_reason
+                result.stage = "blocked_isolation"
+                self._log_failure(signal, reason=iso_reason, retry_decision="no_retry_isolation")
+                self._emit(signal, "blocked", error=iso_reason)
+                return result
 
         client_id = self._client_order_id(signal)
         result.client_order_id = client_id
@@ -390,14 +432,28 @@ class ExecutionEngine:
                     fill = float(order_resp.get("fill_price") or signal.reference_price)
                     order_id = order_resp.get("order_id")
                     latency = round((time.perf_counter() - t0) * 1000, 1)
+                    signal_to_ack = None
+                    if signal.signal_ts_ms > 0:
+                        signal_to_ack = round(time.time() * 1000 - signal.signal_ts_ms, 1)
                     result.ok = True
                     result.fill_price = fill
                     result.order_id = order_id
                     result.latency_ms = latency
+                    result.signal_to_ack_ms = signal_to_ack
                     result.stage = "filled"
                     result.retry_decision = "success" if attempt else "none"
                     self._filled_client_ids.add(client_id)
                     self._last_error = None
+                    self._latency_ring.appendleft(
+                        {
+                            "ts": int(time.time() * 1000),
+                            "symbol": sym,
+                            "leg": signal.leg,
+                            "latency_ms": latency,
+                            "signal_to_ack_ms": signal_to_ack,
+                            "order_id": order_id,
+                        }
+                    )
                     self._emit(
                         signal,
                         "filled",
@@ -407,13 +463,14 @@ class ExecutionEngine:
                         latency_ms=latency,
                     )
                     log.info(
-                        "EXEC_OK coin=%s side=%s qty=%s fill=%s order_id=%s latency_ms=%s retries=%s",
+                        "EXEC_OK coin=%s side=%s qty=%s fill=%s order_id=%s latency_ms=%s signal_to_ack_ms=%s retries=%s",
                         sym,
                         side,
                         order_resp.get("quantity"),
                         fill,
                         order_id,
                         latency,
+                        signal_to_ack,
                         attempt,
                     )
 

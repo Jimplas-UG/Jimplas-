@@ -331,9 +331,9 @@ export function useBinanceLiveFeed({
     void refreshDeals();
     void refreshPositions();
 
-    const acctId = setInterval(refreshAccount, 5000);
-    const dealsId = setInterval(refreshDeals, 20000);
-    const posId = setInterval(refreshPositions, 8000);
+    const acctId = setInterval(refreshAccount, 4000);
+    const dealsId = setInterval(refreshDeals, 15000);
+    const posId = setInterval(refreshPositions, 4000);
 
     return () => {
       cancelled = true;

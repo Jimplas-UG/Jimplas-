@@ -77,6 +77,9 @@ class BinanceConnector:
         self._prepared_cache: dict[tuple[str, int, str], float] = {}
         self._http_conn: http.client.HTTPSConnection | None = None
         self._http_host: str = ""
+        self._positions_cache: list[dict[str, Any]] | None = None
+        self._positions_cache_ts = 0.0
+        self._positions_cache_ttl = 1.5
         if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper:
             self.sync_server_time(force=True)
 
@@ -803,13 +806,25 @@ class BinanceConnector:
             )
         return out
 
-    def positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
+    def invalidate_positions_cache(self) -> None:
+        self._positions_cache = None
+        self._positions_cache_ts = 0.0
+
+    def positions(self, symbol: str | None = None, *, force: bool = False) -> list[dict[str, Any]]:
         if self.cfg.paper:
             from paper_simulator import paper_store
 
             return paper_store.positions(symbol)
         if not self.cfg.api_key or not self.cfg.api_secret:
             return []
+        now = time.time()
+        if (
+            not force
+            and symbol is None
+            and self._positions_cache is not None
+            and now - self._positions_cache_ts < self._positions_cache_ttl
+        ):
+            return list(self._positions_cache)
         try:
             params: dict[str, Any] = {}
             if symbol:
@@ -817,6 +832,8 @@ class BinanceConnector:
             data = self._request("GET", "/fapi/v2/positionRisk", params or None, signed=True)
         except Exception as e:
             log.warning("positions: %s", e)
+            if self._positions_cache is not None and symbol is None:
+                return list(self._positions_cache)
             return []
         if not isinstance(data, list):
             data = [data] if data else []
@@ -841,6 +858,9 @@ class BinanceConnector:
                     "leverage": int(float(p.get("leverage", self.cfg.leverage))),
                 }
             )
+        if symbol is None:
+            self._positions_cache = out
+            self._positions_cache_ts = now
         return out
 
     def has_open_position(self, symbol: str | None = None) -> bool:
@@ -1070,7 +1090,7 @@ class BinanceConnector:
             }
             params.update(self._position_side_param(pos_side, reduce=True))
             try:
-                resp = self._request("POST", "/fapi/v1/order", params, signed=True)
+                resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
             except RuntimeError as e:
                 return {"ok": False, "error": str(e), "closed": closed}
             fill = float(resp.get("avgPrice") or p.get("price_open") or 0)
@@ -1086,6 +1106,7 @@ class BinanceConnector:
             )
 
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
+        self.invalidate_positions_cache()
         return {"ok": True, "closed": closed, "latency_ms": latency_ms, "broker": "binance"}
 
     def ticker_24h_map(self) -> dict[str, float]:

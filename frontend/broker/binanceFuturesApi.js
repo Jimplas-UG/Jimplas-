@@ -404,6 +404,17 @@ export function rememberBridgeUrl(url) {
   if (u) cachedBridgeUrl = u;
 }
 
+export async function fetchBinanceDiagnostics(apiBaseUrl, timeoutMs = 12000) {
+  const b = base(apiBaseUrl);
+  try {
+    const res = await binanceFetch(b, '/api/diagnostics', {}, timeoutMs);
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function postBinanceClosePosition(apiBaseUrl, { symbol = DEFAULT_CHART_SYMBOL, volume } = {}) {
   const b = base(apiBaseUrl);
   const connected = await fetchBinanceConnected(b);
@@ -429,14 +440,18 @@ export async function postBinanceClosePosition(apiBaseUrl, { symbol = DEFAULT_CH
     let snippet = trimSnippet(text || (res.ok ? 'OK' : 'Empty body'));
     if (!res.ok) {
       if (typeof j.detail === 'string') snippet = j.detail;
+      else if (j.detail?.error) snippet = String(j.detail.error);
       else if (j.detail) snippet = trimSnippet(JSON.stringify(j.detail));
+      else if (j.error) snippet = String(j.error);
     }
     return {
-      ok: res.ok && !!j.ok,
+      ok: res.ok && (j.ok === true || (res.ok && Array.isArray(j.closed))),
       status: res.status,
       bodySnippet: snippet,
       connected: true,
-      closed: Array.isArray(j.closed) ? j.closed : [],
+      closed: Array.isArray(j.closed) ? j.closed : j.detail?.closed || [],
+      latencyMs: j.latency_ms ?? j.detail?.latency_ms,
+      error: j.error ?? j.detail?.error,
     };
   } catch (e) {
     return { ok: false, status: 0, bodySnippet: trimSnippet(e instanceof Error ? e.message : String(e)), connected };

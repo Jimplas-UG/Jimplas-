@@ -85,7 +85,9 @@ export default function OpenPositionsPanel({
                     onCloseMessage?.(msg);
                     await onRefresh?.();
                   } else {
-                    Alert.alert('Close failed', r.bodySnippet || 'Could not close position');
+                    const err = r.error || r.bodySnippet || 'Could not close position';
+                    const lat = r.latencyMs != null ? ` (${r.latencyMs} ms)` : '';
+                    Alert.alert('Close failed', `${err}${lat}`);
                   }
                 } catch (e) {
                   Alert.alert('Close failed', e instanceof Error ? e.message : String(e));

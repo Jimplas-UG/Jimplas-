@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from execution_engine import ExecutionEngine, ExecutionSignal
+from pair_isolation import pair_gate
 
 log = logging.getLogger("momentum_scanner")
 
@@ -117,6 +118,7 @@ class CoinStrategy:
     recovery_peak_price: float | None = None
     unrealized_pnl: float = 0.0
     last_update_ms: int = 0
+    entry_signal_key: str = ""
     _history: deque[PricePoint] = field(default_factory=lambda: deque(maxlen=2500))
 
     def active(self) -> bool:
@@ -161,7 +163,26 @@ class MomentumScanner:
             max_open_trades=lambda: 1 if self._one_at_a_time else 999,
             open_trade_count=lambda: 1 if self._has_open_strategy() else 0,
         )
+        self._engine.set_isolation_hooks(
+            can_open=lambda sym: pair_gate.can_open(
+                sym, self._global_active_symbol, self._exchange_positions
+            ),
+            close_pending=pair_gate.is_close_pending,
+        )
         self._last_exec_latency_ms: float | None = None
+
+    @property
+    def engine(self) -> ExecutionEngine:
+        return self._engine
+
+    def _exchange_positions(self) -> list[dict[str, Any]]:
+        fn = getattr(self._connector, "positions", None)
+        if not callable(fn):
+            return []
+        try:
+            return fn() or []
+        except Exception:
+            return []
 
     def set_exec_enabled(self, enabled: bool) -> None:
         """No-op — execution is armed on Binance connect; halt via SCANNER_EXEC or FORWARD_DRY_RUN env."""
@@ -573,6 +594,9 @@ class MomentumScanner:
             ):
                 coin.status = STATUS_PENDING
                 coin.best_tf = ENTRY_TIMEFRAME
+                if not coin.entry_signal_key:
+                    peak = coin.highest_price or price
+                    coin.entry_signal_key = f"{sym}_{int(peak * 10000)}_{int((coin.qualifying_pct or 0) * 100)}"
                 self._emit_signal(coin, "pending")
                 self._execute_pending_short(coin)
             elif coin.status == STATUS_PENDING and still_qualified:
@@ -810,6 +834,11 @@ class MomentumScanner:
             active = self._global_active_symbol()
             if active and active != sym:
                 return
+        if pair_gate.is_close_pending(sym):
+            return
+        ok_iso, _ = pair_gate.can_open(sym, self._global_active_symbol, self._exchange_positions)
+        if not ok_iso:
+            return
         self._in_flight.add(sym)
         try:
             entry = coin.price
@@ -824,7 +853,8 @@ class MomentumScanner:
                 magic=MAGIC_SHORT,
                 leg="SHORT",
                 tp=tp,
-                signal_id=f"{sym}_SHORT_{coin.last_update_ms or int(time.time() * 1000)}",
+                signal_id=f"{sym}_SHORT_{coin.entry_signal_key or coin.last_update_ms}",
+                signal_ts_ms=int(time.time() * 1000),
                 partition_usd=self._partition_usd,
                 partition_pct=self._short_pct,
                 margin_type="ISOLATED",
@@ -872,7 +902,8 @@ class MomentumScanner:
                 magic=magic,
                 leg=f"LONG{leg}",
                 tp=tp,
-                signal_id=f"{sym}_LONG{leg}_{coin.last_update_ms or int(time.time() * 1000)}",
+                signal_id=f"{sym}_LONG{leg}_{coin.entry_signal_key or coin.last_update_ms}",
+                signal_ts_ms=int(time.time() * 1000),
                 partition_usd=self._partition_usd,
                 partition_pct=leg_pct,
                 margin_type="ISOLATED",
@@ -989,27 +1020,41 @@ class MomentumScanner:
 
     def _close_all(self, coin: CoinStrategy, reason: str) -> None:
         sym = coin.symbol
-        if coin.short:
-            self._connector.close_leg(sym, coin.short.magic, coin.short.qty)
-        if coin.long1:
-            self._connector.close_leg(sym, coin.long1.magic, coin.long1.qty)
-        if coin.long2:
-            self._connector.close_leg(sym, coin.long2.magic, coin.long2.qty)
-        coin.short = None
-        coin.long1 = None
-        coin.long2 = None
-        coin.long1_was_closed = False
-        coin.long1_peak_price = None
-        coin.long2_peak_price = None
-        coin.recovery_peak_price = None
-        coin.status = STATUS_CLOSED
-        coin.highest_price = None
-        coin.qualifying_pct = 0.0
-        coin.unrealized_pnl = 0.0
-        log.info("scanner closed %s reason=%s", sym, reason)
-        self._bump_trades_closed()
-        if self._one_at_a_time:
-            self._maybe_execute_best_pending()
+        pair_gate.begin_close(sym)
+        t0 = time.perf_counter()
+        try:
+            if coin.short:
+                self._connector.close_leg(sym, coin.short.magic, coin.short.qty)
+            if coin.long1:
+                self._connector.close_leg(sym, coin.long1.magic, coin.long1.qty)
+            if coin.long2:
+                self._connector.close_leg(sym, coin.long2.magic, coin.long2.qty)
+            coin.short = None
+            coin.long1 = None
+            coin.long2 = None
+            coin.long1_was_closed = False
+            coin.long1_peak_price = None
+            coin.long2_peak_price = None
+            coin.recovery_peak_price = None
+            coin.status = STATUS_CLOSED
+            coin.highest_price = None
+            coin.qualifying_pct = 0.0
+            coin.entry_signal_key = ""
+            coin.unrealized_pnl = 0.0
+            self._connector.invalidate_positions_cache()
+            pair_gate.record_order(
+                symbol=sym,
+                side="CLOSE",
+                order_id=None,
+                latency_ms=round((time.perf_counter() - t0) * 1000, 1),
+                source="scanner",
+            )
+            log.info("scanner closed %s reason=%s", sym, reason)
+            self._bump_trades_closed()
+            if self._one_at_a_time:
+                self._maybe_execute_best_pending()
+        finally:
+            pair_gate.end_close(sym)
 
     def _maybe_broadcast(self) -> None:
         if not self._on_snapshot:

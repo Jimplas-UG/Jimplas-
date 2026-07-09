@@ -1,18 +1,23 @@
 import React, { useMemo } from 'react';
 import { ScrollView, Text, View } from 'react-native';
 import BinanceStatusStrip from '../components/BinanceStatusStrip';
+import DiagnosticsPanel from '../components/DiagnosticsPanel';
 import OpenPositionsPanel from '../components/OpenPositionsPanel';
 import ScannerExecutionPanel, { ScannerQuoteStrip } from '../components/scanner/ScannerExecutionPanel';
 import { PilotCard, PilotHeroBalance, PilotSectionTitle } from '../components/pilot/PilotUI';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
+import { useDiagnostics } from '../hooks/useDiagnostics';
 import { pickPrimaryExecutionCandidate } from '../lib/scannerExecution';
 import { spacing } from '../theme/designTokens';
 
-export default function TradeScreen({ pad, desk, scanner, onOpenProfile }) {
+export default function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
   const { colors: C, styles } = useBilshenzTheme();
   const { sessionExec } = useBinanceBridge();
   const { baseUrl, connected, brokerFeed, useBrokerSession, lastBrokerMsg, setLastBrokerMsg } = desk;
+  const { diagnostics, loading: diagLoading, refresh: refreshDiag } = useDiagnostics(baseUrl, {
+    enabled: active && connected,
+  });
 
   const account = useBrokerSession ? brokerFeed.account : null;
 
@@ -46,6 +51,13 @@ export default function TradeScreen({ pad, desk, scanner, onOpenProfile }) {
         execBlock={sessionExec.block || scanner?.scannerMeta?.exec_block}
         lastExecError={scanner?.scannerMeta?.last_exec_error}
         onPressConnect={onOpenProfile}
+        style={{ marginBottom: spacing.md }}
+      />
+
+      <DiagnosticsPanel
+        diagnostics={diagnostics}
+        loading={diagLoading}
+        onRefresh={refreshDiag}
         style={{ marginBottom: spacing.md }}
       />
 

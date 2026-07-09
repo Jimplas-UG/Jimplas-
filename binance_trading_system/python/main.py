@@ -26,6 +26,9 @@ from position_manager import PositionManager
 from tick_stream import BinanceTickStream
 from momentum_scanner import MomentumScanner
 from scanner_stream import BinanceScannerStream
+from user_data_stream import BinanceUserDataStream
+from pair_isolation import pair_gate
+from execution_engine import ExecutionSignal
 from app_config import ensure_valid_or_exit, load_settings
 from logging_setup import setup_logging
 from session_store import clear_binance_session, load_binance_session, save_binance_session
@@ -154,6 +157,12 @@ scanner_stream = BinanceScannerStream(
     get_snapshot=lambda: momentum_scanner.full_snapshot(),
 )
 
+user_data_stream = BinanceUserDataStream(
+    connector,
+    get_testnet=lambda: connector.cfg.testnet,
+    on_event=lambda _evt: pair_gate.touch_sync(),
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -220,6 +229,11 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(load_scanner_symbols())
     asyncio.create_task(refresh_24h_loop())
     await scanner_stream.start()
+
+    async def start_user_stream() -> None:
+        await user_data_stream.start()
+
+    asyncio.create_task(start_user_stream())
 
     async def restore_persisted_session() -> None:
         if connector._connected:
@@ -439,7 +453,63 @@ def health():
         "memory": mem,
         "tick_stream": tick_stream.status(),
         "scanner_stream": scanner_stream.status(),
+        "user_data_stream": user_data_stream.status(),
         "scanner": momentum_scanner.status(),
+        "pair_isolation": pair_gate.status(
+            momentum_scanner._global_active_symbol,
+            lambda: connector.positions(),
+        ),
+    }
+
+
+@app.get("/api/diagnostics")
+def api_diagnostics():
+    """Live diagnostics for monitoring dashboard."""
+    import shutil
+
+    mem: dict[str, Any] = {}
+    cpu_pct = None
+    try:
+        import psutil
+
+        vm = psutil.virtual_memory()
+        mem = {
+            "ram_used_mb": round(vm.used / 1024 / 1024),
+            "ram_total_mb": round(vm.total / 1024 / 1024),
+            "ram_pct": vm.percent,
+        }
+        cpu_pct = psutil.cpu_percent(interval=0.1)
+    except Exception:
+        pass
+    binance_latency_ms = None
+    try:
+        t0 = time.perf_counter()
+        connector.ping()
+        binance_latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+    except Exception:
+        pass
+    disk = shutil.disk_usage("/")
+    return {
+        "ok": True,
+        "ts": int(time.time() * 1000),
+        "binance_latency_ms": binance_latency_ms,
+        "cpu_pct": cpu_pct,
+        "memory": mem,
+        "disk_free_gb": round(disk.free / 1024**3, 2),
+        "tick_stream": tick_stream.status(),
+        "scanner_stream": scanner_stream.status(),
+        "user_data_stream": user_data_stream.status(),
+        "pair_isolation": pair_gate.status(
+            momentum_scanner._global_active_symbol,
+            lambda: connector.positions(),
+        ),
+        "execution": {
+            "last_latency_ms": momentum_scanner.status().get("last_exec_latency_ms"),
+            "recent_latencies": momentum_scanner.engine.latency_stats()[:8],
+            "events": momentum_scanner.engine.events()[:8],
+        },
+        "scanner": momentum_scanner.status(),
+        "connected": bool(getattr(connector, "_connected", False) and connector.cfg.api_key),
     }
 
 
@@ -775,19 +845,88 @@ def api_positions(symbol: str | None = None):
 def api_order(body: OrderBody):
     if os.environ.get("FORWARD_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
         raise HTTPException(status_code=403, detail={"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True})
-    r = connector.order_market(body.symbol, body.side, body.volume, body.sl, body.tp, body.magic)
-    if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r)
-    return r
+    sym = body.symbol.upper()
+    ok_iso, iso_reason = pair_gate.can_open(
+        sym, momentum_scanner._global_active_symbol, lambda: connector.positions()
+    )
+    if not ok_iso:
+        raise HTTPException(status_code=400, detail={"ok": False, "error": iso_reason})
+    if pair_gate.is_close_pending(sym):
+        raise HTTPException(status_code=409, detail={"ok": False, "error": "close_pending"})
+    tick = connector.book_ticker(sym)
+    if not tick:
+        raise HTTPException(status_code=400, detail={"ok": False, "error": f"no tick for {sym}"})
+    side_u = body.side.upper()
+    ref = tick["ask"] if side_u == "BUY" else tick["bid"]
+    signal = ExecutionSignal(
+        symbol=sym,
+        side=side_u,
+        quantity=float(body.volume),
+        reference_price=float(ref),
+        leverage=int(connector.cfg.leverage or 5),
+        magic=int(body.magic),
+        leg="MANUAL",
+        sl=body.sl,
+        tp=body.tp,
+        signal_id=f"MANUAL_{sym}_{side_u}_{body.magic}",
+        signal_ts_ms=int(time.time() * 1000),
+        margin_type="ISOLATED",
+    )
+    r = momentum_scanner.engine.execute(signal, manual=True)
+    if not r.ok:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "error": r.error,
+                "stage": r.stage,
+                "binance_code": r.binance_code,
+                "latency_ms": r.latency_ms,
+            },
+        )
+    pair_gate.record_order(
+        symbol=sym,
+        side=side_u,
+        order_id=r.order_id,
+        latency_ms=r.latency_ms,
+        source="manual",
+    )
+    connector.invalidate_positions_cache()
+    return {
+        "ok": True,
+        "symbol": sym,
+        "side": side_u,
+        "quantity": body.volume,
+        "fill_price": r.fill_price,
+        "order_id": r.order_id,
+        "client_order_id": r.client_order_id,
+        "latency_ms": r.latency_ms,
+        "signal_to_ack_ms": r.signal_to_ack_ms,
+        "broker": "binance",
+    }
 
 
 @app.post("/api/close")
 def api_close(body: CloseBody):
     if os.environ.get("FORWARD_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
         raise HTTPException(status_code=403, detail={"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True})
-    r = connector.close_position(body.symbol, body.volume)
+    sym = body.symbol.upper()
+    pair_gate.begin_close(sym)
+    try:
+        r = connector.close_position(sym, body.volume)
+    finally:
+        pair_gate.end_close(sym)
     if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r)
+        err = r.get("error") or "close_failed"
+        raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
+    pair_gate.record_order(
+        symbol=sym,
+        side="CLOSE",
+        order_id=(r.get("closed") or [{}])[0].get("order") if r.get("closed") else None,
+        latency_ms=float(r.get("latency_ms") or 0),
+        source="manual",
+    )
+    _flush_scanner_snapshot()
     return r
 
 
