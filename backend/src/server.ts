@@ -69,12 +69,47 @@ function distApkCandidates(): string[] {
 function resolveApkPath(): string | null {
   for (const p of distApkCandidates()) {
     try {
-      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+      if (!fs.existsSync(p)) continue;
+      const real = fs.realpathSync(p);
+      if (fs.statSync(real).isFile()) return real;
     } catch {
       /* skip */
     }
   }
   return null;
+}
+
+function serveInstallHtml(res: http.ServerResponse, apkPath: string | null, manifest: ReleaseManifest | null): void {
+  const version = manifest?.versionName ?? '?';
+  const build = manifest?.buildTime ?? '';
+  const apkHref = manifest?.apkUrl ?? '/download/bilshenz.apk';
+  const ready = !!apkPath;
+  const html = `<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Bilshenz APK v${version}</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0a0a0f;color:#eee;margin:0;padding:24px;line-height:1.5}
+.card{max-width:420px;margin:40px auto;padding:24px;border:1px solid #333;border-radius:16px;background:#12121a}
+h1{font-size:1.25rem;margin:0 0 8px}
+.sub{color:#888;font-size:.9rem;margin-bottom:20px}
+.btn{display:block;text-align:center;padding:16px 20px;border-radius:12px;font-weight:700;text-decoration:none;font-size:1.05rem}
+.btn.ok{background:#6c5ce7;color:#fff}
+.btn.off{background:#333;color:#888;pointer-events:none}
+.meta{font-size:.8rem;color:#666;margin-top:16px}
+</style></head><body>
+<div class="card">
+<h1>Bilshenz v${version}</h1>
+<p class="sub">${ready ? 'Fresh release APK ready to install.' : 'APK build in progress — refresh in a few minutes.'}</p>
+<a class="btn ${ready ? 'ok' : 'off'}" href="${apkHref}">${ready ? 'Download &amp; install APK' : 'APK not ready yet'}</a>
+<p class="meta">Build: ${build}<br/>Uninstall any old Bilshenz app first.</p>
+</div></body></html>`;
+  res.writeHead(ready ? 200 : 503, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  res.end(html);
 }
 
 function serveApkDownload(res: http.ServerResponse, apkPath: string, downloadName?: string): void {
@@ -320,6 +355,11 @@ const server = http.createServer(async (req, res) => {
   if (urlEarly.pathname === '/download' && req.method === 'GET') {
     const apkPath = resolveApkPath();
     const manifest = readReleaseManifest();
+    const accept = String(req.headers.accept ?? '');
+    if (accept.includes('text/html')) {
+      serveInstallHtml(res, apkPath, manifest);
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(
       JSON.stringify({
@@ -334,6 +374,13 @@ const server = http.createServer(async (req, res) => {
         sha256: manifest?.sha256 ?? null,
       }),
     );
+    return;
+  }
+
+  if ((urlEarly.pathname === '/' || urlEarly.pathname === '/install') && req.method === 'GET') {
+    const apkPath = resolveApkPath();
+    const manifest = readReleaseManifest();
+    serveInstallHtml(res, apkPath, manifest);
     return;
   }
 
