@@ -287,7 +287,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Bilshenz Binance Bridge",
-    version="1.2.0",
+    version="1.2.1",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -388,7 +388,7 @@ class CloseBody(BaseModel):
 
 class MarginBody(BaseModel):
     symbol: str = Field(_DEFAULT_SYMBOL, max_length=20, pattern=r"^[A-Za-z0-9]+$")
-    margin_type: str = Field("ISOLATED", pattern=r"^(ISOLATED|CROSS)$")
+    margin_type: str = Field("ISOLATED", pattern=r"^ISOLATED$")
 
 
 @app.get("/ping")
@@ -488,12 +488,14 @@ def api_scanner_exec(_body: ScannerExecBody | None = None):
 
 @app.post("/api/scanner/risk")
 def api_scanner_risk(body: ScannerRiskBody):
-    momentum_scanner.set_risk_config(
+    result = momentum_scanner.set_risk_config(
         partition_usd=body.partition_usd,
         short_pct=body.short_pct,
         long1_pct=body.long1_pct,
         long2_pct=body.long2_pct,
     )
+    if not result.get("ok", True):
+        raise HTTPException(status_code=409, detail=result)
     st = momentum_scanner.status()
     return {
         "ok": True,
@@ -501,6 +503,7 @@ def api_scanner_risk(body: ScannerRiskBody):
         "short_partition_pct": st.get("short_partition_pct"),
         "long1_partition_pct": st.get("long1_partition_pct"),
         "long2_partition_pct": st.get("long2_partition_pct"),
+        "risk_locked": st.get("risk_locked"),
     }
 
 

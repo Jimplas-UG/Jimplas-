@@ -2,13 +2,14 @@
 Tick-by-tick multi-coin momentum scanner + retracement short strategy.
 
 Monitors 1m / 3m / 5m / 15m rolling % on every price tick (max study window 15m).
-Entry: tick move >= 5% gain, then >= 0.7% retrace from peak → short (50% partition).
+Entry: 15m move >= 5% gain, then >= 0.7% retrace from peak → short (50% partition).
 Recovery: +2% adverse from short → Long1 (40%); +4% → Long2 (40%).
-Each long closes on 0.5% retrace from its own peak.
+Each long TP at 2.5% (same as short); optional 0.5% pullback exit remains as backup.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -41,7 +42,11 @@ PENDING_STALE_MS = int(os.environ.get("SCANNER_PENDING_STALE_MS", "120000"))
 PENDING_QUEUE_MS = int(os.environ.get("SCANNER_PENDING_QUEUE_MS", "1800000"))
 SIGNALS_PER_TF = int(os.environ.get("SCANNER_SIGNALS_PER_TF", "5"))
 TIMEFRAMES_MIN = (1, 3, 5, 15)
+ENTRY_TIMEFRAME = os.environ.get("SCANNER_ENTRY_TF", "15m").strip().lower()
 SIGNAL_WINDOW_SEC = {f"{m}m": m * 60 for m in TIMEFRAMES_MIN}
+RISK_CONFIG_PATH = os.environ.get(
+    "SCANNER_RISK_CONFIG_PATH", "/var/lib/bilshenz/scanner-risk.json"
+)
 
 MAGIC_SHORT = 88001
 MAGIC_LONG1 = 88002
@@ -142,6 +147,8 @@ class MomentumScanner:
         self._short_pct = SHORT_PARTITION_PCT
         self._long1_pct = LONG1_PARTITION_PCT
         self._long2_pct = LONG2_PARTITION_PCT
+        self._risk_locked = False
+        self._load_persisted_risk()
         self._recent_signals: deque[dict[str, Any]] = deque(maxlen=48)
         self._last_exec_error: str | None = None
         self._session_ok_cache: tuple[float, tuple[bool, str]] | None = None
@@ -207,13 +214,80 @@ class MomentumScanner:
         self._session_ok_cache = (now, result)
         return result
 
+    def _entry_qualify_pct(self, coin: CoinStrategy) -> float:
+        """Entry uses 15m rolling % only — coin must jump >=5% on 15m before retrace entry."""
+        if ENTRY_TIMEFRAME == "15m":
+            return coin.pct_15m
+        if ENTRY_TIMEFRAME == "5m":
+            return coin.pct_5m
+        if ENTRY_TIMEFRAME == "3m":
+            return coin.pct_3m
+        if ENTRY_TIMEFRAME == "1m":
+            return coin.pct_1m
+        return coin.pct_15m
+
+    def _persist_risk_config(self) -> None:
+        payload = {
+            "partition_usd": self._partition_usd,
+            "short_pct": self._short_pct,
+            "long1_pct": self._long1_pct,
+            "long2_pct": self._long2_pct,
+            "locked": self._risk_locked,
+        }
+        try:
+            path = RISK_CONFIG_PATH
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+            os.replace(tmp, path)
+        except Exception as e:
+            log.warning("persist risk config: %s", e)
+
+    def _load_persisted_risk(self) -> None:
+        try:
+            if not os.path.isfile(RISK_CONFIG_PATH):
+                return
+            with open(RISK_CONFIG_PATH, encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if float(raw.get("partition_usd") or 0) > 0:
+                self._partition_usd = float(raw["partition_usd"])
+            if raw.get("short_pct") is not None:
+                self._short_pct = float(raw["short_pct"])
+            if raw.get("long1_pct") is not None:
+                self._long1_pct = float(raw["long1_pct"])
+            if raw.get("long2_pct") is not None:
+                self._long2_pct = float(raw["long2_pct"])
+            self._risk_locked = bool(raw.get("locked"))
+            log.info(
+                "scanner risk loaded partition=$%s locked=%s",
+                self._partition_usd,
+                self._risk_locked,
+            )
+        except Exception as e:
+            log.warning("load risk config: %s", e)
+
     def set_risk_config(
         self,
         partition_usd: float | None = None,
         short_pct: float | None = None,
         long1_pct: float | None = None,
         long2_pct: float | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
+        if self._risk_locked:
+            changed = (
+                (partition_usd is not None and float(partition_usd) != self._partition_usd)
+                or (short_pct is not None and float(short_pct) != self._short_pct)
+                or (long1_pct is not None and float(long1_pct) != self._long1_pct)
+                or (long2_pct is not None and float(long2_pct) != self._long2_pct)
+            )
+            if changed:
+                return {
+                    "ok": False,
+                    "error": "partition_locked",
+                    "partition_usd": self._partition_usd,
+                    "locked": True,
+                }
         if partition_usd is not None and partition_usd > 0:
             self._partition_usd = float(partition_usd)
         if short_pct is not None:
@@ -222,13 +296,18 @@ class MomentumScanner:
             self._long1_pct = max(1.0, min(100.0, float(long1_pct)))
         if long2_pct is not None:
             self._long2_pct = max(1.0, min(100.0, float(long2_pct)))
+        if partition_usd is not None and partition_usd > 0:
+            self._risk_locked = True
+        self._persist_risk_config()
         log.info(
-            "scanner risk partition=$%s short=%s%% long1=%s%% long2=%s%%",
+            "scanner risk partition=$%s short=%s%% long1=%s%% long2=%s%% locked=%s",
             self._partition_usd,
             self._short_pct,
             self._long1_pct,
             self._long2_pct,
+            self._risk_locked,
         )
+        return {"ok": True, "locked": self._risk_locked}
 
     def close_strategy(self, symbol: str) -> dict[str, Any]:
         sym = symbol.upper()
@@ -359,7 +438,7 @@ class MomentumScanner:
                 continue
             if coin.retrace_pct < RETRACE_ENTRY_PCT:
                 continue
-            gain = max(coin.qualifying_pct or 0.0, coin.best_pct)
+            gain = max(coin.qualifying_pct or 0.0, self._entry_qualify_pct(coin))
             if gain < GAIN_THRESHOLD_PCT:
                 continue
             stale_ms = PENDING_QUEUE_MS if self._has_open_strategy() else PENDING_STALE_MS
@@ -410,6 +489,9 @@ class MomentumScanner:
             "long1_partition_pct": self._long1_pct,
             "long2_partition_pct": self._long2_pct,
             "long_pullback_pct": LONG_BOTH_PULLBACK_PCT,
+            "long_tp_pct": LONG_TP_PCT,
+            "entry_timeframe": ENTRY_TIMEFRAME,
+            "risk_locked": self._risk_locked,
             "last_exec_latency_ms": self._last_exec_latency_ms,
             "execution_events": self._engine.events()[:12],
         }
@@ -461,39 +543,40 @@ class MomentumScanner:
         self._prune_history(coin, now_ms)
         coin.pct_1m, coin.pct_3m, coin.pct_5m, coin.pct_15m = self._rolling_pcts(coin, now_ms)
         coin.best_pct, coin.best_tf = self._best_move(coin)
+        qualify_pct = self._entry_qualify_pct(coin)
 
         if coin.status in (STATUS_SCANNING, STATUS_CLOSED):
-            if coin.best_pct >= GAIN_THRESHOLD_PCT:
+            if qualify_pct >= GAIN_THRESHOLD_PCT:
                 coin.status = STATUS_WATCHING
                 coin.highest_price = price
                 coin.retrace_pct = 0.0
-                coin.qualifying_pct = max(coin.qualifying_pct or 0.0, coin.best_pct)
+                coin.qualifying_pct = max(coin.qualifying_pct or 0.0, qualify_pct)
+                coin.best_tf = ENTRY_TIMEFRAME
                 self._emit_signal(coin, "watch")
         elif coin.status in (STATUS_WATCHING, STATUS_PENDING):
-            coin.qualifying_pct = max(coin.qualifying_pct or 0.0, coin.best_pct)
+            if qualify_pct >= GAIN_THRESHOLD_PCT:
+                coin.qualifying_pct = max(coin.qualifying_pct or 0.0, qualify_pct)
+                coin.best_tf = ENTRY_TIMEFRAME
             if coin.highest_price is None or price > coin.highest_price:
                 coin.highest_price = price
             if coin.highest_price and coin.highest_price > 0:
                 coin.retrace_pct = ((coin.highest_price - price) / coin.highest_price) * 100.0
-            if coin.status == STATUS_PENDING and coin.retrace_pct < RETRACE_ENTRY_PCT:
-                coin.status = STATUS_WATCHING
-            elif coin.retrace_pct >= RETRACE_ENTRY_PCT and coin.status != STATUS_PENDING:
-                coin.status = STATUS_PENDING
-                self._emit_signal(coin, "pending")
-                if self._order_session_ok()[0] and sym not in self._in_flight and not coin.short:
-                    if self._one_at_a_time:
-                        self._maybe_execute_best_pending()
-                    else:
-                        self._try_open_short(coin)
-            elif (
-                coin.status == STATUS_PENDING
-                and self._order_session_ok()[0]
-                and self._one_at_a_time
-                and sym not in self._in_flight
-                and not coin.short
-                and not self._has_open_strategy()
+            still_qualified = (coin.qualifying_pct or 0.0) >= GAIN_THRESHOLD_PCT
+            if coin.status == STATUS_PENDING and (
+                coin.retrace_pct < RETRACE_ENTRY_PCT or not still_qualified
             ):
-                self._maybe_execute_best_pending()
+                coin.status = STATUS_WATCHING
+            elif (
+                coin.retrace_pct >= RETRACE_ENTRY_PCT
+                and still_qualified
+                and coin.status != STATUS_PENDING
+            ):
+                coin.status = STATUS_PENDING
+                coin.best_tf = ENTRY_TIMEFRAME
+                self._emit_signal(coin, "pending")
+                self._execute_pending_short(coin)
+            elif coin.status == STATUS_PENDING and still_qualified:
+                self._execute_pending_short(coin)
 
         if coin.short or coin.long1 or coin.long2:
             self._manage_positions(coin)
@@ -708,6 +791,17 @@ class MomentumScanner:
             qty = max(0.001, round(qty, 3))
         return qty
 
+    def _execute_pending_short(self, coin: CoinStrategy) -> None:
+        """Fire short to Binance immediately when 15m-qualified retrace triggers."""
+        sym = coin.symbol
+        ok, _ = self._order_session_ok()
+        if not ok or sym in self._in_flight or coin.short:
+            return
+        if self._one_at_a_time and self._has_open_strategy() and self._global_active_symbol() != sym:
+            self._maybe_execute_best_pending()
+            return
+        self._try_open_short(coin)
+
     def _try_open_short(self, coin: CoinStrategy) -> None:
         sym = coin.symbol
         if sym in self._in_flight:
@@ -733,6 +827,7 @@ class MomentumScanner:
                 signal_id=f"{sym}_SHORT_{coin.last_update_ms or int(time.time() * 1000)}",
                 partition_usd=self._partition_usd,
                 partition_pct=self._short_pct,
+                margin_type="ISOLATED",
             )
             self._emit_signal(coin, "executing")
             r = self._engine.execute(signal)
@@ -767,6 +862,7 @@ class MomentumScanner:
             magic = MAGIC_LONG1 if leg == 1 else MAGIC_LONG2
             leg_pct = self._long1_pct if leg == 1 else self._long2_pct
             qty = self._qty_for(sym, entry, lev, leg_pct)
+            tp = entry * (1.0 + LONG_TP_PCT / 100.0)
             signal = ExecutionSignal(
                 symbol=sym,
                 side="BUY",
@@ -775,15 +871,17 @@ class MomentumScanner:
                 leverage=lev,
                 magic=magic,
                 leg=f"LONG{leg}",
+                tp=tp,
                 signal_id=f"{sym}_LONG{leg}_{coin.last_update_ms or int(time.time() * 1000)}",
                 partition_usd=self._partition_usd,
                 partition_pct=leg_pct,
+                margin_type="ISOLATED",
             )
             r = self._engine.execute(signal)
             self._last_exec_latency_ms = r.latency_ms or None
             if r.ok:
                 fill = float(r.fill_price or entry)
-                pos = LegPosition("BUY", fill, qty, lev, magic, None)
+                pos = LegPosition("BUY", fill, qty, lev, magic, tp)
                 if leg == 1:
                     coin.long1 = pos
                     coin.long1_peak_price = fill
@@ -827,39 +925,45 @@ class MomentumScanner:
         if coin.long2 is None and adverse_pct >= LONG2_ADVERSE_PCT:
             self._try_open_long(coin, 2)
 
-        # Long1: close on 0.5% retrace from its own peak.
-        if coin.long1 and coin.long1_peak_price is not None:
-            if price > coin.long1_peak_price:
-                coin.long1_peak_price = price
-            peak = coin.long1_peak_price
-            if peak > 0:
-                pullback_pct = ((peak - price) / peak) * 100.0
-                if pullback_pct >= LONG_BOTH_PULLBACK_PCT:
-                    log.info(
-                        "scanner %s LONG1_PULLBACK %.2f%% (peak=%s price=%s)",
-                        coin.symbol,
-                        pullback_pct,
-                        peak,
-                        price,
-                    )
-                    self._close_leg(coin, "long1", reason="LONG1_PULLBACK")
+        # Long1: TP at +2.5% or 0.5% retrace from its own peak.
+        if coin.long1:
+            if coin.long1.tp_price and price >= coin.long1.tp_price:
+                self._close_leg(coin, "long1", reason="LONG1_TP")
+            elif coin.long1_peak_price is not None:
+                if price > coin.long1_peak_price:
+                    coin.long1_peak_price = price
+                peak = coin.long1_peak_price
+                if peak > 0:
+                    pullback_pct = ((peak - price) / peak) * 100.0
+                    if pullback_pct >= LONG_BOTH_PULLBACK_PCT:
+                        log.info(
+                            "scanner %s LONG1_PULLBACK %.2f%% (peak=%s price=%s)",
+                            coin.symbol,
+                            pullback_pct,
+                            peak,
+                            price,
+                        )
+                        self._close_leg(coin, "long1", reason="LONG1_PULLBACK")
 
-        # Long2: close immediately on 0.5% retrace from its own peak.
-        if coin.long2 and coin.long2_peak_price is not None:
-            if price > coin.long2_peak_price:
-                coin.long2_peak_price = price
-            peak = coin.long2_peak_price
-            if peak > 0:
-                pullback_pct = ((peak - price) / peak) * 100.0
-                if pullback_pct >= LONG_BOTH_PULLBACK_PCT:
-                    log.info(
-                        "scanner %s LONG2_PULLBACK %.2f%% (peak=%s price=%s)",
-                        coin.symbol,
-                        pullback_pct,
-                        peak,
-                        price,
-                    )
-                    self._close_leg(coin, "long2", reason="LONG2_PULLBACK")
+        # Long2: TP at +2.5% or 0.5% retrace from its own peak.
+        if coin.long2:
+            if coin.long2.tp_price and price >= coin.long2.tp_price:
+                self._close_leg(coin, "long2", reason="LONG2_TP")
+            elif coin.long2_peak_price is not None:
+                if price > coin.long2_peak_price:
+                    coin.long2_peak_price = price
+                peak = coin.long2_peak_price
+                if peak > 0:
+                    pullback_pct = ((peak - price) / peak) * 100.0
+                    if pullback_pct >= LONG_BOTH_PULLBACK_PCT:
+                        log.info(
+                            "scanner %s LONG2_PULLBACK %.2f%% (peak=%s price=%s)",
+                            coin.symbol,
+                            pullback_pct,
+                            peak,
+                            price,
+                        )
+                        self._close_leg(coin, "long2", reason="LONG2_PULLBACK")
 
         if short.tp_price and price <= short.tp_price:
             self._close_all(coin, "SHORT_TP")

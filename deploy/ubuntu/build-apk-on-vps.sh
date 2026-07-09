@@ -116,6 +116,61 @@ echo "desk=$EXPO_PUBLIC_DESK_API_URL binance=$EXPO_PUBLIC_BINANCE_API_URL commit
 
 npx expo prebuild --platform android --clean
 
+# ── 4a. Persistent release keystore (same key every build — upgrades install cleanly) ─
+KEYSTORE="${ANDROID_KEYSTORE_PATH:-/etc/bilshenz/bilshenz-release.keystore}"
+KS_PASS="${ANDROID_KEYSTORE_PASSWORD:-bilshenzRelease}"
+KS_ALIAS="${ANDROID_KEY_ALIAS:-bilshenz}"
+if [[ ! -f "$KEYSTORE" ]]; then
+  mkdir -p "$(dirname "$KEYSTORE")"
+  keytool -genkeypair -v -keystore "$KEYSTORE" -storepass "$KS_PASS" -keypass "$KS_PASS" \
+    -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 36500 \
+    -dname "CN=Bilshenz, OU=Mobile, O=Jimplas, C=UG"
+  chmod 600 "$KEYSTORE"
+  echo "Created release keystore $KEYSTORE"
+fi
+PROP="$FRONTEND/android/gradle.properties"
+grep -q '^BILSHENZ_UPLOAD_STORE_FILE=' "$PROP" 2>/dev/null || {
+  cat >> "$PROP" <<EOF
+BILSHENZ_UPLOAD_STORE_FILE=$KEYSTORE
+BILSHENZ_UPLOAD_STORE_PASSWORD=$KS_PASS
+BILSHENZ_UPLOAD_KEY_ALIAS=$KS_ALIAS
+BILSHENZ_UPLOAD_KEY_PASSWORD=$KS_PASS
+EOF
+}
+APP_GRADLE="$FRONTEND/android/app/build.gradle"
+if [[ -f "$APP_GRADLE" ]] && ! grep -q 'BILSHENZ_UPLOAD_STORE_FILE' "$APP_GRADLE"; then
+  python3 - <<'PY' "$APP_GRADLE"
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+text = p.read_text()
+if "BILSHENZ_UPLOAD_STORE_FILE" in text:
+    raise SystemExit(0)
+block = '''
+    signingConfigs {
+        release {
+            if (project.hasProperty('BILSHENZ_UPLOAD_STORE_FILE')) {
+                storeFile file(BILSHENZ_UPLOAD_STORE_FILE)
+                storePassword BILSHENZ_UPLOAD_STORE_PASSWORD
+                keyAlias BILSHENZ_UPLOAD_KEY_ALIAS
+                keyPassword BILSHENZ_UPLOAD_KEY_PASSWORD
+            }
+        }
+    }
+'''
+if "signingConfigs {" in text:
+    text = text.replace("signingConfigs {", block.strip() + "\n    signingConfigs {", 1)
+else:
+    text = text.replace("android {", "android {\n" + block, 1)
+text = text.replace(
+    "signingConfig signingConfigs.debug",
+    "signingConfig signingConfigs.release",
+)
+p.write_text(text)
+print("patched signingConfigs in", p)
+PY
+fi
+
 # ── 4. Fix splashscreen_logo in ALL drawable buckets (Gradle AAPT fix) ────
 SPLASH_SRC=""
 for f in "$FRONTEND/assets/splash-icon.png" "$FRONTEND/assets/icon.png"; do

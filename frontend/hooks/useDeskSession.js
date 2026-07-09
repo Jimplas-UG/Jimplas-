@@ -88,6 +88,10 @@ export function useDeskSession({ enabled = true, loadBars = true, pollTicks = tr
     if (!baseUrl?.trim() || !riskDesk.hydrated || !connected) return undefined;
     lastSyncKeyRef.current = '';
     void syncScannerRisk();
+    void postBinanceMarginMode(baseUrl, {
+      symbol: sanitizeFuturesSymbol(defaultSymbolForBroker(), DEFAULT_CHART_SYMBOL),
+      marginType: 'ISOLATED',
+    }).catch(() => {});
     return undefined;
   }, [baseUrl, connected, sessionEpoch, riskDesk.hydrated, syncScannerRisk]);
 

@@ -342,13 +342,14 @@ class BinanceConnector:
 
     def prepare_symbol_cached(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> None:
         sym = symbol.upper()
-        key = (sym, int(leverage), margin_type.upper())
+        mt = "ISOLATED"
+        key = (sym, int(leverage), mt)
         if key in self._prepared_cache and time.time() - self._prepared_cache[key] < 3600:
             self.cfg.symbol = sym
             self.cfg.leverage = int(leverage)
-            self.cfg.margin_type = margin_type.upper()
+            self.cfg.margin_type = mt
             return
-        self.prepare_symbol(sym, leverage, margin_type)
+        self.prepare_symbol(sym, leverage, mt)
         self._prepared_cache[key] = time.time()
 
     def _parse_order_error(self, exc: Exception) -> dict[str, Any]:
@@ -595,10 +596,9 @@ class BinanceConnector:
         return self.cfg.margin_type.upper()
 
     def set_margin_type(self, margin_type: str, symbol: str | None = None) -> dict[str, Any]:
+        """Scanner always uses ISOLATED — align with Binance per-position margin."""
         sym = (symbol or self.cfg.symbol).upper()
-        mt = margin_type.upper()
-        if mt not in ("ISOLATED", "CROSS"):
-            return {"ok": False, "error": "margin_type must be ISOLATED or CROSS"}
+        mt = "ISOLATED"
         if self.cfg.paper:
             self.cfg.margin_type = mt
             return {"ok": True, "margin_type": mt, "symbol": sym}
@@ -1167,7 +1167,7 @@ class BinanceConnector:
         sym = symbol.upper()
         self.cfg.symbol = sym
         self.cfg.leverage = int(leverage)
-        self.cfg.margin_type = margin_type.upper()
+        self.cfg.margin_type = "ISOLATED"
         self._symbol_info = None
         if self.cfg.paper:
             return
@@ -1338,7 +1338,7 @@ def config_from_env() -> BinanceConfig:
         testnet=_truthy(os.environ.get("BINANCE_TESTNET", "1")),
         symbol=os.environ.get("BINANCE_SYMBOL", "BTCUSDT").upper() or "BTCUSDT",
         leverage=int(os.environ.get("BINANCE_LEVERAGE", "10")),
-        margin_type=os.environ.get("BINANCE_MARGIN_TYPE", "ISOLATED").upper(),
+        margin_type="ISOLATED",
         paper=_truthy(os.environ.get("BINANCE_PAPER", "0")),
         pip_size=float(
             os.environ.get("BINANCE_TICK_SIZE")

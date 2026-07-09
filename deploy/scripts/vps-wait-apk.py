@@ -56,10 +56,12 @@ def main() -> int:
         print(out[-1200:])
 
         manifest = None
-        for line in out.splitlines():
-            if line.strip().startswith("{"):
+        if "{" in out:
+            start = out.find("{")
+            end = out.rfind("}")
+            if start >= 0 and end > start:
                 try:
-                    manifest = json.loads(line)
+                    manifest = json.loads(out[start : end + 1])
                 except json.JSONDecodeError:
                     pass
 

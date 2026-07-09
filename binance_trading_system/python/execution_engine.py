@@ -342,7 +342,7 @@ class ExecutionEngine:
         self._inflight_client_ids.add(client_id)
 
         try:
-            self._connector.prepare_symbol_cached(sym, signal.leverage, signal.margin_type)
+            self._connector.prepare_symbol_cached(sym, signal.leverage, "ISOLATED")
             last_err: Exception | None = None
             for attempt in range(MAX_RETRIES + 1):
                 try:

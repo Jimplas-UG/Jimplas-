@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { fmtRiskUsd } from '../lib/riskDeskModel';
-import { PARTITION_PRESETS_USD, LEVERAGE_PRESETS, MARGIN_MODE_PRESETS } from '../lib/riskDeskDefaults';
+import { PARTITION_PRESETS_USD, LEVERAGE_PRESETS } from '../lib/riskDeskDefaults';
 import OpenPositionsPanel from './OpenPositionsPanel';
 import BinanceStatusStrip from './BinanceStatusStrip';
 
@@ -38,7 +38,7 @@ function MetricTile({ label, value, sub, color, C }) {
   );
 }
 
-function PresetChipRow({ label, hint, options, value, onChange, format, C }) {
+function PresetChipRow({ label, hint, options, value, onChange, format, locked, C }) {
   return (
     <View style={st.presetBlock}>
       <Text style={[st.sliderLab, { color: C.dim }]}>{label}</Text>
@@ -49,11 +49,16 @@ function PresetChipRow({ label, hint, options, value, onChange, format, C }) {
           return (
             <Pressable
               key={String(opt)}
-              onPress={() => onChange(opt)}
+              onPress={() => !locked && onChange(opt)}
+              disabled={locked && !on}
               style={({ pressed }) => [
                 st.chip,
-                { borderColor: on ? C.accent : C.border, backgroundColor: on ? C.accentDim : C.panel2 },
-                pressed && { opacity: 0.85 },
+                {
+                  borderColor: on ? C.accent : C.border,
+                  backgroundColor: on ? C.accentDim : C.panel2,
+                  opacity: locked && !on ? 0.45 : 1,
+                },
+                pressed && !locked && { opacity: 0.85 },
               ]}>
               <Text style={[st.chipTxt, { color: on ? C.accentLight : C.text }]}>{format(opt)}</Text>
             </Pressable>
@@ -89,7 +94,6 @@ export default function InstitutionalRiskDesk({
 }) {
   const { colors: C } = useBilshenzTheme();
   const [confirmStop, setConfirmStop] = useState(false);
-  const [marginBusy, setMarginBusy] = useState(false);
 
   if (!hydrated) {
     return (
@@ -102,18 +106,7 @@ export default function InstitutionalRiskDesk({
 
   const levCapOk = metrics.activeLeverage <= config.defaultLeverage;
   const activeMargin = (brokerAccount?.margin_type ?? config.marginMode).toUpperCase();
-  const marginOk = !brokerConnected || activeMargin === config.marginMode;
-
-  const applyMarginMode = async (mode) => {
-    if (marginBusy || mode === config.marginMode) return;
-    setMarginBusy(true);
-    try {
-      if (onMarginModeChange) await onMarginModeChange(mode);
-      else onConfigChange({ marginMode: mode });
-    } finally {
-      setMarginBusy(false);
-    }
-  };
+  const marginOk = !brokerConnected || activeMargin === 'ISOLATED';
 
   return (
     <ScrollView
@@ -123,7 +116,7 @@ export default function InstitutionalRiskDesk({
       <View style={st.hero}>
         <Text style={[st.heroTitle, { color: C.text }]}>Risk settings</Text>
         <Text style={[st.heroSub, { color: C.dim }]}>
-          Tick scanner capital split — short 50%, long legs 40% each (USDT-M Futures)
+          15m momentum entry — short 50%, recovery longs 40% each · Isolated margin only
         </Text>
       </View>
 
@@ -188,13 +181,26 @@ export default function InstitutionalRiskDesk({
         </View>
         <PresetChipRow
           label="Subscribe partition"
-          hint="Pick what you are ready to lose — only this slice is used for new trades."
+          hint={
+            config.partitionLocked
+              ? 'Partition locked — this amount is fixed for all scanner trades until you reset risk desk.'
+              : 'Pick what you are ready to lose — only this slice is used for new trades.'
+          }
           options={PARTITION_PRESETS_USD}
           value={config.partitionUsd}
-          onChange={(v) => onConfigChange({ partitionUsd: v })}
+          onChange={(v) => {
+            if (config.partitionLocked) return;
+            onConfigChange({ partitionUsd: v, partitionLocked: true });
+          }}
+          locked={config.partitionLocked}
           format={(v) => `$${v}`}
           C={C}
         />
+        {config.partitionLocked ? (
+          <Text style={[st.ruleNote, { color: C.amber }]}>
+            Partition ${config.partitionUsd} subscribed and locked (50% short · 40% long1 · 40% long2).
+          </Text>
+        ) : null}
         <Text style={[st.ruleNote, { color: C.dim }]}>
           Balance above your partition stays protected and is never allocated to new trades.
         </Text>
@@ -221,28 +227,16 @@ export default function InstitutionalRiskDesk({
           format={(v) => `${v}x`}
           C={C}
         />
-        <PresetChipRow
-          label="Margin mode"
-          hint={
-            brokerConnected
-              ? 'Applies to Binance Futures for this symbol. Close open positions first if Binance rejects the switch.'
-              : 'Saved for when you connect — Isolated limits risk per position; Cross shares wallet margin.'
-          }
-          options={MARGIN_MODE_PRESETS}
-          value={config.marginMode}
-          onChange={applyMarginMode}
-          format={(v) => (v === 'ISOLATED' ? 'Isolated' : 'Cross')}
-          C={C}
-        />
-        {marginBusy ? (
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 }}>
-            <ActivityIndicator size="small" color={C.accent} />
-            <Text style={{ color: C.dim, fontSize: 10 }}>Updating margin mode on Binance…</Text>
-          </View>
-        ) : null}
+        <View style={[st.metricTile, { borderColor: C.border, width: '100%' }]}>
+          <Text style={[st.metricLab, { color: C.dim }]}>Margin mode</Text>
+          <Text style={[st.metricVal, { color: C.green }]}>Isolated</Text>
+          <Text style={[st.metricSub, { color: C.dim }]}>
+            Required for scanner trades — each position uses its own margin (aligned with Binance).
+          </Text>
+        </View>
         {!marginOk && brokerConnected ? (
           <Text style={[st.ruleNote, { color: C.red }]}>
-            Binance reports {activeMargin} but you selected {config.marginMode}. Tap again or close positions to switch.
+            Binance reports {activeMargin} — switch symbol to Isolated in Binance or close positions first.
           </Text>
         ) : null}
       </RiskCard>

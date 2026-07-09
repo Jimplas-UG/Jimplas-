@@ -84,19 +84,64 @@ def test_multi_tf_gain_then_retrace_pending() -> None:
         sc.on_tick(sym, spike)
         coin = sc._coins[sym]
         assert coin.status == STATUS_WATCHING
-        assert coin.best_pct >= GAIN_THRESHOLD_PCT
-        assert coin.best_tf in ("1m", "3m", "5m", "15m")
+        assert coin.pct_15m >= GAIN_THRESHOLD_PCT
+        assert coin.best_tf == "15m"
 
         retrace_price = spike * (1.0 - 0.008)
         sc.on_tick(sym, retrace_price)
         assert coin.retrace_pct >= RETRACE_ENTRY_PCT
+        assert (coin.qualifying_pct or 0) >= GAIN_THRESHOLD_PCT
         assert coin.status == STATUS_PENDING
-        print("OK entry: >=5% gain + >=0.7% retrace -> PENDING")
+        print("OK entry: 15m >=5% gain + >=0.7% retrace -> PENDING")
     finally:
         if prev is None:
             os.environ.pop("SCANNER_EXEC", None)
         else:
             os.environ["SCANNER_EXEC"] = prev
+
+
+def test_long1_tp_at_2_5_pct() -> None:
+    conn = FakeConnector()
+    sc = MomentumScanner(conn, lambda: True)
+    sym = "TESTUSDT"
+    entry = 100.0
+    sc.load_symbols([sym])
+    sc.on_tick(sym, entry)
+    coin = sc._coins[sym]
+    from momentum_scanner import LegPosition, MAGIC_LONG1, MAGIC_SHORT, LONG1_LEVERAGE, LONG_TP_PCT, SHORT_LEVERAGE, STATUS_LONG1, STATUS_SHORT
+
+    tp = entry * (1.0 + LONG_TP_PCT / 100.0)
+    coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+    coin.status = STATUS_SHORT
+    coin.long1 = LegPosition("BUY", entry, 1.0, LONG1_LEVERAGE, MAGIC_LONG1, tp)
+    coin.long1_peak_price = entry
+    coin.status = STATUS_LONG1
+
+    sc.on_tick(sym, tp + 0.01)
+    assert coin.long1 is None, "long1 should close at +2.5% TP"
+    print("OK long1: TP at +2.5%")
+
+
+def test_long2_tp_at_2_5_pct() -> None:
+    conn = FakeConnector()
+    sc = MomentumScanner(conn, lambda: True)
+    sym = "TESTUSDT"
+    entry = 100.0
+    sc.load_symbols([sym])
+    sc.on_tick(sym, entry)
+    coin = sc._coins[sym]
+    from momentum_scanner import LegPosition, MAGIC_LONG2, MAGIC_SHORT, LONG2_LEVERAGE, LONG_TP_PCT, SHORT_LEVERAGE, STATUS_LONG2, STATUS_SHORT
+
+    tp = entry * (1.0 + LONG_TP_PCT / 100.0)
+    coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+    coin.status = STATUS_SHORT
+    coin.long2 = LegPosition("BUY", entry, 1.0, LONG2_LEVERAGE, MAGIC_LONG2, tp)
+    coin.long2_peak_price = entry
+    coin.status = STATUS_LONG2
+
+    sc.on_tick(sym, tp + 0.01)
+    assert coin.long2 is None, "long2 should close at +2.5% TP"
+    print("OK long2: TP at +2.5%")
 
 
 def test_long1_opens_and_pullback_close() -> None:
@@ -148,6 +193,8 @@ def test_long2_opens_and_pullback_close() -> None:
 if __name__ == "__main__":
     try:
         test_multi_tf_gain_then_retrace_pending()
+        test_long1_tp_at_2_5_pct()
+        test_long2_tp_at_2_5_pct()
         test_long1_opens_and_pullback_close()
         test_long2_opens_and_pullback_close()
     except AssertionError as e:
