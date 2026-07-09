@@ -125,7 +125,7 @@ export function useBinanceLiveFeed({
     return true;
   }, []);
 
-  const loadBars = useCallback(
+  const loadM30Bars = useCallback(
     async (count, { background = false } = {}) => {
       const b = baseUrl?.trim();
       if (!b || !barsActive) return false;
@@ -287,7 +287,7 @@ export function useBinanceLiveFeed({
           if (!cancelled && st.account) setAccount(st.account);
         }
         if (!cancelled && barsResult.ok && barsResult.bars.length) {
-          void loadBars(FULL_BARS, { background: true });
+          void loadM30Bars(FULL_BARS, { background: true });
         }
       })();
     })();
