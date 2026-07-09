@@ -105,7 +105,9 @@ export NODE_ENV=production
 export NODE_OPTIONS="--max-old-space-size=2048"
 export EXPO_NO_METRO_CACHE=1
 export EXPO_PUBLIC_DESK_LOCAL=0
-export EXPO_PUBLIC_DESK_REMOTE=1
+export EXPO_PUBLIC_FAST_SPLASH=1
+export EXPO_PUBLIC_SKIP_SPLASH=1
+export EXPO_PUBLIC_AUTH_REQUIRED=0
 export EXPO_PUBLIC_DESK_API_URL="${EXPO_PUBLIC_DESK_API_URL:-http://157.245.33.42:8791}"
 export EXPO_PUBLIC_BINANCE_API_URL="${EXPO_PUBLIC_BINANCE_API_URL:-${EXPO_PUBLIC_DESK_API_URL%/}/v1/binance}"
 if [[ -n "${DESK_API_KEY:-}" ]]; then
@@ -113,6 +115,10 @@ if [[ -n "${DESK_API_KEY:-}" ]]; then
 fi
 
 echo "desk=$EXPO_PUBLIC_DESK_API_URL binance=$EXPO_PUBLIC_BINANCE_API_URL commit=$GIT_SHORT"
+
+echo "==> Release preflight (bundle + assets)"
+cd "$FRONTEND"
+SKIP_GIT_CHECK=1 node scripts/verify-release-build.js || { echo "FATAL: verify-release-build failed"; exit 1; }
 
 npx expo prebuild --platform android --clean
 
@@ -179,7 +185,7 @@ grep -q '^org.gradle.jvmargs=' "$PROP" || echo 'org.gradle.jvmargs=-Xmx2048m -XX
 grep -q '^android.enableLint=' "$PROP" || echo 'android.enableLint=false' >> "$PROP"
 grep -q '^org.gradle.parallel=' "$PROP" || echo 'org.gradle.parallel=false' >> "$PROP"
 grep -q '^org.gradle.workers.max=' "$PROP" || echo 'org.gradle.workers.max=2' >> "$PROP"
-sed -i 's/^reactNativeArchitectures=.*/reactNativeArchitectures=arm64-v8a/' "$PROP" 2>/dev/null || echo 'reactNativeArchitectures=arm64-v8a' >> "$PROP"
+sed -i 's/^reactNativeArchitectures=.*/reactNativeArchitectures=armeabi-v7a,arm64-v8a/' "$PROP" 2>/dev/null || echo 'reactNativeArchitectures=armeabi-v7a,arm64-v8a' >> "$PROP"
 echo "sdk.dir=$SDK" > "$FRONTEND/android/local.properties"
 
 # Disable lint in app/build.gradle
@@ -193,7 +199,7 @@ cd "$FRONTEND/android"
 chmod +x gradlew
 ./gradlew clean --no-daemon
 ./gradlew assembleRelease --no-daemon --stacktrace \
-  -PreactNativeArchitectures=arm64-v8a \
+  -PreactNativeArchitectures=armeabi-v7a,arm64-v8a \
   -x lint -x lintVitalRelease -x lintVitalAnalyzeRelease \
   -x lintAnalyzeRelease -x lintReportRelease
 
@@ -237,6 +243,28 @@ print(json.dumps(manifest, indent=2))
 PY
 
 ls -lh "$APK" "$DIST/bilshenz-release.apk"
+
+echo "==> APK verify"
+python3 - <<PY
+import json, zipfile, sys
+from pathlib import Path
+apk = Path("$APK")
+if not apk.is_file() or apk.stat().st_size < 5_000_000:
+    print("FATAL: APK missing or too small", apk)
+    sys.exit(1)
+with zipfile.ZipFile(apk) as z:
+    names = z.namelist()
+    if "classes.dex" not in names:
+        print("FATAL: not a valid APK (no classes.dex)")
+        sys.exit(1)
+    libs = [n for n in names if n.startswith("lib/")]
+    if not libs:
+        print("FATAL: APK has no native libs")
+        sys.exit(1)
+    print("OK apk libs:", ", ".join(sorted({n.split("/")[1] for n in libs if n.count("/") >= 2})))
+print("OK apk size", apk.stat().st_size)
+PY
+
 systemctl restart bilshenz-desk-api bilshenz-binance-api || true
 sleep 3
 

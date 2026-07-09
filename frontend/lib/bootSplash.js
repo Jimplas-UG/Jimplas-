@@ -8,7 +8,11 @@ let hideStarted = false;
 let forceTimer = null;
 
 export function initBootSplash() {
-  SplashScreen.preventAutoHideAsync().catch(() => {});
+  try {
+    SplashScreen.preventAutoHideAsync().catch(() => {});
+  } catch {
+    /* native splash unavailable */
+  }
   if (forceTimer) clearTimeout(forceTimer);
   forceTimer = setTimeout(() => {
     hideBootSplash('force-timeout');
