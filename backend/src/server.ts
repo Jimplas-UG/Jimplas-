@@ -19,15 +19,55 @@ import { fileURLToPath } from 'node:url';
 
 const BACKEND_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_ROOT = path.join(BACKEND_ROOT, '..');
-const APK_CANDIDATES = [
-  process.env.BILSHENZ_APK_PATH?.trim(),
-  path.join(REPO_ROOT, 'frontend', 'dist', 'bilshenz-release.apk'),
-  path.join(REPO_ROOT, 'frontend', 'dist', 'bilshenz-release-signed.apk'),
-  '/opt/bilshenz/frontend/dist/bilshenz-release.apk',
-].filter((p): p is string => !!p);
+const DIST_DIR = path.join(REPO_ROOT, 'frontend', 'dist');
+const MANIFEST_PATHS = [
+  path.join(DIST_DIR, 'release-manifest.json'),
+  '/opt/bilshenz/frontend/dist/release-manifest.json',
+];
+
+type ReleaseManifest = {
+  versionName?: string;
+  versionCode?: number;
+  gitCommit?: string;
+  gitShort?: string;
+  buildTime?: string;
+  apkFile?: string;
+  sha256?: string;
+  sizeBytes?: number;
+  deskApiUrl?: string;
+  binanceApiUrl?: string;
+};
+
+function readReleaseManifest(): ReleaseManifest | null {
+  for (const mp of MANIFEST_PATHS) {
+    try {
+      if (!fs.existsSync(mp)) continue;
+      return JSON.parse(fs.readFileSync(mp, 'utf8')) as ReleaseManifest;
+    } catch {
+      /* skip */
+    }
+  }
+  return null;
+}
+
+function distApkCandidates(): string[] {
+  const manifest = readReleaseManifest();
+  const fromManifest = manifest?.apkFile
+    ? [path.join(DIST_DIR, manifest.apkFile), path.join('/opt/bilshenz/frontend/dist', manifest.apkFile)]
+    : [];
+  return [
+    ...fromManifest,
+    process.env.BILSHENZ_APK_PATH?.trim(),
+    path.join(DIST_DIR, 'bilshenz.apk'),
+    path.join(DIST_DIR, 'bilshenz-release.apk'),
+    path.join(DIST_DIR, 'bilshenz-release-signed.apk'),
+    '/opt/bilshenz/frontend/dist/bilshenz.apk',
+    '/opt/bilshenz/frontend/dist/bilshenz-release.apk',
+  ].filter((p): p is string => !!p);
+}
 
 function resolveApkPath(): string | null {
-  for (const p of APK_CANDIDATES) {
+  for (const p of distApkCandidates()) {
     try {
       if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
     } catch {
@@ -37,13 +77,24 @@ function resolveApkPath(): string | null {
   return null;
 }
 
-function serveApkDownload(res: http.ServerResponse, apkPath: string): void {
+function serveApkDownload(res: http.ServerResponse, apkPath: string, downloadName?: string): void {
   const stat = fs.statSync(apkPath);
+  const manifest = readReleaseManifest();
+  const fname =
+    downloadName ||
+    manifest?.apkFile ||
+    `bilshenz-v${manifest?.versionName ?? 'release'}.apk`;
   res.writeHead(200, {
     'Content-Type': 'application/vnd.android.package-archive',
-    'Content-Disposition': 'attachment; filename="bilshenz-release.apk"',
+    'Content-Disposition': `attachment; filename="${fname}"`,
     'Content-Length': stat.size,
-    'Cache-Control': 'public, max-age=300',
+    'Cache-Control': 'no-store, no-cache, must-revalidate',
+    'Pragma': 'no-cache',
+    'X-Bilshenz-Build': manifest?.buildTime ?? '',
+    'X-Bilshenz-Commit': manifest?.gitShort ?? manifest?.gitCommit ?? '',
+    'X-Bilshenz-Version': manifest?.versionName ?? '',
+    'X-Bilshenz-VersionCode': manifest?.versionCode != null ? String(manifest.versionCode) : '',
+    'X-Bilshenz-SHA256': manifest?.sha256 ?? '',
   });
   fs.createReadStream(apkPath).pipe(res);
 }
@@ -210,33 +261,77 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Public APK install — uses desk-api port 8791 (already open on VPS firewall).
+  if (urlEarly.pathname === '/download/manifest.json' && req.method === 'GET') {
+    const manifest = readReleaseManifest();
+    const apkPath = resolveApkPath();
+    res.writeHead(manifest ? 200 : 404, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    });
+    res.end(
+      JSON.stringify(
+        manifest
+          ? {
+              ok: true,
+              ...manifest,
+              apkPresent: !!apkPath,
+              apkSizeBytes: apkPath ? fs.statSync(apkPath).size : null,
+            }
+          : { ok: false, error: 'manifest_not_found' },
+      ),
+    );
+    return;
+  }
+
   if (
-    (urlEarly.pathname === '/download/bilshenz.apk' || urlEarly.pathname === '/download/bilshenz-release.apk') &&
+    (urlEarly.pathname === '/download/bilshenz.apk' ||
+      urlEarly.pathname === '/download/bilshenz-release.apk' ||
+      urlEarly.pathname.startsWith('/download/bilshenz-v')) &&
     req.method === 'GET'
   ) {
-    const apkPath = resolveApkPath();
+    let apkPath = resolveApkPath();
+    if (urlEarly.pathname.startsWith('/download/bilshenz-v')) {
+      const versioned = path.basename(urlEarly.pathname);
+      const candidates = [
+        path.join(DIST_DIR, versioned),
+        path.join('/opt/bilshenz/frontend/dist', versioned),
+      ];
+      for (const c of candidates) {
+        if (fs.existsSync(c)) {
+          apkPath = c;
+          break;
+        }
+      }
+    }
     if (!apkPath) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
           error: 'apk_not_found',
-          detail: 'Upload bilshenz-release.apk to /opt/bilshenz/frontend/dist/ on the VPS.',
+          detail: 'No fresh APK — run deploy/ubuntu/build-apk-on-vps.sh on the VPS.',
         }),
       );
       return;
     }
-    serveApkDownload(res, apkPath);
+    serveApkDownload(res, apkPath, path.basename(apkPath));
     return;
   }
 
   if (urlEarly.pathname === '/download' && req.method === 'GET') {
     const apkPath = resolveApkPath();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const manifest = readReleaseManifest();
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(
       JSON.stringify({
         ok: !!apkPath,
         apkUrl: apkPath ? '/download/bilshenz.apk' : null,
+        manifestUrl: '/download/manifest.json',
         sizeBytes: apkPath ? fs.statSync(apkPath).size : null,
+        versionName: manifest?.versionName ?? null,
+        versionCode: manifest?.versionCode ?? null,
+        gitCommit: manifest?.gitShort ?? manifest?.gitCommit ?? null,
+        buildTime: manifest?.buildTime ?? null,
+        sha256: manifest?.sha256 ?? null,
       }),
     );
     return;
