@@ -17,6 +17,7 @@ mkdir -p "$DIST" /var/log/bilshenz "$SDK"
 exec >>"$LOG" 2>&1
 echo ""
 echo "=== FRESH APK build START $BUILD_STAMP ==="
+echo "BUILD_START_EPOCH=$(date +%s)" > /var/run/bilshenz-apk-build.meta
 
 # ── 1. Latest source ──────────────────────────────────────────────────────
 cd "$APP_DIR"
@@ -147,19 +148,7 @@ if [[ -f "$APP_GRADLE" ]] && ! grep -q 'checkReleaseBuilds false' "$APP_GRADLE";
   sed -i '/android {/a\    lint { checkReleaseBuilds false; abortOnError false }' "$APP_GRADLE" || true
 fi
 
-# ── 5. JS bundle preflight (fail fast with readable error) ─────────────────
-cd "$FRONTEND"
-echo "JS bundle preflight..."
-npx react-native bundle \
-  --platform android \
-  --dev false \
-  --entry-file index.js \
-  --bundle-output /tmp/bilshenz-preflight.bundle \
-  --assets-dest /tmp/bilshenz-preflight-assets \
-  2>&1 | tail -n 30
-echo "Preflight bundle OK"
-
-# ── 6. Gradle release (single ABI, no lint) ───────────────────────────────
+# ── 5. Gradle release (single ABI, no lint) — Expo bundles JS during assembleRelease ─
 cd "$FRONTEND/android"
 chmod +x gradlew
 ./gradlew clean --no-daemon
