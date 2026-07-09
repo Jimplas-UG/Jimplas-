@@ -128,46 +128,31 @@ if [[ ! -f "$KEYSTORE" ]]; then
   chmod 600 "$KEYSTORE"
   echo "Created release keystore $KEYSTORE"
 fi
-PROP="$FRONTEND/android/gradle.properties"
-grep -q '^BILSHENZ_UPLOAD_STORE_FILE=' "$PROP" 2>/dev/null || {
-  cat >> "$PROP" <<EOF
-BILSHENZ_UPLOAD_STORE_FILE=$KEYSTORE
-BILSHENZ_UPLOAD_STORE_PASSWORD=$KS_PASS
-BILSHENZ_UPLOAD_KEY_ALIAS=$KS_ALIAS
-BILSHENZ_UPLOAD_KEY_PASSWORD=$KS_PASS
-EOF
-}
+APP_KS="$FRONTEND/android/app/bilshenz-release.keystore"
+cp -f "$KEYSTORE" "$APP_KS"
 APP_GRADLE="$FRONTEND/android/app/build.gradle"
-if [[ -f "$APP_GRADLE" ]] && ! grep -q 'BILSHENZ_UPLOAD_STORE_FILE' "$APP_GRADLE"; then
-  python3 - <<'PY' "$APP_GRADLE"
+if [[ -f "$APP_GRADLE" ]] && ! grep -q 'bilshenz-release.keystore' "$APP_GRADLE"; then
+  python3 - "$APP_GRADLE" "$KS_PASS" "$KS_ALIAS" <<'PY'
 import sys
 from pathlib import Path
 p = Path(sys.argv[1])
+ks_pass = sys.argv[2]
+ks_alias = sys.argv[3]
 text = p.read_text()
-if "BILSHENZ_UPLOAD_STORE_FILE" in text:
+if "bilshenz-release.keystore" in text:
     raise SystemExit(0)
-block = '''
-    signingConfigs {
-        release {
-            if (project.hasProperty('BILSHENZ_UPLOAD_STORE_FILE')) {
-                storeFile file(BILSHENZ_UPLOAD_STORE_FILE)
-                storePassword BILSHENZ_UPLOAD_STORE_PASSWORD
-                keyAlias BILSHENZ_UPLOAD_KEY_ALIAS
-                keyPassword BILSHENZ_UPLOAD_KEY_PASSWORD
-            }
-        }
-    }
-'''
+release_block = f"""
+        release {{
+            storeFile file('bilshenz-release.keystore')
+            storePassword '{ks_pass}'
+            keyAlias '{ks_alias}'
+            keyPassword '{ks_pass}'
+        }}"""
 if "signingConfigs {" in text:
-    text = text.replace("signingConfigs {", block.strip() + "\n    signingConfigs {", 1)
-else:
-    text = text.replace("android {", "android {\n" + block, 1)
-text = text.replace(
-    "signingConfig signingConfigs.debug",
-    "signingConfig signingConfigs.release",
-)
+    text = text.replace("signingConfigs {", "signingConfigs {" + release_block, 1)
+text = text.replace("signingConfig signingConfigs.debug", "signingConfig signingConfigs.release", 1)
 p.write_text(text)
-print("patched signingConfigs in", p)
+print("patched release signing in", p)
 PY
 fi
 
