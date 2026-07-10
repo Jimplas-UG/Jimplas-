@@ -545,6 +545,7 @@ class BinanceConnector:
             self.load_all_symbol_specs(force=True)
             self.is_hedge_mode()
             self.sync_server_time(force=True)
+            self.align_isolated_margin_open_symbols()
         except Exception as e:
             log.warning("warm_order_cache: %s", e)
 
@@ -701,6 +702,7 @@ class BinanceConnector:
         upnl = float(data.get("totalUnrealizedProfit", 0))
         margin = float(data.get("totalPositionInitialMargin", 0))
         free = float(data.get("availableBalance", 0))
+        margin_type = self._account_margin_type_from_positions()
         return {
             "login": self.cfg.api_key[:8] + "…",
             "server": "testnet" if self.cfg.testnet else "mainnet",
@@ -712,8 +714,41 @@ class BinanceConnector:
             "currency": "USDT",
             "trade_allowed": True,
             "leverage": self.symbol_leverage(),
-            "margin_type": self.symbol_margin_type(),
+            "margin_type": margin_type,
         }
+
+    def _account_margin_type_from_positions(self) -> str:
+        """Reflect Binance — ISOLATED unless any open position is CROSS."""
+        open_pos = self.positions(force=True)
+        if not open_pos:
+            return self.symbol_margin_type()
+        for p in open_pos:
+            mt = str(p.get("margin_type") or "ISOLATED").upper()
+            if mt == "CROSS":
+                return "CROSS"
+        return "ISOLATED"
+
+    def align_isolated_margin_open_symbols(self) -> dict[str, Any]:
+        """Set ISOLATED on every symbol with an open position."""
+        if self.cfg.paper or not self.cfg.api_key:
+            return {"ok": True, "aligned": []}
+        aligned: list[str] = []
+        errors: list[dict[str, str]] = []
+        for p in self.positions(force=True):
+            sym = str(p.get("symbol") or "").upper()
+            if not sym:
+                continue
+            mt = str(p.get("margin_type") or "").upper()
+            if mt == "ISOLATED":
+                aligned.append(sym)
+                continue
+            r = self.set_margin_type("ISOLATED", sym)
+            if r.get("ok"):
+                aligned.append(sym)
+            else:
+                errors.append({"symbol": sym, "error": str(r.get("error") or "margin_failed")})
+        self.invalidate_positions_cache()
+        return {"ok": len(errors) == 0, "aligned": aligned, "errors": errors or None}
 
     def book_ticker(self, symbol: str | None = None) -> dict[str, Any] | None:
         sym = (symbol or self.cfg.symbol).upper()
@@ -856,6 +891,7 @@ class BinanceConnector:
                     "magic": DEFAULT_MAGIC,
                     "liquidationPrice": float(p.get("liquidationPrice", 0)),
                     "leverage": int(float(p.get("leverage", self.cfg.leverage))),
+                    "margin_type": str(p.get("marginType") or "ISOLATED").upper(),
                 }
             )
         if symbol is None:
@@ -1108,6 +1144,38 @@ class BinanceConnector:
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         self.invalidate_positions_cache()
         return {"ok": True, "closed": closed, "latency_ms": latency_ms, "broker": "binance"}
+
+    def close_all_positions(self) -> dict[str, Any]:
+        """Market-close every open position across all symbols."""
+        if _truthy(os.environ.get("FORWARD_DRY_RUN")):
+            return {"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True}
+        if self.cfg.paper:
+            from paper_simulator import paper_store
+
+            return paper_store.close_all_positions()
+        positions = self.positions(force=True)
+        if not positions:
+            return {"ok": True, "closed": [], "symbols": [], "note": "already_flat"}
+        symbols = sorted({str(p.get("symbol") or "").upper() for p in positions if p.get("symbol")})
+        all_closed: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        total_latency = 0.0
+        for sym in symbols:
+            r = self.close_position(sym, None)
+            if r.get("ok"):
+                all_closed.extend(r.get("closed") or [])
+                total_latency += float(r.get("latency_ms") or 0)
+            else:
+                errors.append({"symbol": sym, "error": str(r.get("error") or "close_failed")})
+        self.invalidate_positions_cache()
+        return {
+            "ok": len(errors) == 0,
+            "closed": all_closed,
+            "symbols": symbols,
+            "latency_ms": round(total_latency, 1),
+            "errors": errors or None,
+            "broker": "binance",
+        }
 
     def ticker_24h_map(self) -> dict[str, float]:
         """USDT-M 24h percent map — fills market view when miniTicker omits P (testnet)."""

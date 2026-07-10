@@ -46,7 +46,7 @@ _PUBLIC_QUOTE_PREFIXES = ("/api/tick/", "/api/bars/", "/api/symbol/", "/api/scan
 
 def _is_public_quote(path: str) -> bool:
     return any(path.startswith(p) for p in _PUBLIC_QUOTE_PREFIXES)
-_SENSITIVE_PATHS = frozenset({"/api/login", "/api/order", "/api/close", "/api/attach", "/api/logout", "/api/margin", "/api/scanner/close"})
+_SENSITIVE_PATHS = frozenset({"/api/login", "/api/order", "/api/close", "/api/close-all", "/api/attach", "/api/logout", "/api/margin", "/api/scanner/close"})
 _rate_buckets: dict[str, list[float]] = defaultdict(list)
 _DEFAULT_SYMBOL = (os.environ.get("BINANCE_SYMBOL") or "BTCUSDT").strip().upper()
 
@@ -389,15 +389,15 @@ def _login_error_detail(err: str, testnet: bool) -> str:
 class OrderBody(BaseModel):
     symbol: str = Field(_DEFAULT_SYMBOL, max_length=20, pattern=r"^[A-Za-z0-9]+$")
     side: str = Field("BUY", pattern=r"^(BUY|SELL)$")
-    volume: float = Field(0.001, ge=0.0001, le=1000.0)
+    volume: float = Field(0.001, ge=0.0001, le=50_000_000.0)
     sl: float | None = Field(None, ge=0)
     tp: float | None = Field(None, ge=0)
     magic: int = Field(77002002, ge=0)
 
 
 class CloseBody(BaseModel):
+    """Close full position on symbol — volume from Binance (client volume ignored)."""
     symbol: str = Field(_DEFAULT_SYMBOL, max_length=20, pattern=r"^[A-Za-z0-9]+$")
-    volume: float | None = Field(None, ge=0.0001, le=1000.0)
 
 
 class MarginBody(BaseModel):
@@ -913,12 +913,14 @@ def api_close(body: CloseBody):
     sym = body.symbol.upper()
     pair_gate.begin_close(sym)
     try:
-        r = connector.close_position(sym, body.volume)
+        # Always close exchange-reported size — never trust client volume (meme coins can exceed 1k qty).
+        r = connector.close_position(sym, None)
     finally:
         pair_gate.end_close(sym)
     if not r.get("ok"):
         err = r.get("error") or "close_failed"
         raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
+    momentum_scanner.reset_symbol_if_flat(sym)
     pair_gate.record_order(
         symbol=sym,
         side="CLOSE",
@@ -930,6 +932,22 @@ def api_close(body: CloseBody):
     return r
 
 
+@app.post("/api/close-all")
+def api_close_all():
+    """Close every open Binance position and reset scanner state."""
+    if os.environ.get("FORWARD_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
+        raise HTTPException(status_code=403, detail={"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True})
+    if not connector.cfg.api_key and not connector.cfg.paper:
+        raise HTTPException(status_code=401, detail={"ok": False, "error": "not connected"})
+    r = connector.close_all_positions()
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r)
+    momentum_scanner.reconcile_from_exchange()
+    connector.align_isolated_margin_open_symbols()
+    _flush_scanner_snapshot()
+    return r
+
+
 @app.post("/api/margin")
 def api_margin(body: MarginBody):
     if os.environ.get("FORWARD_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
@@ -937,7 +955,8 @@ def api_margin(body: MarginBody):
     r = connector.set_margin_type(body.margin_type, body.symbol)
     if not r.get("ok"):
         raise HTTPException(status_code=400, detail=r)
-    return r
+    actual = connector.symbol_margin_type(body.symbol)
+    return {**r, "margin_type": actual, "aligned": actual == "ISOLATED"}
 
 
 @app.get("/api/order/{order_id}")

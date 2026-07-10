@@ -343,6 +343,57 @@ class MomentumScanner:
             return {"ok": True, "cancelled_pending": sym}
         return {"ok": False, "error": "nothing_to_close"}
 
+    def reset_symbol_if_flat(self, symbol: str) -> None:
+        """Clear scanner legs when exchange position is gone."""
+        sym = symbol.upper()
+        open_syms = {str(p.get("symbol") or "").upper() for p in self._exchange_positions()}
+        if sym in open_syms:
+            return
+        coin = self._coins.get(sym)
+        if not coin:
+            return
+        if coin.short or coin.long1 or coin.long2 or coin.status in (
+            STATUS_SHORT,
+            STATUS_LONG1,
+            STATUS_LONG2,
+            STATUS_PENDING,
+        ):
+            self._reset_coin_state(coin)
+
+    def reconcile_from_exchange(self) -> dict[str, Any]:
+        """Sync scanner state to Binance — flat symbols reset, open symbols kept."""
+        open_syms = {str(p.get("symbol") or "").upper() for p in self._exchange_positions()}
+        reset: list[str] = []
+        for coin in self._coins.values():
+            if coin.symbol in open_syms:
+                continue
+            if coin.short or coin.long1 or coin.long2 or coin.status in (
+                STATUS_SHORT,
+                STATUS_LONG1,
+                STATUS_LONG2,
+                STATUS_PENDING,
+            ):
+                self._reset_coin_state(coin)
+                reset.append(coin.symbol)
+        if reset:
+            self._maybe_execute_best_pending()
+        return {"ok": True, "open_symbols": sorted(open_syms), "reset_symbols": reset}
+
+    def _reset_coin_state(self, coin: CoinStrategy) -> None:
+        coin.short = None
+        coin.long1 = None
+        coin.long2 = None
+        coin.long1_was_closed = False
+        coin.long1_peak_price = None
+        coin.long2_peak_price = None
+        coin.recovery_peak_price = None
+        coin.status = STATUS_CLOSED
+        coin.highest_price = None
+        coin.qualifying_pct = 0.0
+        coin.entry_signal_key = ""
+        coin.unrealized_pnl = 0.0
+        coin.retrace_pct = 0.0
+
     def _can_emit_tf_signal(self, tf: str) -> bool:
         window = SIGNAL_WINDOW_SEC.get(tf, 180)
         now = time.time()

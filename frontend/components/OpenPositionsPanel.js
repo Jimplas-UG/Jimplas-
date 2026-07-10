@@ -1,7 +1,7 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
-import { postBinanceClosePosition } from '../broker/binanceFuturesApi';
+import { postBinanceClosePosition, postBinanceCloseAllPositions } from '../broker/binanceFuturesApi';
 import { formatPairLabel } from '../lib/futuresSymbol';
 
 function fmtPx(n) {
@@ -14,6 +14,30 @@ function fmtUsd(n) {
   if (!Number.isFinite(x)) return '—';
   const sign = x >= 0 ? '+' : '-';
   return `${sign}$${Math.abs(x).toFixed(2)}`;
+}
+
+function fmtVol(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return '—';
+  if (x >= 1000) return x.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return String(x);
+}
+
+function parseCloseError(r) {
+  if (r.error) return String(r.error);
+  const s = r.bodySnippet || '';
+  if (s.includes('less_than_equal') && s.includes('volume')) {
+    return 'Close blocked by server — update the app or try again (volume limit).';
+  }
+  try {
+    const j = JSON.parse(s);
+    if (Array.isArray(j) && j[0]?.msg) return j[0].msg;
+    if (j?.error) return String(j.error);
+    if (j?.detail?.error) return String(j.detail.error);
+  } catch {
+    /* plain text */
+  }
+  return s || 'Could not close position';
 }
 
 function fmtDealTime(ms) {
@@ -75,17 +99,16 @@ export default function OpenPositionsPanel({
                 try {
                   const r = await postBinanceClosePosition(binanceBaseUrl, {
                     symbol: pos.symbol,
-                    volume: pos.volume,
                   });
                   if (r.ok) {
                     const closed = r.closed?.[0];
                     const msg = closed
-                      ? `Closed ${closed.side} ${closed.volume} @ ${fmtPx(closed.fill_price)}`
+                      ? `Closed ${closed.side} ${fmtVol(closed.volume)} @ ${fmtPx(closed.fill_price)}`
                       : 'Position closed';
                     onCloseMessage?.(msg);
                     await onRefresh?.();
                   } else {
-                    const err = r.error || r.bodySnippet || 'Could not close position';
+                    const err = parseCloseError(r);
                     const lat = r.latencyMs != null ? ` (${r.latencyMs} ms)` : '';
                     Alert.alert('Close failed', `${err}${lat}`);
                   }
@@ -100,8 +123,44 @@ export default function OpenPositionsPanel({
         ],
       );
     },
-    [brokerConnected, binanceBaseUrl, livePrice, onRefresh, onCloseMessage],
+    [brokerConnected, binanceBaseUrl, livePrice, onRefresh, onCloseMessage, pairLabel],
   );
+
+  const confirmCloseAll = useCallback(() => {
+    if (!brokerConnected || !binanceBaseUrl?.trim()) {
+      Alert.alert('Not connected', 'Connect Binance in Profile first.');
+      return;
+    }
+    Alert.alert(
+      'Close all positions?',
+      `This will market-close all ${positions.length} open position(s) on Binance.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Close all',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setClosingKey('__all__');
+              try {
+                const r = await postBinanceCloseAllPositions(binanceBaseUrl);
+                if (r.ok) {
+                  onCloseMessage?.(`Closed ${r.closed?.length ?? 0} leg(s)`);
+                  await onRefresh?.();
+                } else {
+                  Alert.alert('Close all failed', parseCloseError(r));
+                }
+              } catch (e) {
+                Alert.alert('Close all failed', e instanceof Error ? e.message : String(e));
+              } finally {
+                setClosingKey(null);
+              }
+            })();
+          },
+        },
+      ],
+    );
+  }, [brokerConnected, binanceBaseUrl, positions.length, onRefresh, onCloseMessage]);
 
   return (
     <View style={st.wrap}>
@@ -125,9 +184,18 @@ export default function OpenPositionsPanel({
       <View style={[st.panel, { borderColor: C.border, backgroundColor: C.panel, marginTop: hideQuote ? 0 : 10 }]}>
         <View style={[st.head, { borderBottomColor: C.border }]}>
           <Text style={[st.title, { color: C.text }]}>Open positions</Text>
-          <Text style={[st.badge, { color: positions.length ? C.green : C.dim }]}>
-            {positions.length ? String(positions.length) : 'FLAT'}
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            {positions.length > 1 ? (
+              <Pressable onPress={confirmCloseAll} disabled={closingKey === '__all__'} hitSlop={8}>
+                <Text style={{ color: C.red, fontSize: 10, fontWeight: '800' }}>
+                  {closingKey === '__all__' ? '…' : 'CLOSE ALL'}
+                </Text>
+              </Pressable>
+            ) : null}
+            <Text style={[st.badge, { color: positions.length ? C.green : C.dim }]}>
+              {positions.length ? String(positions.length) : 'FLAT'}
+            </Text>
+          </View>
         </View>
 
         {!brokerConnected ? (
@@ -156,7 +224,7 @@ export default function OpenPositionsPanel({
                 <View key={key} style={[st.posCard, { borderColor: C.border, backgroundColor: C.panel2 }]}>
                   <View style={st.posTop}>
                     <Text style={[st.posSide, { color: sideCol }]}>
-                      {p.type} · {p.volume} {p.symbol}
+                      {p.type} · {fmtVol(p.volume)} {p.symbol}
                     </Text>
                     <Text style={[st.posPnl, { color: profit >= 0 ? C.green : C.red }]}>{fmtUsd(profit)}</Text>
                   </View>
@@ -165,6 +233,11 @@ export default function OpenPositionsPanel({
                     <Text style={[st.metaTxt, { color: C.dim }]}>Move {dist}</Text>
                     {p.leverage > 0 ? (
                       <Text style={[st.metaTxt, { color: C.amber }]}>{p.leverage}x lev</Text>
+                    ) : null}
+                    {p.margin_type ? (
+                      <Text style={[st.metaTxt, { color: p.margin_type === 'ISOLATED' ? C.green : C.red }]}>
+                        {p.margin_type}
+                      </Text>
                     ) : null}
                     {p.sl > 0 ? <Text style={[st.metaTxt, { color: C.dim }]}>SL {fmtPx(p.sl)}</Text> : null}
                     {p.tp > 0 ? <Text style={[st.metaTxt, { color: C.dim }]}>TP {fmtPx(p.tp)}</Text> : null}

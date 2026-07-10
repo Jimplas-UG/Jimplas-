@@ -262,5 +262,16 @@ class PaperStore:
         self._positions = remaining
         return {"ok": True, "closed": closed, "broker": "binance-paper"}
 
+    def close_all_positions(self) -> dict[str, Any]:
+        syms = sorted({p.symbol for p in self._positions})
+        if not syms:
+            return {"ok": True, "closed": [], "symbols": [], "note": "already_flat"}
+        all_closed: list[dict[str, Any]] = []
+        for sym in syms:
+            r = self.close_position(sym, None)
+            if r.get("ok"):
+                all_closed.extend(r.get("closed") or [])
+        return {"ok": True, "closed": all_closed, "symbols": syms, "broker": "binance-paper"}
+
 
 paper_store = PaperStore()
