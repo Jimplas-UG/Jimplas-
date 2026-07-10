@@ -36,6 +36,10 @@ class MockConnector:
     def prepare_symbol_cached(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> None:
         self.calls.append({"op": "prepare", "symbol": symbol, "lev": leverage})
 
+    def ensure_exchange_leverage(self, symbol: str, leverage: int | None = None) -> bool:
+        self.calls.append({"op": "ensure_lev", "symbol": symbol, "lev": leverage or 5})
+        return True
+
     def _request(self, method: str, path: str, **kwargs):
         return {"availableBalance": 10000.0}
 
@@ -200,15 +204,17 @@ def test_forward_dry_run_blocks() -> None:
     print("OK FORWARD_DRY_RUN blocks execution")
 
 
-def test_long1_forces_10x_leverage() -> None:
+def test_long1_exchange_stays_5x() -> None:
     conn = MockConnector()
     conn._short_qty = 100.0
     eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
     r = eng.execute(_signal(side="BUY", leg="LONG1", leverage=5, tp=None, signal_id="lev_long1_1"))
     assert r.ok, r.error
     prep = [c for c in conn.calls if c.get("op") == "prepare"]
-    assert prep and prep[-1]["lev"] == 10
-    print("OK LONG1 forces 10x leverage")
+    assert prep and prep[-1]["lev"] == 5
+    ensure = [c for c in conn.calls if c.get("op") == "ensure_lev"]
+    assert ensure and ensure[-1]["lev"] == 5
+    print("OK LONG1 keeps exchange at 5x (10x sizing only)")
 
 
 def test_short_forces_5x_leverage() -> None:
@@ -243,7 +249,7 @@ if __name__ == "__main__":
         test_duplicate_prevention,
         test_insufficient_margin,
         test_forward_dry_run_blocks,
-        test_long1_forces_10x_leverage,
+        test_long1_exchange_stays_5x,
         test_short_forces_5x_leverage,
         test_latency_under_target_when_network_allows,
     ]

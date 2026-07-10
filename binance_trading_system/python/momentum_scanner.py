@@ -1139,6 +1139,8 @@ class MomentumScanner:
                     coin.long2 = pos
                     coin.long2_peak_price = fill
                     coin.status = STATUS_LONG2
+                if hasattr(self._connector, "ensure_exchange_leverage"):
+                    self._connector.ensure_exchange_leverage(sym)
                 self._last_exec_error = None
                 self._emit_signal(coin, f"long{leg}_entered")
                 log.info("scanner LONG%d %s qty=%s @ %s order=%s latency_ms=%s", leg, sym, qty, fill, r.order_id, r.latency_ms)
@@ -1157,6 +1159,11 @@ class MomentumScanner:
     def _manage_positions(self, coin: CoinStrategy) -> None:
         if not self._ensure_pair_coherence(coin):
             return
+
+        sym = coin.symbol
+        if coin.short and not getattr(self._connector.cfg, "paper", False):
+            if hasattr(self._connector, "ensure_exchange_leverage"):
+                self._connector.ensure_exchange_leverage(sym)
 
         price = coin.price
         short = coin.short

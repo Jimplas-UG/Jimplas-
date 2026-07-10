@@ -346,6 +346,17 @@ class BinanceConnector:
     def prepare_symbol_cached(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> None:
         sym = symbol.upper()
         mt = "ISOLATED"
+        from leverage_policy import exchange_leverage
+
+        exchange_lev = exchange_leverage()
+        if int(leverage) != exchange_lev:
+            log.warning(
+                "prepare_symbol_cached %s: requested %sx ignored — exchange locked at %sx",
+                sym,
+                leverage,
+                exchange_lev,
+            )
+        leverage = exchange_lev
         key = (sym, int(leverage), mt)
         if key in self._prepared_cache and time.time() - self._prepared_cache[key] < 3600:
             self.cfg.symbol = sym
@@ -1068,6 +1079,37 @@ class BinanceConnector:
         deals.sort(key=lambda d: int(d.get("time") or 0), reverse=True)
         return deals[:lim]
 
+    def ensure_exchange_leverage(self, symbol: str, leverage: int | None = None) -> bool:
+        """Keep symbol leverage at policy exchange level (5x) — Binance is per-symbol."""
+        from leverage_policy import SHORT_LEVERAGE
+
+        target = int(leverage if leverage is not None else SHORT_LEVERAGE)
+        sym = symbol.upper()
+        if self.cfg.paper:
+            self.cfg.leverage = target
+            return True
+        if not self.cfg.api_key:
+            return False
+        current = self.symbol_leverage(sym)
+        if current == target:
+            self.cfg.leverage = target
+            return True
+        try:
+            self._request(
+                "POST",
+                "/fapi/v1/leverage",
+                {"symbol": sym, "leverage": target},
+                signed=True,
+            )
+            self.cfg.leverage = target
+            self.cfg.symbol = sym
+            self._prepared_cache = {k: v for k, v in self._prepared_cache.items() if k[0] != sym}
+            log.info("exchange leverage %s restored %sx -> %sx", sym, current, target)
+            return True
+        except RuntimeError as e:
+            log.warning("ensure_exchange_leverage %s: %s", sym, e)
+            return False
+
     def invalidate_positions_cache(self) -> None:
         self._positions_cache = None
         self._positions_cache_ts = 0.0
@@ -1108,6 +1150,9 @@ class BinanceConnector:
             pos_side = str(p.get("positionSide") or "").upper()
             if not pos_side or pos_side == "BOTH":
                 pos_side = "LONG" if amt > 0 else "SHORT"
+            from leverage_policy import policy_display_leverage
+
+            policy_lev = policy_display_leverage(side=side, position_side=pos_side)
             out.append(
                 {
                     "ticket": p.get("symbol"),
@@ -1121,7 +1166,8 @@ class BinanceConnector:
                     "profit": float(p.get("unRealizedProfit", 0)),
                     "magic": DEFAULT_MAGIC,
                     "liquidationPrice": float(p.get("liquidationPrice", 0)),
-                    "leverage": int(float(p.get("leverage", self.cfg.leverage))),
+                    "leverage": policy_lev,
+                    "exchange_leverage": int(float(p.get("leverage", self.cfg.leverage))),
                     "margin_type": str(p.get("marginType") or "ISOLATED").upper(),
                 }
             )
@@ -1554,6 +1600,9 @@ class BinanceConnector:
             return {"ok": False, "error": "api_key_missing"}
 
         self.prepare_symbol_cached(sym, leverage, "ISOLATED")
+        from leverage_policy import exchange_leverage
+
+        exchange_lev = exchange_leverage(leg)
         tick = self.book_ticker(sym)
         if not tick:
             return {"ok": False, "error": f"no tick for {sym}"}
@@ -1569,7 +1618,7 @@ class BinanceConnector:
                 acct = self._request("GET", "/fapi/v2/account", signed=True)
                 free = float(acct.get("availableBalance", 0))
                 notional = qty * intended
-                if free < notional / max(int(leverage), 1) * 1.1:
+                if free < notional / max(exchange_lev, 1) * 1.1:
                     return {"ok": False, "error": f"insufficient_margin free={free:.2f}"}
             except Exception as e:
                 log.warning("order_market_leg margin check: %s", e)

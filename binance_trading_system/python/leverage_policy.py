@@ -1,8 +1,11 @@
 """
 Fixed per-leg leverage — institutional policy, no overrides.
 
-SHORT (and manual entries): 5x
-LONG1 / LONG2 recovery legs: 10x
+SHORT (and manual entries): 5x exchange + sizing
+LONG1 / LONG2 recovery legs: 10x sizing only (effective exposure), exchange stays 5x
+
+Binance USDT-M shares one leverage per symbol in hedge mode — never call /leverage
+with 10 while a short leg is live or the short inherits 10x.
 """
 
 from __future__ import annotations
@@ -14,8 +17,8 @@ LONG2_LEVERAGE = 10
 ALLOWED_LEVERAGES = frozenset({SHORT_LEVERAGE, LONG1_LEVERAGE})
 
 
-def required_leverage(leg: str, side: str = "") -> int | None:
-    """Return mandated leverage for a trading leg, or None if not a policy leg."""
+def sizing_leverage(leg: str, side: str = "") -> int | None:
+    """Leverage for notional / margin math — SHORT 5x, LONG legs 10x effective."""
     leg_u = (leg or "").upper()
     side_u = side.upper()
     if leg_u == "SHORT":
@@ -29,9 +32,28 @@ def required_leverage(leg: str, side: str = "") -> int | None:
     return None
 
 
+def required_leverage(leg: str, side: str = "") -> int | None:
+    """Alias — sizing leverage for orders."""
+    return sizing_leverage(leg, side)
+
+
+def exchange_leverage(leg: str = "") -> int:
+    """Leverage sent to Binance /fapi/v1/leverage — always 5x for every leg."""
+    return SHORT_LEVERAGE
+
+
+def policy_display_leverage(*, side: str, position_side: str = "") -> int:
+    """UI/policy leverage per open leg (short 5x, hedge longs 10x effective)."""
+    ps = (position_side or "").upper()
+    side_u = side.upper()
+    if ps == "LONG" or (side_u == "BUY" and ps != "SHORT"):
+        return LONG1_LEVERAGE
+    return SHORT_LEVERAGE
+
+
 def apply_leverage_policy(leg: str, side: str, requested: int) -> int:
-    """Force signal leverage to policy value; ignore env/UI overrides."""
-    required = required_leverage(leg, side)
+    """Force signal sizing leverage to policy value; ignore env/UI overrides."""
+    required = sizing_leverage(leg, side)
     if required is not None:
         return required
     return max(int(requested or SHORT_LEVERAGE), 1)

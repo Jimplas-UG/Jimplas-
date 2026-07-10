@@ -12,7 +12,9 @@ from leverage_policy import (  # noqa: E402
     LONG2_LEVERAGE,
     SHORT_LEVERAGE,
     apply_leverage_policy,
+    exchange_leverage,
     required_leverage,
+    sizing_leverage,
 )
 
 
@@ -39,8 +41,24 @@ def test_apply_overrides_wrong_request() -> None:
     print("OK apply overrides wrong leverage")
 
 
+def test_exchange_leverage_always_5() -> None:
+    assert exchange_leverage("SHORT") == 5
+    assert exchange_leverage("LONG1") == 5
+    assert exchange_leverage("LONG2") == 5
+    print("OK exchange leverage always 5x on Binance API")
+
+
+def test_sizing_differs_for_longs() -> None:
+    assert sizing_leverage("SHORT") == 5
+    assert sizing_leverage("LONG1") == 10
+    assert sizing_leverage("LONG2") == 10
+    print("OK sizing leverage 5/10/10")
+
+
 if __name__ == "__main__":
     test_constants()
     test_required_per_leg()
     test_apply_overrides_wrong_request()
+    test_exchange_leverage_always_5()
+    test_sizing_differs_for_longs()
     print("test_leverage_policy: ALL OK")

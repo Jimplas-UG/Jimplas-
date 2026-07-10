@@ -16,7 +16,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from leverage_policy import apply_leverage_policy, required_leverage
+from leverage_policy import apply_leverage_policy, exchange_leverage, required_leverage, sizing_leverage
 
 log = logging.getLogger("execution_engine")
 
@@ -433,11 +433,12 @@ class ExecutionEngine:
                 policy_lev,
             )
         signal.leverage = apply_leverage_policy(signal.leg, signal.side, signal.leverage)
+        exchange_lev = exchange_leverage(signal.leg)
 
         free = self._available_margin()
-        lev = max(int(signal.leverage), 1)
         notional = float(signal.quantity) * signal.reference_price
-        if free < notional / lev * 1.05:
+        margin_need = notional / max(exchange_lev, 1) * 1.05
+        if free < margin_need:
             result.error = f"insufficient_margin free={free:.2f}"
             result.stage = "risk_blocked"
             self._log_failure(signal, reason=result.error, retry_decision="retry_on_margin")
@@ -448,7 +449,7 @@ class ExecutionEngine:
         self._inflight_client_ids.add(client_id)
 
         try:
-            self._connector.prepare_symbol_cached(sym, signal.leverage, "ISOLATED")
+            self._connector.prepare_symbol_cached(sym, exchange_lev, "ISOLATED")
             last_err: Exception | None = None
             for attempt in range(MAX_RETRIES + 1):
                 try:
@@ -559,6 +560,9 @@ class ExecutionEngine:
                         except Exception as e:
                             log.warning("EXEC_TP_FAIL coin=%s err=%s", sym, e)
                             self._emit(signal, "tp_failed", error=str(e))
+
+                    if hasattr(self._connector, "ensure_exchange_leverage"):
+                        self._connector.ensure_exchange_leverage(sym, exchange_lev)
 
                     return result
                 except Exception as e:
