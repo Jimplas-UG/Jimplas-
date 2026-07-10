@@ -29,6 +29,7 @@ from scanner_stream import BinanceScannerStream
 from user_data_stream import BinanceUserDataStream
 from pair_isolation import pair_gate
 from execution_engine import ExecutionSignal
+from leverage_policy import SHORT_LEVERAGE
 from app_config import ensure_valid_or_exit, load_settings
 from logging_setup import setup_logging
 from session_store import clear_binance_session, load_binance_session, save_binance_session
@@ -885,7 +886,7 @@ def api_order(body: OrderBody):
         side=side_u,
         quantity=float(body.volume),
         reference_price=float(ref),
-        leverage=int(connector.cfg.leverage or 5),
+        leverage=SHORT_LEVERAGE,
         magic=int(body.magic),
         leg="MANUAL",
         sl=body.sl,

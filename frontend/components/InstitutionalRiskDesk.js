@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { fmtRiskUsd } from '../lib/riskDeskModel';
-import { PARTITION_PRESETS_USD, LEVERAGE_PRESETS } from '../lib/riskDeskDefaults';
+import { PARTITION_PRESETS_USD, LEG_LEVERAGE_POLICY } from '../lib/riskDeskDefaults';
 import OpenPositionsPanel from './OpenPositionsPanel';
 import BinanceStatusStrip from './BinanceStatusStrip';
 
@@ -104,7 +104,9 @@ export default function InstitutionalRiskDesk({
     );
   }
 
-  const levCapOk = metrics.activeLeverage <= config.defaultLeverage;
+  const levCapOk =
+    metrics.activeLeverage === LEG_LEVERAGE_POLICY.short ||
+    metrics.activeLeverage === LEG_LEVERAGE_POLICY.long1;
   const activeMargin = (brokerAccount?.margin_type ?? config.marginMode).toUpperCase();
   const marginOk = !brokerConnected || activeMargin === 'ISOLATED';
 
@@ -207,10 +209,20 @@ export default function InstitutionalRiskDesk({
       </RiskCard>
 
       {/* Leverage + margin (Binance Futures) */}
-      <RiskCard title="LEVERAGE CONTROLS" badge={`${config.defaultLeverage}x · ${config.marginMode}`} C={C}>
+      <RiskCard
+        title="LEVERAGE POLICY"
+        badge={`SHORT ${LEG_LEVERAGE_POLICY.short}x · LONG ${LEG_LEVERAGE_POLICY.long1}x · ${config.marginMode}`}
+        C={C}
+      >
         <View style={st.metricGrid}>
-          <MetricTile label="Selected leverage" value={`${config.defaultLeverage}x`} color={C.accentLight} C={C} />
-          <MetricTile label="Active on Binance" value={`${metrics.activeLeverage}x`} color={levCapOk ? C.green : C.red} C={C} />
+          <MetricTile label="Short entry" value={`${LEG_LEVERAGE_POLICY.short}x`} color={C.accentLight} C={C} />
+          <MetricTile label="Long1 / Long2" value={`${LEG_LEVERAGE_POLICY.long1}x`} color={C.accentLight} C={C} />
+          <MetricTile
+            label="Active on Binance"
+            value={`${metrics.activeLeverage}x`}
+            color={levCapOk ? C.green : C.red}
+            C={C}
+          />
           <MetricTile
             label="Margin on Binance"
             value={brokerConnected ? activeMargin : config.marginMode}
@@ -218,15 +230,9 @@ export default function InstitutionalRiskDesk({
             C={C}
           />
         </View>
-        <PresetChipRow
-          label="Leverage"
-          hint="Toggle the leverage you want — trades above this are blocked."
-          options={LEVERAGE_PRESETS}
-          value={config.defaultLeverage}
-          onChange={(v) => onConfigChange({ defaultLeverage: v, maxAllowedLeverage: v })}
-          format={(v) => `${v}x`}
-          C={C}
-        />
+        <Text style={[st.ruleNote, { color: C.dim }]}>
+          Fixed institutional policy — short opens at 5x; recovery longs at 10x. Not configurable.
+        </Text>
         <View style={[st.metricTile, { borderColor: C.border, width: '100%' }]}>
           <Text style={[st.metricLab, { color: C.dim }]}>Margin mode</Text>
           <Text style={[st.metricVal, { color: C.green }]}>Isolated</Text>

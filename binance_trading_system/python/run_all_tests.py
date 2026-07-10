@@ -14,6 +14,7 @@ TESTS = [
     "test_exec_integration.py",
     "test_one_pair_isolation.py",
     "test_close_orders.py",
+    "test_leverage_policy.py",
 ]
 
 

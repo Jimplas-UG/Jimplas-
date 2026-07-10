@@ -16,6 +16,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from leverage_policy import apply_leverage_policy, required_leverage
+
 log = logging.getLogger("execution_engine")
 
 RETRY_BACKOFF_MS = (100, 200, 400)
@@ -420,6 +422,17 @@ class ExecutionEngine:
             self._log_failure(signal, reason=short_err, retry_decision="no_retry_policy")
             self._emit(signal, "blocked", error=short_err)
             return result
+
+        policy_lev = required_leverage(signal.leg, signal.side)
+        if policy_lev is not None and int(signal.leverage) != policy_lev:
+            log.info(
+                "leverage policy %s %s: %sx -> %sx",
+                sym,
+                signal.leg,
+                signal.leverage,
+                policy_lev,
+            )
+        signal.leverage = apply_leverage_policy(signal.leg, signal.side, signal.leverage)
 
         free = self._available_margin()
         lev = max(int(signal.leverage), 1)

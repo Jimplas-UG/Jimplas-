@@ -171,8 +171,8 @@ export function evaluateRiskDeskGate(config, metrics, positions) {
   if (metrics.exposurePct > config.maxPortfolioExposurePct) {
     return { ok: false, reason: 'RISK_PORTFOLIO_EXPOSURE' };
   }
-  const lev = metrics.activeLeverage ?? config.defaultLeverage;
-  if (lev > config.defaultLeverage) {
+  const lev = metrics.activeLeverage ?? config.maxAllowedLeverage;
+  if (lev > config.maxAllowedLeverage) {
     return { ok: false, reason: 'RISK_LEVERAGE_CAP' };
   }
   if (metrics.availableTradingCapital <= 0 && metrics.freeMargin <= 0) {

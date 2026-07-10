@@ -39,7 +39,7 @@ class BinanceConfig:
     api_secret: str = ""
     testnet: bool = True
     symbol: str = ""
-    leverage: int = 10
+    leverage: int = 5
     margin_type: str = "ISOLATED"
     paper: bool = False
     min_margin_ratio: float = 0.05
@@ -1559,7 +1559,7 @@ def config_from_env() -> BinanceConfig:
         api_secret=os.environ.get("BINANCE_API_SECRET", ""),
         testnet=_truthy(os.environ.get("BINANCE_TESTNET", "1")),
         symbol=os.environ.get("BINANCE_SYMBOL", "BTCUSDT").upper() or "BTCUSDT",
-        leverage=int(os.environ.get("BINANCE_LEVERAGE", "10")),
+        leverage=int(os.environ.get("BINANCE_LEVERAGE", "5")),
         margin_type="ISOLATED",
         paper=_truthy(os.environ.get("BINANCE_PAPER", "0")),
         pip_size=float(

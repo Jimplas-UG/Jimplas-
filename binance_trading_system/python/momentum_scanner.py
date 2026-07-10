@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from execution_engine import ExecutionEngine, ExecutionSignal
+from leverage_policy import LONG1_LEVERAGE, LONG2_LEVERAGE, SHORT_LEVERAGE
 from pair_isolation import pair_gate
 
 log = logging.getLogger("momentum_scanner")
@@ -32,9 +33,7 @@ LONG_TP_PCT = float(os.environ.get("SCANNER_LONG_TP_PCT", "2.5"))
 LONG_BOTH_PULLBACK_PCT = float(os.environ.get("SCANNER_LONG_PULLBACK_PCT", "0.5"))
 LONG_ENTRY_DELAY_MS = int(os.environ.get("SCANNER_LONG_DELAY_MS", "3000"))
 SMART_EXIT_NET_PCT = float(os.environ.get("SCANNER_SMART_EXIT_PCT", "1.0"))
-SHORT_LEVERAGE = int(os.environ.get("SCANNER_SHORT_LEV", "5"))
-LONG1_LEVERAGE = int(os.environ.get("SCANNER_LONG1_LEV", "10"))
-LONG2_LEVERAGE = int(os.environ.get("SCANNER_LONG2_LEV", "10"))
+# Leverage fixed in leverage_policy.py — SHORT 5x, LONG1/LONG2 10x only.
 DEFAULT_PARTITION_USD = float(os.environ.get("SCANNER_PARTITION_USD", os.environ.get("SCANNER_RISK_USDT", "100")))
 SHORT_PARTITION_PCT = float(os.environ.get("SCANNER_SHORT_PARTITION_PCT", "50"))
 LONG1_PARTITION_PCT = float(os.environ.get("SCANNER_LONG1_PARTITION_PCT", "40"))

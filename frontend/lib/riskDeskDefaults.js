@@ -3,8 +3,11 @@ export const STORAGE_RISK_DESK = '@bilshenz_v1/riskDeskConfig';
 /** Fixed partition tiers — amount you subscribe / are ready to lose. */
 export const PARTITION_PRESETS_USD = [50, 100, 200, 500];
 
-/** Leverage toggles. */
-export const LEVERAGE_PRESETS = [3, 5, 10, 20];
+/** Fixed institutional leverage per leg — not user-configurable. */
+export const LEG_LEVERAGE_POLICY = { short: 5, long1: 10, long2: 10 };
+
+/** @deprecated — leverage is fixed per leg; kept for legacy config reads only. */
+export const LEVERAGE_PRESETS = [5, 10];
 
 /** Margin mode toggles. */
 export const MARGIN_MODE_PRESETS = ['ISOLATED', 'CROSS'];
@@ -23,8 +26,8 @@ export const RISK_DESK_DEFAULTS = {
   maxOpenPositions: 5,
   maxExposurePerAssetPct: 25,
   maxPortfolioExposurePct: 60,
-  defaultLeverage: 5,
-  maxAllowedLeverage: 5,
+  defaultLeverage: LEG_LEVERAGE_POLICY.short,
+  maxAllowedLeverage: LEG_LEVERAGE_POLICY.long1,
   marginMode: 'ISOLATED',
   emergencyStop: false,
   pauseNewTrades: false,
@@ -66,7 +69,8 @@ export function normalizeRiskDeskConfig(raw) {
     partitionUsd = 100;
   }
 
-  const defaultLeverage = snapLeverage(raw?.defaultLeverage ?? raw?.maxAllowedLeverage ?? d.defaultLeverage);
+  const defaultLeverage = LEG_LEVERAGE_POLICY.short;
+  const maxAllowedLeverage = LEG_LEVERAGE_POLICY.long1;
 
   return {
     partitionUsd,
@@ -82,7 +86,7 @@ export function normalizeRiskDeskConfig(raw) {
     maxExposurePerAssetPct: n('maxExposurePerAssetPct', 5, 100),
     maxPortfolioExposurePct: n('maxPortfolioExposurePct', 10, 100),
     defaultLeverage,
-    maxAllowedLeverage: defaultLeverage,
+    maxAllowedLeverage,
     marginMode: 'ISOLATED',
     emergencyStop: !!raw?.emergencyStop,
     pauseNewTrades: !!raw?.pauseNewTrades,

@@ -200,6 +200,27 @@ def test_forward_dry_run_blocks() -> None:
     print("OK FORWARD_DRY_RUN blocks execution")
 
 
+def test_long1_forces_10x_leverage() -> None:
+    conn = MockConnector()
+    conn._short_qty = 100.0
+    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    r = eng.execute(_signal(side="BUY", leg="LONG1", leverage=5, tp=None, signal_id="lev_long1_1"))
+    assert r.ok, r.error
+    prep = [c for c in conn.calls if c.get("op") == "prepare"]
+    assert prep and prep[-1]["lev"] == 10
+    print("OK LONG1 forces 10x leverage")
+
+
+def test_short_forces_5x_leverage() -> None:
+    conn = MockConnector()
+    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    r = eng.execute(_signal(side="SELL", leg="SHORT", leverage=20, signal_id="lev_short_1"))
+    assert r.ok, r.error
+    prep = [c for c in conn.calls if c.get("op") == "prepare"]
+    assert prep and prep[-1]["lev"] == 5
+    print("OK SHORT forces 5x leverage")
+
+
 def test_latency_under_target_when_network_allows() -> None:
     conn = MockConnector()
     eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
@@ -222,6 +243,8 @@ if __name__ == "__main__":
         test_duplicate_prevention,
         test_insufficient_margin,
         test_forward_dry_run_blocks,
+        test_long1_forces_10x_leverage,
+        test_short_forces_5x_leverage,
         test_latency_under_target_when_network_allows,
     ]
     for t in tests:
