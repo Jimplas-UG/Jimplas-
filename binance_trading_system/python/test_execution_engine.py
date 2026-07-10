@@ -54,6 +54,12 @@ class MockConnector:
             "latency_ms": 42.0,
         }
 
+    def exchange_short_qty(self, symbol: str | None = None) -> float:
+        return float(getattr(self, "_short_qty", 0.0))
+
+    def ensure_hedge_mode(self) -> tuple[bool, str]:
+        return True, ""
+
     def place_tp_market(self, symbol, entry_side, stop_price, quantity, **kwargs) -> dict:
         self.calls.append({"op": "tp", "symbol": symbol, "stop": stop_price})
         return {"ok": True, "order_id": 67890}
@@ -89,11 +95,35 @@ def test_qualified_sell_executes() -> None:
 
 def test_qualified_buy_executes() -> None:
     conn = MockConnector()
+    conn._short_qty = 10.0
     eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
     r = eng.execute(_signal(side="BUY", leg="LONG1", tp=None))
     assert r.ok
     assert r.side == "BUY"
     print("OK qualified BUY executes")
+
+
+def test_buy_blocked_without_exchange_short() -> None:
+    conn = MockConnector()
+    conn._short_qty = 0.0
+    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    r = eng.execute(_signal(side="BUY", leg="LONG1", tp=None, signal_id="buy_no_short_1"))
+    assert not r.ok
+    assert r.error == "buy_blocked_no_exchange_short"
+    print("OK BUY blocked without exchange short")
+
+
+def test_buy_blocked_manual_leg() -> None:
+    conn = MockConnector()
+    conn._short_qty = 10.0
+    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    r = eng.execute(
+        _signal(side="BUY", leg="MANUAL", tp=None, signal_id="buy_manual_1"),
+        manual=True,
+    )
+    assert not r.ok
+    assert r.error == "buy_blocked_short_first_policy"
+    print("OK manual BUY blocked")
 
 
 def test_tp_created() -> None:
@@ -183,6 +213,8 @@ if __name__ == "__main__":
     tests = [
         test_qualified_sell_executes,
         test_qualified_buy_executes,
+        test_buy_blocked_without_exchange_short,
+        test_buy_blocked_manual_leg,
         test_tp_created,
         test_invalid_quantity_blocked,
         test_precision_min_notional,

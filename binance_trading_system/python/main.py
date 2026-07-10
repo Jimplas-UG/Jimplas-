@@ -866,10 +866,19 @@ def api_order(body: OrderBody):
         raise HTTPException(status_code=400, detail={"ok": False, "error": iso_reason})
     if pair_gate.is_close_pending(sym):
         raise HTTPException(status_code=409, detail={"ok": False, "error": "close_pending"})
+    side_u = body.side.upper()
+    if side_u == "BUY":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "error": "buy_blocked_short_first_policy",
+                "detail": "All trades start with SHORT. Recovery longs are opened by the scanner only.",
+            },
+        )
     tick = connector.book_ticker(sym)
     if not tick:
         raise HTTPException(status_code=400, detail={"ok": False, "error": f"no tick for {sym}"})
-    side_u = body.side.upper()
     ref = tick["ask"] if side_u == "BUY" else tick["bid"]
     signal = ExecutionSignal(
         symbol=sym,

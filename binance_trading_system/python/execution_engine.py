@@ -269,6 +269,41 @@ class ExecutionEngine:
             return "max_open_trades"
         return None
 
+    def _validate_short_first(self, signal: ExecutionSignal) -> str | None:
+        """All trades start with short — block standalone BUY except recovery LONG1/LONG2."""
+        side = signal.side.upper()
+        leg = (signal.leg or "").upper()
+        if side != "BUY":
+            return None
+        if leg not in ("LONG1", "LONG2"):
+            return "buy_blocked_short_first_policy"
+        sym = signal.symbol.upper()
+        if getattr(self._connector.cfg, "paper", False):
+            return None
+        short_qty = 0.0
+        if hasattr(self._connector, "exchange_short_qty"):
+            short_qty = float(self._connector.exchange_short_qty(sym) or 0)
+        if short_qty <= 1e-12:
+            return "buy_blocked_no_exchange_short"
+        if hasattr(self._connector, "ensure_hedge_mode"):
+            ok, err = self._connector.ensure_hedge_mode()
+            if not ok:
+                return f"hedge_mode_required:{err}"
+        return None
+
+    def _validate_scanner_leg(self, signal: ExecutionSignal) -> str | None:
+        """Scanner multi-leg strategy requires hedge mode on live accounts."""
+        leg = (signal.leg or "").upper()
+        if leg not in ("SHORT", "LONG1", "LONG2"):
+            return None
+        if getattr(self._connector.cfg, "paper", False):
+            return None
+        if hasattr(self._connector, "ensure_hedge_mode"):
+            ok, err = self._connector.ensure_hedge_mode()
+            if not ok:
+                return f"hedge_mode_required:{err}"
+        return None
+
     def _available_margin(self) -> float:
         now = time.time()
         if now - self._account_cache_ts < 2.0:
@@ -370,6 +405,22 @@ class ExecutionEngine:
             self._emit(signal, "risk_blocked", error=risk_err)
             return result
 
+        leg_err = self._validate_scanner_leg(signal)
+        if leg_err:
+            result.error = leg_err
+            result.stage = "blocked_leg_policy"
+            self._log_failure(signal, reason=leg_err, retry_decision="no_retry_policy")
+            self._emit(signal, "blocked", error=leg_err)
+            return result
+
+        short_err = self._validate_short_first(signal)
+        if short_err:
+            result.error = short_err
+            result.stage = "blocked_short_first"
+            self._log_failure(signal, reason=short_err, retry_decision="no_retry_policy")
+            self._emit(signal, "blocked", error=short_err)
+            return result
+
         free = self._available_margin()
         lev = max(int(signal.leverage), 1)
         notional = float(signal.quantity) * signal.reference_price
@@ -395,6 +446,7 @@ class ExecutionEngine:
                         client_order_id=client_id,
                         reference_price=signal.reference_price,
                         leverage=signal.leverage,
+                        leg=signal.leg,
                     )
                     result.retry_count = attempt
                     if not order_resp.get("ok"):

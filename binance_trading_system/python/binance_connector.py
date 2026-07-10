@@ -383,6 +383,7 @@ class BinanceConnector:
         client_order_id: str,
         reference_price: float | None = None,
         leverage: int = 5,
+        leg: str = "",
     ) -> dict[str, Any]:
         """Fast MARKET order — uses cached filters + optional WS reference price."""
         import time as _time
@@ -406,6 +407,16 @@ class BinanceConnector:
         if not self.cfg.api_key:
             return {"ok": False, "error": "api_key_missing", "retryable": False}
 
+        leg_u = (leg or "").upper()
+        if leg_u in ("SHORT", "LONG1", "LONG2"):
+            ok_hedge, hedge_err = self.ensure_hedge_mode()
+            if not ok_hedge:
+                return {
+                    "ok": False,
+                    "error": f"hedge_mode_required: {hedge_err}",
+                    "retryable": False,
+                }
+
         info = self.get_symbol_spec(sym)
         price = float(reference_price or 0)
         if price <= 0:
@@ -426,7 +437,7 @@ class BinanceConnector:
             "quantity": qty,
             "newClientOrderId": client_order_id[:36],
         }
-        params.update(self._position_side_param(side_u))
+        params.update(self._position_side_param_for_leg(side_u, leg_u))
         t0 = _time.perf_counter()
         try:
             entry_resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
@@ -543,7 +554,7 @@ class BinanceConnector:
         self._ensure_margin_setup()
         try:
             self.load_all_symbol_specs(force=True)
-            self.is_hedge_mode()
+            self.ensure_hedge_mode()
             self.sync_server_time(force=True)
             self.align_isolated_margin_open_symbols()
         except Exception as e:
@@ -562,6 +573,71 @@ class BinanceConnector:
             log.warning("positionSide/dual: %s", e)
             self._hedge_mode = False
         return bool(self._hedge_mode)
+
+    def ensure_hedge_mode(self) -> tuple[bool, str]:
+        """Multi-leg scanner requires hedge mode — enable dual-side positions if needed."""
+        if self.cfg.paper:
+            return True, ""
+        if self.is_hedge_mode():
+            return True, ""
+        try:
+            self._request(
+                "POST",
+                "/fapi/v1/positionSide/dual",
+                {"dualSidePosition": "true"},
+                signed=True,
+            )
+            self._hedge_mode = True
+            log.info("enabled Binance hedge (dual-side) position mode")
+            return True, ""
+        except RuntimeError as e:
+            msg = str(e)
+            if "No need to change" in msg:
+                self._hedge_mode = True
+                return True, ""
+            log.warning("ensure_hedge_mode: %s", msg)
+            return False, msg
+
+    def exchange_short_qty(self, symbol: str | None = None) -> float:
+        """Open short leg size on symbol (hedge SHORT or one-way SELL)."""
+        sym = (symbol or self.cfg.symbol).upper()
+        total = 0.0
+        for p in self.positions(sym, force=True):
+            if str(p.get("symbol") or "").upper() != sym:
+                continue
+            pos_side = str(p.get("positionSide") or "").upper()
+            side = str(p.get("type") or p.get("side") or "").upper()
+            if pos_side == "LONG":
+                continue
+            if side == "SELL" or pos_side == "SHORT":
+                total += float(p.get("volume") or 0)
+        return total
+
+    def exchange_long_qty(self, symbol: str | None = None) -> float:
+        """Open long leg size on symbol (hedge LONG or one-way BUY)."""
+        sym = (symbol or self.cfg.symbol).upper()
+        total = 0.0
+        for p in self.positions(sym, force=True):
+            if str(p.get("symbol") or "").upper() != sym:
+                continue
+            pos_side = str(p.get("positionSide") or "").upper()
+            side = str(p.get("type") or p.get("side") or "").upper()
+            if pos_side == "SHORT":
+                continue
+            if side == "BUY" or pos_side == "LONG":
+                total += float(p.get("volume") or 0)
+        return total
+
+    def _position_side_param_for_leg(self, side: str, leg: str) -> dict[str, str]:
+        """Map scanner leg to hedge positionSide — keeps short + long legs separate."""
+        if not self.is_hedge_mode():
+            return {}
+        leg_u = (leg or "").upper()
+        if leg_u == "SHORT":
+            return {"positionSide": "SHORT"}
+        if leg_u in ("LONG1", "LONG2"):
+            return {"positionSide": "LONG"}
+        return self._position_side_param(side)
 
     def _position_side_param(self, side: str, *, reduce: bool = False) -> dict[str, str]:
         """Hedge mode requires positionSide on orders; one-way mode omits it."""
@@ -878,11 +954,15 @@ class BinanceConnector:
             if abs(amt) < 1e-12:
                 continue
             side = "BUY" if amt > 0 else "SELL"
+            pos_side = str(p.get("positionSide") or "").upper()
+            if not pos_side or pos_side == "BOTH":
+                pos_side = "LONG" if amt > 0 else "SHORT"
             out.append(
                 {
                     "ticket": p.get("symbol"),
                     "symbol": p.get("symbol"),
                     "type": side,
+                    "positionSide": pos_side,
                     "volume": abs(amt),
                     "price_open": float(p.get("entryPrice", 0)),
                     "sl": 0.0,
@@ -1338,6 +1418,7 @@ class BinanceConnector:
             client_order_id=cid,
             reference_price=intended,
             leverage=leverage,
+            leg=leg or (f"LONG{magic}" if magic in (88002, 88003) else "SHORT"),
         )
         if not order_resp.get("ok"):
             return {

@@ -190,6 +190,20 @@ class MomentumScanner:
 
     def _exchange_short_leg(self, symbol: str) -> dict[str, Any] | None:
         """Live Binance short leg for symbol — required before any recovery long."""
+        fn = getattr(self._connector, "exchange_short_qty", None)
+        if callable(fn) and fn(symbol.upper()) > 1e-12:
+            sym = symbol.upper()
+            for p in self._exchange_positions():
+                if str(p.get("symbol") or "").upper() != sym:
+                    continue
+                side = str(p.get("type") or p.get("side") or "").upper()
+                pos_side = str(p.get("positionSide") or "").upper()
+                if pos_side == "LONG":
+                    continue
+                if side == "SELL" or pos_side == "SHORT":
+                    vol = float(p.get("volume") or 0)
+                    if vol > 1e-12:
+                        return p
         sym = symbol.upper()
         for p in self._exchange_positions():
             if str(p.get("symbol") or "").upper() != sym:
@@ -206,8 +220,22 @@ class MomentumScanner:
 
     def _exchange_has_short(self, symbol: str) -> bool:
         if getattr(self._connector.cfg, "paper", False):
-            return True
+            coin = self._coins.get(symbol.upper())
+            return bool(coin and coin.short)
+        fn = getattr(self._connector, "exchange_short_qty", None)
+        if callable(fn):
+            return float(fn(symbol) or 0) > 1e-12
         return self._exchange_short_leg(symbol) is not None
+
+    def _exchange_has_orphan_long(self, symbol: str) -> bool:
+        """Standalone long on exchange with no short — violates short-first policy."""
+        if getattr(self._connector.cfg, "paper", False):
+            return False
+        long_fn = getattr(self._connector, "exchange_long_qty", None)
+        short_fn = getattr(self._connector, "exchange_short_qty", None)
+        if not callable(long_fn) or not callable(short_fn):
+            return False
+        return float(long_fn(symbol) or 0) > 1e-12 and float(short_fn(symbol) or 0) <= 1e-12
 
     def _sync_short_entry_from_exchange(self, coin: CoinStrategy) -> float:
         """Use exchange entry price for adverse % — avoids false triggers from bad fills."""
@@ -436,7 +464,16 @@ class MomentumScanner:
         open_syms = {str(p.get("symbol") or "").upper() for p in self._exchange_positions()}
         reset: list[str] = []
         for coin in self._coins.values():
-            if coin.symbol in open_syms:
+            sym = coin.symbol
+            if sym in open_syms and self._exchange_has_orphan_long(sym) and not coin.short:
+                log.warning(
+                    "scanner %s orphan LONG on exchange without SHORT — clearing scanner state",
+                    sym,
+                )
+                self._reset_coin_state(coin)
+                reset.append(sym)
+                continue
+            if sym in open_syms:
                 continue
             if coin.short or coin.long1 or coin.long2 or coin.status in (
                 STATUS_SHORT,
@@ -963,6 +1000,12 @@ class MomentumScanner:
         ok_iso, _ = pair_gate.can_open(sym, self._global_active_symbol, self._exchange_positions)
         if not ok_iso:
             return
+        if not getattr(self._connector.cfg, "paper", False):
+            ok_hedge, hedge_err = self._connector.ensure_hedge_mode()
+            if not ok_hedge:
+                self._last_exec_error = f"{sym}: hedge_mode_required:{hedge_err}"
+                log.warning("scanner SHORT blocked %s: %s", sym, hedge_err)
+                return
         self._in_flight.add(sym)
         try:
             entry = coin.price
