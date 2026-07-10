@@ -13,6 +13,7 @@ TESTS = [
     "test_scanner_15m.py",
     "test_exec_integration.py",
     "test_one_pair_isolation.py",
+    "test_close_orders.py",
 ]
 
 

@@ -473,17 +473,15 @@ class BinanceConnector:
         sp = round_to_tick(float(stop_price), info["tickSize"])
         qty = round_to_step(float(quantity), info["stepSize"])
         exit_side = "SELL" if entry_side.upper() == "BUY" else "BUY"
-        params: dict[str, Any] = {
-            "symbol": sym,
-            "side": exit_side,
-            "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": sp,
-            "quantity": qty,
-            "reduceOnly": "true",
-            "workingType": "MARK_PRICE",
-            "newClientOrderId": client_id[:36],
-        }
-        params.update(self._position_side_param(entry_side, reduce=True))
+        params = self._conditional_close_params(
+            symbol=sym,
+            exit_side=exit_side,
+            order_type="TAKE_PROFIT_MARKET",
+            stop_price=sp,
+            quantity=qty,
+            client_order_id=client_id,
+            entry_side=entry_side,
+        )
         try:
             resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
             return {"ok": True, "order_id": resp.get("orderId")}
@@ -650,6 +648,65 @@ class BinanceConnector:
         else:
             pos = "LONG" if side_u == "BUY" else "SHORT"
         return {"positionSide": pos}
+
+    def _market_close_params(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: float,
+        client_order_id: str,
+        hedge_position_side: str | None = None,
+        entry_side_for_reduce: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Build a reduce/close MARKET order.
+        Hedge mode: positionSide only (reduceOnly rejected with -1106).
+        One-way mode: reduceOnly only.
+        """
+        params: dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "side": side.upper(),
+            "type": "MARKET",
+            "quantity": quantity,
+            "newClientOrderId": client_order_id[:36],
+        }
+        hedge = hedge_position_side.upper() if hedge_position_side else ""
+        if self.is_hedge_mode():
+            if hedge in ("LONG", "SHORT"):
+                params["positionSide"] = hedge
+            else:
+                params.update(self._position_side_param(side.upper(), reduce=True))
+        else:
+            params["reduceOnly"] = "true"
+        return params
+
+    def _conditional_close_params(
+        self,
+        *,
+        symbol: str,
+        exit_side: str,
+        order_type: str,
+        stop_price: float,
+        quantity: float,
+        client_order_id: str,
+        entry_side: str,
+    ) -> dict[str, Any]:
+        """TP/SL reduce orders — hedge mode must not include reduceOnly."""
+        params: dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "side": exit_side.upper(),
+            "type": order_type,
+            "stopPrice": stop_price,
+            "quantity": quantity,
+            "workingType": "MARK_PRICE",
+            "newClientOrderId": client_order_id[:36],
+        }
+        if self.is_hedge_mode():
+            params.update(self._position_side_param(exit_side, reduce=True))
+        else:
+            params["reduceOnly"] = "true"
+        return params
 
     def _validate_order_qty(self, qty: float, price: float, info: dict[str, Any]) -> tuple[float, str | None]:
         qty = round_to_step(qty, info["stepSize"])
@@ -1021,17 +1078,15 @@ class BinanceConnector:
         sp = round_to_tick(stop_price, info["tickSize"])
         qty = round_to_step(quantity, info["stepSize"])
         exit_side = "SELL" if side == "BUY" else "BUY"
-        params = {
-            "symbol": sym,
-            "side": exit_side,
-            "type": order_type,
-            "stopPrice": sp,
-            "quantity": qty,
-            "reduceOnly": "true",
-            "workingType": "MARK_PRICE",
-            "newClientOrderId": client_id,
-        }
-        params.update(self._position_side_param(side, reduce=True))
+        params = self._conditional_close_params(
+            symbol=sym,
+            exit_side=exit_side,
+            order_type=order_type,
+            stop_price=sp,
+            quantity=qty,
+            client_order_id=client_id,
+            entry_side=side,
+        )
         return self._request("POST", "/fapi/v1/order", params, signed=True)
 
     def order_market(
@@ -1174,7 +1229,7 @@ class BinanceConnector:
             return paper_store.close_position(symbol, volume)
 
         sym = (symbol or self.cfg.symbol).upper()
-        positions = self.positions(sym)
+        positions = self.positions(sym, force=True)
         if not positions:
             return {"ok": False, "error": "no_open_position"}
 
@@ -1197,18 +1252,14 @@ class BinanceConnector:
                 qty = round_to_step(pos_vol, info["stepSize"])
             exit_side = "SELL" if pos_side == "BUY" else "BUY"
             cid = f"{CLIENT_ID_PREFIX}_CLS_{int(_time.time())}"[:36]
-            params = {
-                "symbol": sym,
-                "side": exit_side,
-                "type": "MARKET",
-                "quantity": qty,
-                "reduceOnly": "true",
-                "newClientOrderId": cid,
-            }
-            if self.is_hedge_mode() and hedge_side in ("LONG", "SHORT"):
-                params["positionSide"] = hedge_side
-            else:
-                params.update(self._position_side_param(pos_side, reduce=True))
+            params = self._market_close_params(
+                symbol=sym,
+                side=exit_side,
+                quantity=qty,
+                client_order_id=cid,
+                hedge_position_side=hedge_side if hedge_side in ("LONG", "SHORT") else None,
+                entry_side_for_reduce=pos_side,
+            )
             try:
                 resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
             except RuntimeError as e:
@@ -1488,18 +1539,15 @@ class BinanceConnector:
 
         import time as _time
 
-        params: dict[str, Any] = {
-            "symbol": sym,
-            "side": close_side,
-            "type": "MARKET",
-            "quantity": qty,
-            "reduceOnly": "true",
-            "newClientOrderId": f"{CLIENT_ID_PREFIX}_CL_{magic_i}_{int(_time.time())}"[:36],
-        }
-        if self._hedge_mode is True:
-            params["positionSide"] = hedge_side
+        params = self._market_close_params(
+            symbol=sym,
+            side=close_side,
+            quantity=qty,
+            client_order_id=f"{CLIENT_ID_PREFIX}_CL_{magic_i}_{int(_time.time())}",
+            hedge_position_side=hedge_side,
+        )
         try:
-            resp = self._request("POST", "/fapi/v1/order", params, signed=True)
+            resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
             return {"ok": True, "symbol": sym, "volume": qty, "order": resp.get("orderId"), "magic": magic_i}
         except RuntimeError as e:
             return {"ok": False, "error": str(e)}
