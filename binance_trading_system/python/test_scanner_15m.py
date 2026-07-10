@@ -12,6 +12,7 @@ os.environ.setdefault("SCANNER_RETRACE_PCT", "0.7")
 os.environ.setdefault("SCANNER_LONG1_PCT", "2.0")
 os.environ.setdefault("SCANNER_LONG2_PCT", "4.0")
 os.environ.setdefault("SCANNER_LONG_PULLBACK_PCT", "0.5")
+os.environ.setdefault("SCANNER_LONG_DELAY_MS", "0")
 os.environ.setdefault("SCANNER_EXEC", "1")
 
 from momentum_scanner import (  # noqa: E402
@@ -156,6 +157,7 @@ def test_long1_opens_and_pullback_close() -> None:
 
     coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
     coin.status = STATUS_SHORT
+    coin.short_opened_ms = int(time.time() * 1000) - 60_000
 
     sc.on_tick(sym, entry * (1.0 + LONG1_ADVERSE_PCT / 100.0 + 0.001))
     assert coin.long1 is not None, "long1 should open at +2%"
@@ -179,6 +181,10 @@ def test_long2_opens_and_pullback_close() -> None:
 
     coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
     coin.status = STATUS_SHORT
+    coin.short_opened_ms = int(time.time() * 1000) - 60_000
+
+    sc.on_tick(sym, entry * (1.0 + LONG1_ADVERSE_PCT / 100.0 + 0.001))
+    assert coin.long1 is not None, "long1 should open at +2% before long2"
 
     sc.on_tick(sym, entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.001))
     assert coin.long2 is not None, "long2 should open at +4%"
@@ -190,6 +196,35 @@ def test_long2_opens_and_pullback_close() -> None:
     print("OK long2: opens at +4%, closes on 0.5% retrace")
 
 
+def test_long1_blocked_without_short() -> None:
+    sc = MomentumScanner(FakeConnector(), lambda: True)
+    sym = "TESTUSDT"
+    sc.load_symbols([sym])
+    sc.on_tick(sym, 100.0)
+    coin = sc._coins[sym]
+    sc.on_tick(sym, 102.1)
+    assert coin.long1 is None, "long1 must not open without an active short"
+    print("OK long1 blocked without short")
+
+
+def test_long2_blocked_without_long1() -> None:
+    conn = FakeConnector()
+    sc = MomentumScanner(conn, lambda: True)
+    sym = "TESTUSDT"
+    entry = 100.0
+    sc.load_symbols([sym])
+    sc.on_tick(sym, entry)
+    coin = sc._coins[sym]
+    from momentum_scanner import LegPosition, MAGIC_SHORT, SHORT_LEVERAGE, STATUS_SHORT
+
+    coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+    coin.status = STATUS_SHORT
+    coin.short_opened_ms = int(time.time() * 1000) - 60_000
+    sc.on_tick(sym, entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.001))
+    assert coin.long2 is None, "long2 must not open before long1"
+    print("OK long2 blocked until long1 is open")
+
+
 if __name__ == "__main__":
     try:
         test_multi_tf_gain_then_retrace_pending()
@@ -197,6 +232,8 @@ if __name__ == "__main__":
         test_long2_tp_at_2_5_pct()
         test_long1_opens_and_pullback_close()
         test_long2_opens_and_pullback_close()
+        test_long1_blocked_without_short()
+        test_long2_blocked_without_long1()
     except AssertionError as e:
         print("FAIL", e, file=sys.stderr)
         raise SystemExit(1)
