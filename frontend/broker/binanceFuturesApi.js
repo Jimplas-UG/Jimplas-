@@ -417,52 +417,55 @@ export async function fetchBinanceDiagnostics(apiBaseUrl, timeoutMs = 12000) {
 
 export async function postBinanceClosePosition(apiBaseUrl, { symbol = DEFAULT_CHART_SYMBOL } = {}) {
   const b = base(apiBaseUrl);
-  const connected = await fetchBinanceConnected(b);
-  if (!connected) {
-    return { ok: false, status: 0, bodySnippet: 'Binance API not connected', connected: false };
-  }
   const body = { symbol };
-  try {
-    const res = await binanceFetch(
-      b,
-      '/api/close',
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
-      30000,
-    );
-    const text = await res.text();
-    let j = {};
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      j = JSON.parse(text);
-    } catch {
-      /* text */
+      const res = await binanceFetch(
+        b,
+        '/api/close',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+        30000,
+      );
+      const text = await res.text();
+      let j = {};
+      try {
+        j = JSON.parse(text);
+      } catch {
+        /* text */
+      }
+      let snippet = trimSnippet(text || (res.ok ? 'OK' : 'Empty body'));
+      if (!res.ok) {
+        if (res.status === 429 && attempt < 2) {
+          await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+          continue;
+        }
+        if (typeof j.detail === 'string') snippet = j.detail;
+        else if (j.detail?.error) snippet = String(j.detail.error);
+        else if (j.detail) snippet = trimSnippet(JSON.stringify(j.detail));
+        else if (j.error) snippet = String(j.error);
+      }
+      return {
+        ok: res.ok && (j.ok === true || (res.ok && Array.isArray(j.closed))),
+        status: res.status,
+        bodySnippet: snippet,
+        connected: true,
+        closed: Array.isArray(j.closed) ? j.closed : j.detail?.closed || [],
+        latencyMs: j.latency_ms ?? j.detail?.latency_ms,
+        error: j.error ?? j.detail?.error,
+      };
+    } catch (e) {
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+      return { ok: false, status: 0, bodySnippet: trimSnippet(e instanceof Error ? e.message : String(e)), connected: false };
     }
-    let snippet = trimSnippet(text || (res.ok ? 'OK' : 'Empty body'));
-    if (!res.ok) {
-      if (typeof j.detail === 'string') snippet = j.detail;
-      else if (j.detail?.error) snippet = String(j.detail.error);
-      else if (j.detail) snippet = trimSnippet(JSON.stringify(j.detail));
-      else if (j.error) snippet = String(j.error);
-    }
-    return {
-      ok: res.ok && (j.ok === true || (res.ok && Array.isArray(j.closed))),
-      status: res.status,
-      bodySnippet: snippet,
-      connected: true,
-      closed: Array.isArray(j.closed) ? j.closed : j.detail?.closed || [],
-      latencyMs: j.latency_ms ?? j.detail?.latency_ms,
-      error: j.error ?? j.detail?.error,
-    };
-  } catch (e) {
-    return { ok: false, status: 0, bodySnippet: trimSnippet(e instanceof Error ? e.message : String(e)), connected };
   }
+  return { ok: false, status: 0, bodySnippet: 'Close failed after retries', connected: false };
 }
 
 export async function postBinanceCloseAllPositions(apiBaseUrl) {
   const b = base(apiBaseUrl);
-  const connected = await fetchBinanceConnected(b);
-  if (!connected) {
-    return { ok: false, status: 0, bodySnippet: 'Binance API not connected', connected: false };
-  }
   try {
     const res = await binanceFetch(
       b,
