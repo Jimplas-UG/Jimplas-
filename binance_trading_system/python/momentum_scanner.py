@@ -434,8 +434,7 @@ class MomentumScanner:
         if not coin:
             return {"ok": False, "error": "unknown_symbol"}
         if coin.short or coin.long1 or coin.long2:
-            self._close_all(coin, "MANUAL_APP")
-            return {"ok": True, "closed": sym}
+            return self._close_all(coin, "MANUAL_APP")
         if coin.status == STATUS_PENDING:
             coin.status = STATUS_WATCHING
             return {"ok": True, "cancelled_pending": sym}
@@ -1246,38 +1245,52 @@ class MomentumScanner:
         if reason:
             log.info("scanner closed leg %s %s reason=%s", sym, leg_name, reason)
 
-    def _close_all(self, coin: CoinStrategy, reason: str) -> None:
+    def _close_all(self, coin: CoinStrategy, reason: str) -> dict[str, Any]:
         sym = coin.symbol
         pair_gate.begin_close(sym)
         t0 = time.perf_counter()
+        close_result: dict[str, Any] = {"ok": True, "closed": [], "broker": "binance"}
         try:
             if getattr(self._connector.cfg, "paper", False):
+                closed_legs: list[dict[str, Any]] = []
                 if coin.short:
-                    self._connector.close_leg(sym, coin.short.magic, coin.short.qty)
+                    r = self._connector.close_leg(sym, coin.short.magic, coin.short.qty)
+                    if r.get("ok"):
+                        closed_legs.append({**r, "side": "SELL", "symbol": sym})
                 if coin.long1:
-                    self._connector.close_leg(sym, coin.long1.magic, coin.long1.qty)
+                    r = self._connector.close_leg(sym, coin.long1.magic, coin.long1.qty)
+                    if r.get("ok"):
+                        closed_legs.append({**r, "side": "BUY", "symbol": sym})
                 if coin.long2:
-                    self._connector.close_leg(sym, coin.long2.magic, coin.long2.qty)
+                    r = self._connector.close_leg(sym, coin.long2.magic, coin.long2.qty)
+                    if r.get("ok"):
+                        closed_legs.append({**r, "side": "BUY", "symbol": sym})
+                close_result = {"ok": True, "closed": closed_legs, "broker": "binance"}
             else:
                 try:
                     live = self._connector.positions(sym, force=True)
                 except Exception:
                     live = []
                 if live:
-                    self._connector.close_position(sym, None)
+                    close_result = self._connector.close_position(sym, None)
+                else:
+                    close_result = {"ok": True, "closed": [], "broker": "binance", "note": "already_flat"}
             self._reset_coin_state(coin)
             self._connector.invalidate_positions_cache()
+            latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+            close_result["latency_ms"] = float(close_result.get("latency_ms") or latency_ms)
             pair_gate.record_order(
                 symbol=sym,
                 side="CLOSE",
-                order_id=None,
-                latency_ms=round((time.perf_counter() - t0) * 1000, 1),
+                order_id=(close_result.get("closed") or [{}])[0].get("order") if close_result.get("closed") else None,
+                latency_ms=close_result["latency_ms"],
                 source="scanner",
             )
-            log.info("scanner closed %s reason=%s", sym, reason)
+            log.info("scanner closed %s reason=%s latency_ms=%s", sym, reason, close_result["latency_ms"])
             self._bump_trades_closed()
             if self._one_at_a_time:
                 self._maybe_execute_best_pending()
+            return close_result
         finally:
             pair_gate.end_close(sym)
 

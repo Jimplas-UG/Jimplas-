@@ -974,6 +974,100 @@ class BinanceConnector:
             )
         return out
 
+    def realized_pnl_for_order(self, symbol: str, order_id: int | None) -> tuple[float, float]:
+        """Sum realized PnL and commission from userTrades for a filled order."""
+        if not order_id or not self.cfg.api_key:
+            return 0.0, 0.0
+        sym = symbol.upper()
+        try:
+            rows = self._request(
+                "GET",
+                "/fapi/v1/userTrades",
+                {"symbol": sym, "orderId": int(order_id)},
+                signed=True,
+            )
+        except Exception as e:
+            log.warning("realized_pnl_for_order %s #%s: %s", sym, order_id, e)
+            return 0.0, 0.0
+        rpnl = 0.0
+        comm = 0.0
+        for t in rows or []:
+            rpnl += float(t.get("realizedPnl", 0))
+            comm += float(t.get("commission", 0))
+        return rpnl, comm
+
+    def _estimate_close_pnl(self, pos_side: str, entry: float, fill: float, qty: float) -> float:
+        if entry <= 0 or fill <= 0 or qty <= 0:
+            return 0.0
+        if pos_side == "BUY":
+            return (fill - entry) * qty
+        return (entry - fill) * qty
+
+    def _deal_symbols_for_logs(self, symbol: str | None = None) -> list[str]:
+        sym_u = symbol.upper() if symbol else ""
+        if sym_u:
+            return [sym_u]
+        symbols: set[str] = set()
+        try:
+            for p in self.positions(force=True):
+                s = str(p.get("symbol") or "").upper()
+                if s:
+                    symbols.add(s)
+        except Exception:
+            pass
+        try:
+            income = self._request("GET", "/fapi/v1/income", {"limit": 100}, signed=True)
+            for row in income or []:
+                s = str(row.get("symbol") or "").upper()
+                if s:
+                    symbols.add(s)
+        except Exception as e:
+            log.debug("income symbols: %s", e)
+        if not symbols:
+            symbols.add(self.cfg.symbol.upper())
+        return sorted(symbols)
+
+    def recent_deals(self, limit: int = 50, symbol: str | None = None) -> list[dict[str, Any]]:
+        """User trades across active/recent symbols — not only cfg.symbol."""
+        if self.cfg.paper:
+            from paper_simulator import paper_store
+
+            return paper_store.recent_deals(limit)
+        if not self.cfg.api_key:
+            return []
+        lim = max(1, min(200, int(limit)))
+        symbols = self._deal_symbols_for_logs(symbol)
+        per_sym = max(15, lim // max(len(symbols), 1) + 10)
+        deals: list[dict[str, Any]] = []
+        for sym in symbols:
+            try:
+                rows = self._request(
+                    "GET",
+                    "/fapi/v1/userTrades",
+                    {"symbol": sym, "limit": per_sym},
+                    signed=True,
+                )
+            except Exception as e:
+                log.warning("userTrades %s: %s", sym, e)
+                continue
+            for t in rows or []:
+                side = "BUY" if t.get("buyer") else "SELL"
+                deals.append(
+                    {
+                        "ticket": t.get("id"),
+                        "order_id": t.get("orderId"),
+                        "symbol": t.get("symbol"),
+                        "type": side,
+                        "volume": float(t.get("qty", 0)),
+                        "price": float(t.get("price", 0)),
+                        "profit": float(t.get("realizedPnl", 0)),
+                        "commission": float(t.get("commission", 0)),
+                        "time": int(t.get("time", 0)),
+                    }
+                )
+        deals.sort(key=lambda d: int(d.get("time") or 0), reverse=True)
+        return deals[:lim]
+
     def invalidate_positions_cache(self) -> None:
         self._positions_cache = None
         self._positions_cache_ts = 0.0
@@ -1264,15 +1358,30 @@ class BinanceConnector:
                 resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
             except RuntimeError as e:
                 return {"ok": False, "error": str(e), "closed": closed}
+            order_id = resp.get("orderId")
             fill = float(resp.get("avgPrice") or p.get("price_open") or 0)
+            entry = float(p.get("price_open") or 0)
+            rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
+            if abs(rpnl) < 1e-12 and order_id:
+                import time as _wait
+
+                _wait.sleep(0.12)
+                rpnl, commission = self.realized_pnl_for_order(sym, int(order_id))
+            if abs(rpnl) < 1e-12:
+                rpnl = self._estimate_close_pnl(pos_side, entry, fill, qty)
             closed.append(
                 {
                     "symbol": sym,
                     "side": pos_side,
+                    "exit_side": exit_side,
+                    "position_side": hedge_side or None,
                     "volume": qty,
                     "fill_price": fill,
-                    "profit": float(p.get("profit", 0)),
-                    "order": resp.get("orderId"),
+                    "entry_price": entry,
+                    "profit": rpnl,
+                    "realized_pnl": rpnl,
+                    "commission": commission,
+                    "order": order_id,
                 }
             )
 
@@ -1548,7 +1657,20 @@ class BinanceConnector:
         )
         try:
             resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
-            return {"ok": True, "symbol": sym, "volume": qty, "order": resp.get("orderId"), "magic": magic_i}
+            order_id = resp.get("orderId")
+            fill = float(resp.get("avgPrice") or tick["bid"])
+            rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
+            return {
+                "ok": True,
+                "symbol": sym,
+                "volume": qty,
+                "fill_price": fill,
+                "realized_pnl": rpnl,
+                "profit": rpnl,
+                "commission": commission,
+                "order": order_id,
+                "magic": magic_i,
+            }
         except RuntimeError as e:
             return {"ok": False, "error": str(e)}
 

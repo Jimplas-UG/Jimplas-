@@ -1,12 +1,12 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
+import { formatFuturesPrice } from '../lib/futuresPrice';
 import { postBinanceClosePosition, postBinanceCloseAllPositions } from '../broker/binanceFuturesApi';
 import { formatPairLabel } from '../lib/futuresSymbol';
 
 function fmtPx(n) {
-  const x = Number(n);
-  return Number.isFinite(x) ? x.toFixed(2) : '—';
+  return formatFuturesPrice(n);
 }
 
 function fmtUsd(n) {
@@ -58,6 +58,7 @@ export default function OpenPositionsPanel({
   quoteSymbol,
   hideQuote = false,
   onRefresh,
+  onRefreshAfterClose,
   onCloseMessage,
 }) {
   const { colors: C, styles: appStyles } = useBilshenzTheme();
@@ -102,11 +103,16 @@ export default function OpenPositionsPanel({
                   });
                   if (r.ok) {
                     const closed = r.closed?.[0];
+                    const realized = Number(closed?.realized_pnl ?? closed?.profit ?? 0);
                     const msg = closed
-                      ? `Closed ${closed.side} ${fmtVol(closed.volume)} @ ${fmtPx(closed.fill_price)}`
+                      ? `Closed ${closed.side} ${fmtVol(closed.volume)} @ ${fmtPx(closed.fill_price)} · P&L ${fmtUsd(realized)}`
                       : 'Position closed';
                     onCloseMessage?.(msg);
-                    await onRefresh?.();
+                    if (onRefreshAfterClose) {
+                      await onRefreshAfterClose();
+                    } else {
+                      await onRefresh?.();
+                    }
                   } else {
                     const err = parseCloseError(r);
                     const lat = r.latencyMs != null ? ` (${r.latencyMs} ms)` : '';
@@ -123,7 +129,7 @@ export default function OpenPositionsPanel({
         ],
       );
     },
-    [brokerConnected, binanceBaseUrl, livePrice, onRefresh, onCloseMessage, pairLabel],
+    [brokerConnected, binanceBaseUrl, livePrice, onRefresh, onRefreshAfterClose, onCloseMessage, pairLabel],
   );
 
   const confirmCloseAll = useCallback(() => {
@@ -146,7 +152,11 @@ export default function OpenPositionsPanel({
                 const r = await postBinanceCloseAllPositions(binanceBaseUrl);
                 if (r.ok) {
                   onCloseMessage?.(`Closed ${r.closed?.length ?? 0} leg(s)`);
-                  await onRefresh?.();
+                  if (onRefreshAfterClose) {
+                    await onRefreshAfterClose();
+                  } else {
+                    await onRefresh?.();
+                  }
                 } else {
                   Alert.alert('Close all failed', parseCloseError(r));
                 }
@@ -160,7 +170,7 @@ export default function OpenPositionsPanel({
         },
       ],
     );
-  }, [brokerConnected, binanceBaseUrl, positions.length, onRefresh, onCloseMessage]);
+  }, [brokerConnected, binanceBaseUrl, positions.length, onRefresh, onRefreshAfterClose, onCloseMessage]);
 
   return (
     <View style={st.wrap}>
@@ -217,7 +227,7 @@ export default function OpenPositionsPanel({
               const sideCol = p.type === 'BUY' ? C.green : C.red;
               const dist =
                 Number.isFinite(livePrice) && entry > 0
-                  ? (p.type === 'BUY' ? livePrice - entry : entry - livePrice).toFixed(2)
+                  ? formatFuturesPrice(p.type === 'BUY' ? livePrice - entry : entry - livePrice)
                   : '—';
               const busy = closingKey === `${p.symbol}-${p.type}-${p.price_open}`;
               return (
@@ -278,13 +288,16 @@ export default function OpenPositionsPanel({
         ) : (
           watchDeals.map((d, i) => {
             const pl = Number(d.profit ?? 0);
+            const isCloseFill = pl !== 0;
             return (
               <View key={`${d.ticket ?? i}-${d.time ?? i}`} style={[st.logRow, { borderBottomColor: C.border }]}>
                 <Text style={[st.logTime, { color: C.dim }]}>{fmtDealTime(d.time)}</Text>
                 <Text style={[st.logSide, { color: d.type === 'BUY' ? C.green : C.red }]}>
-                  {d.type} {d.volume}
+                  {d.type} {fmtVol(d.volume)} {d.symbol ? `· ${d.symbol.replace('USDT', '')}` : ''}
                 </Text>
-                <Text style={[st.logPl, { color: pl >= 0 ? C.green : C.red }]}>{fmtUsd(pl)}</Text>
+                <Text style={[st.logPl, { color: isCloseFill ? (pl >= 0 ? C.green : C.red) : C.dim }]}>
+                  {isCloseFill ? fmtUsd(pl) : `@ ${fmtPx(d.price)}`}
+                </Text>
               </View>
             );
           })

@@ -87,6 +87,7 @@ export default function InstitutionalRiskDesk({
   bid,
   ask,
   onRefreshBroker,
+  onRefreshAfterClose,
   onBrokerCloseMsg,
   feedReady,
   feedError,
@@ -268,6 +269,7 @@ export default function InstitutionalRiskDesk({
             binanceBaseUrl={binanceBaseUrl}
             brokerConnected={brokerConnected}
             onRefresh={onRefreshBroker}
+            onRefreshAfterClose={onRefreshAfterClose}
             onCloseMessage={onBrokerCloseMsg}
           />
         ) : null}

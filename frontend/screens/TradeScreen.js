@@ -90,6 +90,7 @@ export default function TradeScreen({ pad, desk, scanner, onOpenProfile, active 
         binanceBaseUrl={baseUrl}
         brokerConnected={connected}
         onRefresh={brokerFeed.refreshBrokerSnapshot}
+        onRefreshAfterClose={brokerFeed.refreshAfterClose}
         onCloseMessage={(msg) => setLastBrokerMsg(msg)}
       />
     </ScrollView>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { buildBundleFromM30Bars } from '../lib/marketBundle';
 import { DEFAULT_CHART_SYMBOL, sanitizeFuturesSymbol } from '../lib/futuresSymbol';
+import { roundFuturesMid } from '../lib/futuresPrice';
 import { DISPLAY_PIP_SIZE } from '../security/deskConstants';
 import {
   fetchBinanceBarsM30,
@@ -45,7 +46,7 @@ function applyTickState(tk, setters) {
   if (Number.isFinite(tk.bid)) setBid(tk.bid);
   if (Number.isFinite(tk.ask)) setAsk(tk.ask);
   const mid = Number.isFinite(tk.bid) && Number.isFinite(tk.ask) ? (tk.bid + tk.ask) / 2 : null;
-  if (Number.isFinite(mid)) setPrice(parseFloat(Number(mid).toFixed(2)));
+  if (Number.isFinite(mid)) setPrice(roundFuturesMid(mid));
   if (Number.isFinite(tk.bid) && Number.isFinite(tk.ask)) {
     setSpreadPips(parseFloat(((tk.ask - tk.bid) / PIP).toFixed(2)));
   }
@@ -118,7 +119,7 @@ export function useBinanceLiveFeed({
     if (!bars?.length) return false;
     setMarketBundle(buildBundleFromM30Bars(bars));
     const last = bars[bars.length - 1];
-    if (last?.c != null) setPrice(parseFloat(Number(last.c).toFixed(2)));
+    if (last?.c != null) setPrice(roundFuturesMid(last.c));
     setFeedReady(true);
     everReadyRef.current = true;
     setFeedError('');
@@ -319,7 +320,7 @@ export function useBinanceLiveFeed({
 
     const refreshDeals = async () => {
       const d = await fetchBinanceDeals(b, 100);
-      if (!cancelled && d.length) setBrokerDeals(d);
+      if (!cancelled) setBrokerDeals(d);
     };
 
     const refreshPositions = async () => {
@@ -332,8 +333,8 @@ export function useBinanceLiveFeed({
     void refreshPositions();
 
     const acctId = setInterval(refreshAccount, 4000);
-    const dealsId = setInterval(refreshDeals, 15000);
-    const posId = setInterval(refreshPositions, 4000);
+    const dealsId = setInterval(refreshDeals, 5000);
+    const posId = setInterval(refreshPositions, 2000);
 
     return () => {
       cancelled = true;
@@ -346,7 +347,6 @@ export function useBinanceLiveFeed({
   const refreshBrokerSnapshot = useCallback(async () => {
     if (!sessionActive || !enabled || !baseUrl?.trim()) return;
     const b = baseUrl.trim();
-    const sym = symRef.current;
     const [st, d, p] = await Promise.all([
       fetchStatusAccount(b),
       fetchBinanceDeals(b, 100),
@@ -354,9 +354,19 @@ export function useBinanceLiveFeed({
     ]);
     if (st.account) setAccount(st.account);
     else if (!st.connected) setAccount(null);
-    if (d.length) setBrokerDeals(d);
+    setBrokerDeals(d);
     setPositions(p);
   }, [sessionActive, enabled, baseUrl]);
+
+  const refreshAfterClose = useCallback(async () => {
+    if (!sessionActive || !enabled || !baseUrl?.trim()) return;
+    for (let i = 0; i < 5; i++) {
+      await refreshBrokerSnapshot();
+      if (i < 4) {
+        await new Promise((r) => setTimeout(r, 350));
+      }
+    }
+  }, [sessionActive, enabled, baseUrl, refreshBrokerSnapshot]);
 
   useEffect(() => {
     if (!quotesActive || !pollTicks) return undefined;
@@ -418,5 +428,6 @@ export function useBinanceLiveFeed({
     symbolSpec,
     refreshFeed,
     refreshBrokerSnapshot,
+    refreshAfterClose,
   };
 }

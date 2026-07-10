@@ -938,16 +938,16 @@ def api_close(body: CloseBody):
     try:
         coin = momentum_scanner._coins.get(sym)
         if coin and (coin.short or coin.long1 or coin.long2):
-            out = momentum_scanner.close_strategy(sym)
-            if not out.get("ok"):
-                raise HTTPException(status_code=400, detail=out)
-            r = {"ok": True, "closed": [{"symbol": sym, "reason": "scanner_pair"}], "broker": "binance"}
+            r = momentum_scanner.close_strategy(sym)
+            if not r.get("ok"):
+                raise HTTPException(status_code=400, detail=r)
         else:
             r = connector.close_position(sym, None)
             if not r.get("ok"):
                 err = r.get("error") or "close_failed"
                 raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
-            momentum_scanner.reconcile_from_exchange()
+        momentum_scanner.reconcile_from_exchange()
+        connector.invalidate_positions_cache()
     finally:
         pair_gate.end_close(sym)
     pair_gate.record_order(
@@ -1006,8 +1006,9 @@ def api_order_status(order_id: int, symbol: str = _DEFAULT_SYMBOL):
 
 
 @app.get("/api/logs")
-def api_logs(limit: int = 50):
+def api_logs(limit: int = 50, symbol: str | None = None):
     lim = max(1, min(200, int(limit)))
+    sym = symbol.upper() if symbol else None
     if connector.cfg.paper:
         from paper_simulator import paper_store
 
@@ -1015,30 +1016,10 @@ def api_logs(limit: int = 50):
     if not connector.cfg.api_key:
         return {"deals": [], "note": "not connected"}
     try:
-        sym = connector.cfg.symbol.upper()
-        rows = connector._request(
-            "GET",
-            "/fapi/v1/userTrades",
-            {"symbol": sym, "limit": lim},
-            signed=True,
-        )
-        deals = []
-        for t in rows or []:
-            side = "BUY" if t.get("buyer") else "SELL"
-            deals.append(
-                {
-                    "ticket": t.get("id"),
-                    "symbol": t.get("symbol"),
-                    "type": side,
-                    "volume": float(t.get("qty", 0)),
-                    "price": float(t.get("price", 0)),
-                    "profit": float(t.get("realizedPnl", 0)),
-                    "time": int(t.get("time", 0)),
-                }
-            )
-        return {"deals": deals, "limit": lim}
+        deals = connector.recent_deals(lim, sym)
+        return {"deals": deals, "limit": lim, "symbol": sym}
     except Exception as e:
-        log.warning("userTrades: %s", e)
+        log.warning("recent_deals: %s", e)
         return {"deals": [], "error": str(e), "limit": lim}
 
 

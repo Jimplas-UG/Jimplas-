@@ -1,4 +1,5 @@
 /** Maps journal row → HistRow tuple shape used in App.js */
+import { formatFuturesPrice } from './futuresPrice';
 export function mapJournalRowToHist(row) {
   const typ = row.type === 'P1' ? 'P1' : row.type === 'P2' ? 'P2' : row.type === 'P3' ? 'P3' : 'P2';
   const dir = row.dir === 'BUY' ? '▲' : '▼';
@@ -62,7 +63,7 @@ export function mapBinanceDealsToHistRows(deals) {
     const isBuy = d.type === 'BUY';
     const dir = isBuy ? '▲' : '▼';
     const side = isBuy ? 'buy' : 'sell';
-    const priceStr = d.price > 0 ? Number(d.price).toFixed(2) : '—';
+    const priceStr = d.price > 0 ? formatFuturesPrice(d.price) : '—';
     const volStr = `${d.volume ?? '—'} qty`;
     const profit = Number(d.profit ?? 0);
     let resultStr;

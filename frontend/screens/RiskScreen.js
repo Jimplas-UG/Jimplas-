@@ -30,6 +30,7 @@ export default function RiskScreen({ pad, desk, onOpenProfile }) {
         bid={brokerFeed.bid}
         ask={brokerFeed.ask}
         onRefreshBroker={brokerFeed.refreshBrokerSnapshot}
+        onRefreshAfterClose={brokerFeed.refreshAfterClose}
         onBrokerCloseMsg={(msg) => desk.setLastBrokerMsg(`Close: ${msg}`)}
         feedReady={brokerFeed.feedReady}
         feedError={brokerFeed.feedError}
