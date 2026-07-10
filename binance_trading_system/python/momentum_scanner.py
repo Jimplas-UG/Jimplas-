@@ -459,21 +459,64 @@ class MomentumScanner:
         ):
             self._reset_coin_state(coin)
 
+    def _ensure_pair_coherence(self, coin: CoinStrategy) -> bool:
+        """
+        Active pair = open short on exchange. Long1/Long2 are hedges only while short lives.
+        If short is gone, flatten the full symbol and reset — never leave orphan longs.
+        """
+        sym = coin.symbol
+        if getattr(self._connector.cfg, "paper", False):
+            if not coin.short and (coin.long1 or coin.long2):
+                self._close_all(coin, "PAIR_NO_SHORT")
+                return False
+            return coin.short is not None
+
+        has_short = self._exchange_has_short(sym)
+        has_hedge_mem = coin.long1 is not None or coin.long2 is not None
+        has_hedge_ex = False
+        if not has_short:
+            long_fn = getattr(self._connector, "exchange_long_qty", None)
+            if callable(long_fn):
+                has_hedge_ex = float(long_fn(sym) or 0) > 1e-12
+            else:
+                has_hedge_ex = self._exchange_has_orphan_long(sym)
+
+        if coin.short and not has_short:
+            log.info("scanner %s short closed on exchange — flattening full pair", sym)
+            self._close_all(coin, "SHORT_GONE_EXCHANGE")
+            return False
+
+        if not has_short and (has_hedge_mem or has_hedge_ex):
+            log.warning("scanner %s hedge legs without short — flattening full pair", sym)
+            self._close_all(coin, "ORPHAN_HEDGE")
+            return False
+
+        if not coin.short:
+            return False
+
+        return True
+
     def reconcile_from_exchange(self) -> dict[str, Any]:
         """Sync scanner state to Binance — flat symbols reset, open symbols kept."""
         open_syms = {str(p.get("symbol") or "").upper() for p in self._exchange_positions()}
         reset: list[str] = []
         for coin in self._coins.values():
             sym = coin.symbol
-            if sym in open_syms and self._exchange_has_orphan_long(sym) and not coin.short:
-                log.warning(
-                    "scanner %s orphan LONG on exchange without SHORT — clearing scanner state",
-                    sym,
-                )
-                self._reset_coin_state(coin)
-                reset.append(sym)
-                continue
             if sym in open_syms:
+                if not self._exchange_has_short(sym) and (
+                    self._exchange_has_orphan_long(sym)
+                    or (
+                        hasattr(self._connector, "exchange_long_qty")
+                        and float(self._connector.exchange_long_qty(sym) or 0) > 1e-12
+                    )
+                ):
+                    log.warning("reconcile %s flatten orphan hedge legs (no short)", sym)
+                    try:
+                        self._connector.close_position(sym, None)
+                    except Exception as e:
+                        log.warning("reconcile flatten %s: %s", sym, e)
+                    self._reset_coin_state(coin)
+                    reset.append(sym)
                 continue
             if coin.short or coin.long1 or coin.long2 or coin.status in (
                 STATUS_SHORT,
@@ -1114,6 +1157,9 @@ class MomentumScanner:
         return (leg.entry - price) * leg.qty
 
     def _manage_positions(self, coin: CoinStrategy) -> None:
+        if not self._ensure_pair_coherence(coin):
+            return
+
         price = coin.price
         short = coin.short
         if not short:
@@ -1206,26 +1252,21 @@ class MomentumScanner:
         pair_gate.begin_close(sym)
         t0 = time.perf_counter()
         try:
-            if coin.short:
-                self._connector.close_leg(sym, coin.short.magic, coin.short.qty)
-            if coin.long1:
-                self._connector.close_leg(sym, coin.long1.magic, coin.long1.qty)
-            if coin.long2:
-                self._connector.close_leg(sym, coin.long2.magic, coin.long2.qty)
-            coin.short = None
-            coin.long1 = None
-            coin.long2 = None
-            coin.long1_was_closed = False
-            coin.long1_peak_price = None
-            coin.long2_peak_price = None
-            coin.recovery_peak_price = None
-            coin.short_opened_ms = 0
-            coin.short_adverse_peak_pct = 0.0
-            coin.status = STATUS_CLOSED
-            coin.highest_price = None
-            coin.qualifying_pct = 0.0
-            coin.entry_signal_key = ""
-            coin.unrealized_pnl = 0.0
+            if getattr(self._connector.cfg, "paper", False):
+                if coin.short:
+                    self._connector.close_leg(sym, coin.short.magic, coin.short.qty)
+                if coin.long1:
+                    self._connector.close_leg(sym, coin.long1.magic, coin.long1.qty)
+                if coin.long2:
+                    self._connector.close_leg(sym, coin.long2.magic, coin.long2.qty)
+            else:
+                try:
+                    live = self._connector.positions(sym, force=True)
+                except Exception:
+                    live = []
+                if live:
+                    self._connector.close_position(sym, None)
+            self._reset_coin_state(coin)
             self._connector.invalidate_positions_cache()
             pair_gate.record_order(
                 symbol=sym,

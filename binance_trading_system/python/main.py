@@ -935,14 +935,20 @@ def api_close(body: CloseBody):
     sym = body.symbol.upper()
     pair_gate.begin_close(sym)
     try:
-        # Always close exchange-reported size — never trust client volume (meme coins can exceed 1k qty).
-        r = connector.close_position(sym, None)
+        coin = momentum_scanner._coins.get(sym)
+        if coin and (coin.short or coin.long1 or coin.long2):
+            out = momentum_scanner.close_strategy(sym)
+            if not out.get("ok"):
+                raise HTTPException(status_code=400, detail=out)
+            r = {"ok": True, "closed": [{"symbol": sym, "reason": "scanner_pair"}], "broker": "binance"}
+        else:
+            r = connector.close_position(sym, None)
+            if not r.get("ok"):
+                err = r.get("error") or "close_failed"
+                raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
+            momentum_scanner.reconcile_from_exchange()
     finally:
         pair_gate.end_close(sym)
-    if not r.get("ok"):
-        err = r.get("error") or "close_failed"
-        raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
-    momentum_scanner.reset_symbol_if_flat(sym)
     pair_gate.record_order(
         symbol=sym,
         side="CLOSE",

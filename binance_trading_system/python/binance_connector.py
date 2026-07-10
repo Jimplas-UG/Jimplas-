@@ -1188,6 +1188,7 @@ class BinanceConnector:
 
         for p in positions:
             pos_side = str(p.get("type", "")).upper()
+            hedge_side = str(p.get("positionSide") or "").upper()
             pos_vol = float(p.get("volume", 0))
             qty = round_to_step(float(volume) if volume is not None else pos_vol, info["stepSize"])
             if qty < info["minQty"]:
@@ -1204,7 +1205,10 @@ class BinanceConnector:
                 "reduceOnly": "true",
                 "newClientOrderId": cid,
             }
-            params.update(self._position_side_param(pos_side, reduce=True))
+            if self.is_hedge_mode() and hedge_side in ("LONG", "SHORT"):
+                params["positionSide"] = hedge_side
+            else:
+                params.update(self._position_side_param(pos_side, reduce=True))
             try:
                 resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
             except RuntimeError as e:

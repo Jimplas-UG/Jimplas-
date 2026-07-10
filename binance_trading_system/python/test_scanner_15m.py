@@ -65,6 +65,9 @@ class FakeConnector:
         self.closed.append({"sym": sym, "magic": magic, "qty": qty})
         return {"ok": True}
 
+    def invalidate_positions_cache(self) -> None:
+        pass
+
 
 def _seed_base(sc: MomentumScanner, sym: str, base: float = 100.0) -> None:
     sc.load_symbols([sym])
@@ -207,6 +210,27 @@ def test_long1_blocked_without_short() -> None:
     print("OK long1 blocked without short")
 
 
+def test_pair_flattens_when_short_removed() -> None:
+    conn = FakeConnector()
+    sc = MomentumScanner(conn, lambda: True)
+    sym = "TESTUSDT"
+    entry = 100.0
+    sc.load_symbols([sym])
+    sc.on_tick(sym, entry)
+    coin = sc._coins[sym]
+    from momentum_scanner import LegPosition, MAGIC_LONG1, MAGIC_SHORT, LONG1_LEVERAGE, SHORT_LEVERAGE, STATUS_CLOSED, STATUS_LONG1, STATUS_SHORT
+
+    coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+    coin.long1 = LegPosition("BUY", entry, 0.5, LONG1_LEVERAGE, MAGIC_LONG1, None)
+    coin.status = STATUS_LONG1
+    coin.short_opened_ms = int(time.time() * 1000) - 60_000
+    coin.short = None
+    sc._manage_positions(coin)
+    assert coin.long1 is None, "long1 must close when short is gone"
+    assert coin.status == STATUS_CLOSED
+    print("OK pair flattens when short removed")
+
+
 def test_long2_blocked_without_long1() -> None:
     conn = FakeConnector()
     sc = MomentumScanner(conn, lambda: True)
@@ -233,6 +257,7 @@ if __name__ == "__main__":
         test_long1_opens_and_pullback_close()
         test_long2_opens_and_pullback_close()
         test_long1_blocked_without_short()
+        test_pair_flattens_when_short_removed()
         test_long2_blocked_without_long1()
     except AssertionError as e:
         print("FAIL", e, file=sys.stderr)
