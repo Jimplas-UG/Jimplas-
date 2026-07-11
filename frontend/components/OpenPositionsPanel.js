@@ -77,60 +77,100 @@ export default function OpenPositionsPanel({
     [positions],
   );
 
-  const confirmClose = useCallback(
+  const legSide = (pos) =>
+    String(pos.positionSide || pos.leg || (pos.type === 'SELL' ? 'SHORT' : 'LONG')).toUpperCase();
+
+  const legLabel = (pos) => {
+    const ps = legSide(pos);
+    return ps === 'SHORT' ? 'SHORT' : 'LONG';
+  };
+
+  const runClose = useCallback(
+    async ({ symbol, positionSide, closePair, label }) => {
+      const key = closePair ? `pair-${symbol}` : `${symbol}-${positionSide}`;
+      setClosingKey(key);
+      try {
+        const r = await postBinanceClosePosition(binanceBaseUrl, {
+          symbol,
+          positionSide: closePair ? null : positionSide,
+          closePair,
+        });
+        if (r.ok) {
+          const closed = r.closed?.[0];
+          const realized = Number(closed?.realized_pnl ?? closed?.profit ?? 0);
+          const msg = closed
+            ? `Closed ${label} ${fmtVol(closed.volume)} @ ${fmtPx(closed.fill_price)} · P&L ${fmtUsd(realized)}`
+            : `${label} closed`;
+          onCloseMessage?.(msg);
+          if (onRefreshAfterClose) await onRefreshAfterClose();
+          else await onRefresh?.();
+        } else {
+          Alert.alert('Close failed', parseCloseError(r));
+        }
+      } catch (e) {
+        Alert.alert('Close failed', e instanceof Error ? e.message : String(e));
+      } finally {
+        setClosingKey(null);
+      }
+    },
+    [binanceBaseUrl, onRefresh, onRefreshAfterClose, onCloseMessage],
+  );
+
+  const confirmCloseLeg = useCallback(
     (pos) => {
       if (!brokerConnected || !binanceBaseUrl?.trim()) {
         Alert.alert('Not connected', 'Connect Binance in Profile first.');
         return;
       }
+      const ps = legSide(pos);
       const profit = Number(pos.profit ?? 0);
-      const profitLbl = fmtUsd(profit);
+      const label = legLabel(pos);
       Alert.alert(
-        'Close position?',
-        `${pos.type} ${pos.volume} ${pos.symbol ?? pairLabel}\nEntry ${fmtPx(pos.price_open)} · Now ${fmtPx(livePrice)}\nFloating ${profitLbl}`,
+        `Close ${label} only?`,
+        `${label} ${fmtVol(pos.volume)} ${pos.symbol}\nEntry ${fmtPx(pos.price_open)} · Floating ${fmtUsd(profit)}\n\nOther legs on this symbol will stay open.`,
         [
           { text: 'Cancel', style: 'cancel' },
           {
-            text: 'Close now',
+            text: `Close ${label}`,
             style: profit >= 0 ? 'default' : 'destructive',
-            onPress: () => {
-              void (async () => {
-                const key = `${pos.symbol}-${pos.type}-${pos.price_open}`;
-                setClosingKey(key);
-                try {
-                  const r = await postBinanceClosePosition(binanceBaseUrl, {
-                    symbol: pos.symbol,
-                  });
-                  if (r.ok) {
-                    const closed = r.closed?.[0];
-                    const realized = Number(closed?.realized_pnl ?? closed?.profit ?? 0);
-                    const msg = closed
-                      ? `Closed ${closed.side} ${fmtVol(closed.volume)} @ ${fmtPx(closed.fill_price)} · P&L ${fmtUsd(realized)}`
-                      : 'Position closed';
-                    onCloseMessage?.(msg);
-                    if (onRefreshAfterClose) {
-                      await onRefreshAfterClose();
-                    } else {
-                      await onRefresh?.();
-                    }
-                  } else {
-                    const err = parseCloseError(r);
-                    const lat = r.latencyMs != null ? ` (${r.latencyMs} ms)` : '';
-                    Alert.alert('Close failed', `${err}${lat}`);
-                  }
-                } catch (e) {
-                  Alert.alert('Close failed', e instanceof Error ? e.message : String(e));
-                } finally {
-                  setClosingKey(null);
-                }
-              })();
-            },
+            onPress: () => void runClose({ symbol: pos.symbol, positionSide: ps, closePair: false, label }),
           },
         ],
       );
     },
-    [brokerConnected, binanceBaseUrl, livePrice, onRefresh, onRefreshAfterClose, onCloseMessage, pairLabel],
+    [brokerConnected, binanceBaseUrl, livePrice, runClose],
   );
+
+  const confirmClosePair = useCallback(
+    (symbol, legCount) => {
+      if (!brokerConnected || !binanceBaseUrl?.trim()) return;
+      Alert.alert(
+        'Close full pair?',
+        `Market-close all ${legCount} leg(s) on ${symbol} (short + longs).`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Close pair',
+            style: 'destructive',
+            onPress: () => void runClose({ symbol, closePair: true, label: 'Pair' }),
+          },
+        ],
+      );
+    },
+    [brokerConnected, binanceBaseUrl, runClose],
+  );
+
+  const confirmClose = confirmCloseLeg;
+
+  const positionsBySymbol = useMemo(() => {
+    const map = new Map();
+    for (const p of positions) {
+      const sym = p.symbol || '—';
+      if (!map.has(sym)) map.set(sym, []);
+      map.get(sym).push(p);
+    }
+    return map;
+  }, [positions]);
 
   const confirmCloseAll = useCallback(() => {
     if (!brokerConnected || !binanceBaseUrl?.trim()) {
@@ -220,60 +260,73 @@ export default function OpenPositionsPanel({
                 {fmtUsd(totalFloating)}
               </Text>
             </View>
-            {positions.map((p, i) => {
-              const key = `${p.symbol}-${p.type}-${p.price_open}-${i}`;
-              const profit = Number(p.profit ?? 0);
-              const entry = Number(p.price_open ?? 0);
-              const sideCol = p.type === 'BUY' ? C.green : C.red;
-              const dist =
-                Number.isFinite(livePrice) && entry > 0
-                  ? formatFuturesPrice(p.type === 'BUY' ? livePrice - entry : entry - livePrice)
-                  : '—';
-              const busy = closingKey === `${p.symbol}-${p.type}-${p.price_open}`;
-              return (
-                <View key={key} style={[st.posCard, { borderColor: C.border, backgroundColor: C.panel2 }]}>
-                  <View style={st.posTop}>
-                    <Text style={[st.posSide, { color: sideCol }]}>
-                      {p.type} · {fmtVol(p.volume)} {p.symbol}
-                    </Text>
-                    <Text style={[st.posPnl, { color: profit >= 0 ? C.green : C.red }]}>{fmtUsd(profit)}</Text>
-                  </View>
-                  <View style={st.posMeta}>
-                    <Text style={[st.metaTxt, { color: C.dim }]}>Entry {fmtPx(entry)}</Text>
-                    <Text style={[st.metaTxt, { color: C.dim }]}>Move {dist}</Text>
-                    {p.leverage > 0 ? (
-                      <Text style={[st.metaTxt, { color: C.amber }]}>{p.leverage}x lev</Text>
-                    ) : null}
-                    {p.margin_type ? (
-                      <Text style={[st.metaTxt, { color: p.margin_type === 'ISOLATED' ? C.green : C.red }]}>
-                        {p.margin_type}
-                      </Text>
-                    ) : null}
-                    {p.sl > 0 ? <Text style={[st.metaTxt, { color: C.dim }]}>SL {fmtPx(p.sl)}</Text> : null}
-                    {p.tp > 0 ? <Text style={[st.metaTxt, { color: C.dim }]}>TP {fmtPx(p.tp)}</Text> : null}
-                  </View>
+            {Array.from(positionsBySymbol.entries()).map(([sym, legs]) => (
+              <View key={sym}>
+                {legs.length > 1 ? (
                   <Pressable
-                    onPress={() => confirmClose(p)}
-                    disabled={busy}
-                    style={({ pressed }) => [
-                      st.closeBtn,
-                      {
-                        borderColor: profit >= 0 ? 'rgba(0,230,118,0.45)' : 'rgba(255,61,87,0.45)',
-                        backgroundColor: profit >= 0 ? 'rgba(0,230,118,0.12)' : 'rgba(255,61,87,0.12)',
-                        opacity: pressed || busy ? 0.75 : 1,
-                      },
-                    ]}>
-                    {busy ? (
-                      <ActivityIndicator size="small" color={C.accentLight} />
-                    ) : (
-                      <Text style={[st.closeTxt, { color: profit >= 0 ? C.green : C.red }]}>
-                        {profit >= 0 ? 'CLOSE IN PROFIT' : 'CLOSE AT LOSS'}
-                      </Text>
-                    )}
+                    onPress={() => confirmClosePair(sym, legs.length)}
+                    disabled={closingKey === `pair-${sym}`}
+                    style={[st.pairBar, { borderColor: C.border }]}>
+                    <Text style={{ color: C.amber, fontSize: 10, fontWeight: '800' }}>
+                      {closingKey === `pair-${sym}` ? 'Closing pair…' : `CLOSE PAIR · ${sym}`}
+                    </Text>
                   </Pressable>
-                </View>
-              );
-            })}
+                ) : null}
+                {legs.map((p, i) => {
+                  const key = `${p.symbol}-${legSide(p)}-${p.price_open}-${i}`;
+                  const profit = Number(p.profit ?? 0);
+                  const entry = Number(p.price_open ?? 0);
+                  const sideCol = p.type === 'BUY' ? C.green : C.red;
+                  const label = legLabel(p);
+                  const dist =
+                    Number.isFinite(livePrice) && entry > 0
+                      ? formatFuturesPrice(p.type === 'BUY' ? livePrice - entry : entry - livePrice)
+                      : '—';
+                  const busy = closingKey === `${p.symbol}-${legSide(p)}`;
+                  return (
+                    <View key={key} style={[st.posCard, { borderColor: C.border, backgroundColor: C.panel2 }]}>
+                      <View style={st.posTop}>
+                        <Text style={[st.posSide, { color: sideCol }]}>
+                          {label} · {fmtVol(p.volume)} {p.symbol}
+                        </Text>
+                        <Text style={[st.posPnl, { color: profit >= 0 ? C.green : C.red }]}>{fmtUsd(profit)}</Text>
+                      </View>
+                      <View style={st.posMeta}>
+                        <Text style={[st.metaTxt, { color: C.dim }]}>Entry {fmtPx(entry)}</Text>
+                        <Text style={[st.metaTxt, { color: C.dim }]}>Move {dist}</Text>
+                        {p.leverage > 0 ? (
+                          <Text style={[st.metaTxt, { color: C.amber }]}>{p.leverage}x lev</Text>
+                        ) : null}
+                        {p.margin_type ? (
+                          <Text style={[st.metaTxt, { color: p.margin_type === 'ISOLATED' ? C.green : C.red }]}>
+                            {p.margin_type}
+                          </Text>
+                        ) : null}
+                      </View>
+                      <Pressable
+                        onPress={() => confirmCloseLeg(p)}
+                        disabled={busy}
+                        style={({ pressed }) => [
+                          st.closeBtn,
+                          {
+                            borderColor: profit >= 0 ? 'rgba(0,230,118,0.45)' : 'rgba(255,61,87,0.45)',
+                            backgroundColor: profit >= 0 ? 'rgba(0,230,118,0.12)' : 'rgba(255,61,87,0.12)',
+                            opacity: pressed || busy ? 0.75 : 1,
+                          },
+                        ]}>
+                        {busy ? (
+                          <ActivityIndicator size="small" color={C.accentLight} />
+                        ) : (
+                          <Text style={[st.closeTxt, { color: profit >= 0 ? C.green : C.red }]}>
+                            CLOSE {label} ONLY
+                          </Text>
+                        )}
+                      </Pressable>
+                    </View>
+                  );
+                })}
+              </View>
+            ))}
           </>
         )}
       </View>
@@ -363,6 +416,14 @@ const st = StyleSheet.create({
     minHeight: 44,
   },
   closeTxt: { fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
+  pairBar: {
+    marginHorizontal: 12,
+    marginTop: 8,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
   logRow: {
     flexDirection: 'row',
     alignItems: 'center',

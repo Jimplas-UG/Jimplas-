@@ -1153,12 +1153,14 @@ class BinanceConnector:
             from leverage_policy import policy_display_leverage
 
             policy_lev = policy_display_leverage(side=side, position_side=pos_side)
+            leg_label = "SHORT" if pos_side == "SHORT" else "LONG"
             out.append(
                 {
                     "ticket": p.get("symbol"),
                     "symbol": p.get("symbol"),
                     "type": side,
                     "positionSide": pos_side,
+                    "leg": leg_label,
                     "volume": abs(amt),
                     "price_open": float(p.get("entryPrice", 0)),
                     "sl": 0.0,
@@ -1356,6 +1358,158 @@ class BinanceConnector:
             return True
         except RuntimeError:
             return False
+
+    def close_by_position_side(
+        self,
+        symbol: str,
+        position_side: str,
+        volume: float | None = None,
+    ) -> dict[str, Any]:
+        """Market-close a single hedge leg (SHORT or LONG) without touching the other side."""
+        import time as _time
+
+        if _truthy(os.environ.get("FORWARD_DRY_RUN")):
+            return {"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True}
+
+        sym = symbol.upper()
+        ps = position_side.upper()
+        if ps not in ("SHORT", "LONG"):
+            return {"ok": False, "error": "invalid_position_side"}
+
+        if self.cfg.paper:
+            magic = 88001 if ps == "SHORT" else 88002
+            return self.close_leg(sym, magic, volume)
+
+        if not self.cfg.api_key:
+            return {"ok": False, "error": "api_key_missing"}
+
+        targets = [
+            p
+            for p in self.positions(sym, force=True)
+            if str(p.get("positionSide") or "").upper() == ps
+            or (
+                ps == "SHORT"
+                and str(p.get("type", "")).upper() == "SELL"
+                and str(p.get("positionSide") or "SHORT").upper() != "LONG"
+            )
+            or (ps == "LONG" and str(p.get("type", "")).upper() == "BUY")
+        ]
+        if not targets:
+            return {"ok": False, "error": f"no_{ps.lower()}_leg"}
+
+        p = targets[0]
+        pos_side = str(p.get("type", "")).upper()
+        hedge_side = str(p.get("positionSide") or ps).upper()
+        pos_vol = float(p.get("volume", 0))
+        info = self.exchange_info()
+        qty = round_to_step(float(volume) if volume is not None else pos_vol, info["stepSize"])
+        if qty < info["minQty"]:
+            qty = info["minQty"]
+        if qty > pos_vol + 1e-12:
+            qty = round_to_step(pos_vol, info["stepSize"])
+        exit_side = "SELL" if pos_side == "BUY" else "BUY"
+        cid = f"{CLIENT_ID_PREFIX}_CL_{ps}_{int(_time.time())}"[:36]
+        params = self._market_close_params(
+            symbol=sym,
+            side=exit_side,
+            quantity=qty,
+            client_order_id=cid,
+            hedge_position_side=hedge_side if hedge_side in ("LONG", "SHORT") else ps,
+            entry_side_for_reduce=pos_side,
+        )
+        t0 = _time.perf_counter()
+        try:
+            resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)}
+        order_id = resp.get("orderId")
+        fill = float(resp.get("avgPrice") or p.get("price_open") or 0)
+        entry = float(p.get("price_open") or 0)
+        rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
+        if abs(rpnl) < 1e-12 and order_id:
+            _time.sleep(0.12)
+            rpnl, commission = self.realized_pnl_for_order(sym, int(order_id))
+        if abs(rpnl) < 1e-12:
+            rpnl = self._estimate_close_pnl(pos_side, entry, fill, qty)
+        self.invalidate_positions_cache()
+        self.ensure_exchange_leverage(sym)
+        latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
+        leg_row = {
+            "symbol": sym,
+            "side": pos_side,
+            "position_side": ps,
+            "volume": qty,
+            "fill_price": fill,
+            "entry_price": entry,
+            "profit": rpnl,
+            "realized_pnl": rpnl,
+            "commission": commission,
+            "order": order_id,
+        }
+        return {"ok": True, "closed": [leg_row], **leg_row, "latency_ms": latency_ms, "broker": "binance"}
+
+    def trade_pnl_calendar(self, days: int = 400) -> dict[str, Any]:
+        """Aggregate realized PnL by UTC day from Binance income + userTrades."""
+        if self.cfg.paper:
+            from paper_simulator import paper_store
+
+            deals = paper_store.recent_deals(500)
+            by_day: dict[str, dict[str, float]] = {}
+            for d in deals:
+                ts = int(d.get("time") or 0)
+                if ts <= 0:
+                    continue
+                key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
+                row = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
+                pnl = float(d.get("profit") or 0)
+                if abs(pnl) > 1e-12:
+                    row["pnl"] += pnl
+                    row["trades"] += 1
+            days_out = [{"date": k, **v} for k, v in sorted(by_day.items())]
+            total = sum(x["pnl"] for x in days_out)
+            return {"ok": True, "total_pnl": round(total, 2), "days": days_out[-days:]}
+
+        if not self.cfg.api_key:
+            return {"ok": False, "total_pnl": 0.0, "days": []}
+
+        by_day: dict[str, dict[str, float]] = {}
+        try:
+            income = self._request(
+                "GET",
+                "/fapi/v1/income",
+                {"incomeType": "REALIZED_PNL", "limit": 1000},
+                signed=True,
+            )
+            for row in income or []:
+                ts = int(row.get("time") or 0)
+                if ts <= 0:
+                    continue
+                key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
+                bucket = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
+                bucket["pnl"] += float(row.get("income") or 0)
+                bucket["trades"] += 1
+        except Exception as e:
+            log.warning("trade_pnl_calendar income: %s", e)
+
+        if not by_day:
+            for d in self.recent_deals(200):
+                ts = int(d.get("time") or 0)
+                pnl = float(d.get("profit") or 0)
+                if ts <= 0 or abs(pnl) < 1e-12:
+                    continue
+                key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
+                bucket = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
+                bucket["pnl"] += pnl
+                bucket["trades"] += 1
+
+        days_out = [
+            {"date": k, "pnl": round(v["pnl"], 2), "trades": int(v["trades"])}
+            for k, v in sorted(by_day.items())
+        ]
+        cutoff = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86400))
+        days_out = [d for d in days_out if d["date"] >= cutoff]
+        total = round(sum(d["pnl"] for d in days_out), 2)
+        return {"ok": True, "total_pnl": total, "days": days_out}
 
     def close_position(self, symbol: str | None = None, volume: float | None = None) -> dict[str, Any]:
         import time as _time

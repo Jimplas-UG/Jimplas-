@@ -119,6 +119,7 @@ class CoinStrategy:
     recovery_peak_price: float | None = None
     short_opened_ms: int = 0
     short_adverse_peak_pct: float = 0.0
+    independent_legs_mode: bool = False
     unrealized_pnl: float = 0.0
     last_update_ms: int = 0
     entry_signal_key: str = ""
@@ -429,16 +430,72 @@ class MomentumScanner:
         return {"ok": True, "locked": self._risk_locked}
 
     def close_strategy(self, symbol: str) -> dict[str, Any]:
+        """Close full pair — short + all hedge longs on symbol."""
         sym = symbol.upper()
         coin = self._coins.get(sym)
         if not coin:
             return {"ok": False, "error": "unknown_symbol"}
+        coin.independent_legs_mode = False
         if coin.short or coin.long1 or coin.long2:
-            return self._close_all(coin, "MANUAL_APP")
+            return self._close_all(coin, "MANUAL_PAIR")
         if coin.status == STATUS_PENDING:
             coin.status = STATUS_WATCHING
             return {"ok": True, "cancelled_pending": sym}
         return {"ok": False, "error": "nothing_to_close"}
+
+    def close_leg_manual(
+        self,
+        symbol: str,
+        position_side: str,
+        volume: float | None = None,
+    ) -> dict[str, Any]:
+        """Close one hedge leg only — does not flatten the rest of the pair."""
+        sym = symbol.upper()
+        ps = position_side.upper()
+        if ps not in ("SHORT", "LONG"):
+            return {"ok": False, "error": "invalid_position_side"}
+        coin = self._coins.get(sym)
+        pair_gate.begin_close(sym)
+        t0 = time.perf_counter()
+        try:
+            if not hasattr(self._connector, "close_by_position_side"):
+                return {"ok": False, "error": "close_by_position_side_unsupported"}
+            r = self._connector.close_by_position_side(sym, ps, volume)
+            if not r.get("ok"):
+                return r
+            if coin:
+                coin.independent_legs_mode = True
+                if ps == "SHORT":
+                    coin.short = None
+                    coin.status = (
+                        STATUS_LONG2
+                        if coin.long2
+                        else STATUS_LONG1
+                        if coin.long1
+                        else STATUS_WATCHING
+                    )
+                else:
+                    coin.long1 = None
+                    coin.long2 = None
+                    coin.long1_peak_price = None
+                    coin.long2_peak_price = None
+                    coin.status = STATUS_SHORT if coin.short else STATUS_WATCHING
+            self._connector.invalidate_positions_cache()
+            latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+            r["latency_ms"] = latency_ms
+            r["position_side"] = ps
+            r["closed"] = r.get("closed") or [r]
+            pair_gate.record_order(
+                symbol=sym,
+                side=f"CLOSE_{ps}",
+                order_id=r.get("order"),
+                latency_ms=latency_ms,
+                source="manual_leg",
+            )
+            log.info("manual close leg %s %s latency_ms=%s", sym, ps, latency_ms)
+            return r
+        finally:
+            pair_gate.end_close(sym)
 
     def reset_symbol_if_flat(self, symbol: str) -> None:
         """Clear scanner legs when exchange position is gone."""
@@ -484,7 +541,7 @@ class MomentumScanner:
             self._close_all(coin, "SHORT_GONE_EXCHANGE")
             return False
 
-        if not has_short and (has_hedge_mem or has_hedge_ex):
+        if not has_short and (has_hedge_mem or has_hedge_ex) and not coin.independent_legs_mode:
             log.warning("scanner %s hedge legs without short — flattening full pair", sym)
             self._close_all(coin, "ORPHAN_HEDGE")
             return False
@@ -501,11 +558,15 @@ class MomentumScanner:
         for coin in self._coins.values():
             sym = coin.symbol
             if sym in open_syms:
-                if not self._exchange_has_short(sym) and (
-                    self._exchange_has_orphan_long(sym)
-                    or (
-                        hasattr(self._connector, "exchange_long_qty")
-                        and float(self._connector.exchange_long_qty(sym) or 0) > 1e-12
+                if (
+                    not coin.independent_legs_mode
+                    and not self._exchange_has_short(sym)
+                    and (
+                        self._exchange_has_orphan_long(sym)
+                        or (
+                            hasattr(self._connector, "exchange_long_qty")
+                            and float(self._connector.exchange_long_qty(sym) or 0) > 1e-12
+                        )
                     )
                 ):
                     log.warning("reconcile %s flatten orphan hedge legs (no short)", sym)
@@ -538,6 +599,7 @@ class MomentumScanner:
         coin.recovery_peak_price = None
         coin.short_opened_ms = 0
         coin.short_adverse_peak_pct = 0.0
+        coin.independent_legs_mode = False
         coin.status = STATUS_CLOSED
         coin.highest_price = None
         coin.qualifying_pct = 0.0

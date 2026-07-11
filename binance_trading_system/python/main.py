@@ -410,8 +410,11 @@ class OrderBody(BaseModel):
 
 
 class CloseBody(BaseModel):
-    """Close full position on symbol — volume from Binance (client volume ignored)."""
+    """Close position leg(s) on symbol."""
     symbol: str = Field(_DEFAULT_SYMBOL, max_length=20, pattern=r"^[A-Za-z0-9]+$")
+    position_side: str | None = None
+    volume: float | None = Field(None, gt=0)
+    close_pair: bool = False
 
 
 class MarginBody(BaseModel):
@@ -936,13 +939,40 @@ def api_close(body: CloseBody):
     sym = body.symbol.upper()
     pair_gate.begin_close(sym)
     try:
-        coin = momentum_scanner._coins.get(sym)
-        if coin and (coin.short or coin.long1 or coin.long2):
-            r = momentum_scanner.close_strategy(sym)
+        if body.close_pair:
+            coin = momentum_scanner._coins.get(sym)
+            if coin and (coin.short or coin.long1 or coin.long2):
+                r = momentum_scanner.close_strategy(sym)
+            else:
+                r = connector.close_position(sym, None)
             if not r.get("ok"):
-                raise HTTPException(status_code=400, detail=r)
+                err = r.get("error") or "close_failed"
+                raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
+        elif body.position_side:
+            r = momentum_scanner.close_leg_manual(sym, body.position_side, body.volume)
+            if not r.get("ok"):
+                err = r.get("error") or "close_failed"
+                raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
         else:
-            r = connector.close_position(sym, None)
+            positions = connector.positions(sym, force=True)
+            if len(positions) > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "ok": False,
+                        "error": "multiple_legs_open",
+                        "detail": "Specify position_side (SHORT/LONG) or close_pair=true",
+                        "legs": [
+                            {"position_side": p.get("positionSide"), "type": p.get("type"), "volume": p.get("volume")}
+                            for p in positions
+                        ],
+                    },
+                )
+            if len(positions) == 1:
+                ps = str(positions[0].get("positionSide") or ("SHORT" if positions[0].get("type") == "SELL" else "LONG"))
+                r = momentum_scanner.close_leg_manual(sym, ps, body.volume)
+            else:
+                r = connector.close_position(sym, None)
             if not r.get("ok"):
                 err = r.get("error") or "close_failed"
                 raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
@@ -952,8 +982,8 @@ def api_close(body: CloseBody):
         pair_gate.end_close(sym)
     pair_gate.record_order(
         symbol=sym,
-        side="CLOSE",
-        order_id=(r.get("closed") or [{}])[0].get("order") if r.get("closed") else None,
+        side="CLOSE_PAIR" if body.close_pair else f"CLOSE_{body.position_side or 'LEG'}",
+        order_id=(r.get("closed") or [{}])[0].get("order") if r.get("closed") else r.get("order"),
         latency_ms=float(r.get("latency_ms") or 0),
         source="manual",
     )
@@ -1003,6 +1033,16 @@ def api_order_status(order_id: int, symbol: str = _DEFAULT_SYMBOL):
         return {"ok": True, "order": row}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.get("/api/trade-calendar")
+def api_trade_calendar(days: int = 400):
+    lim = max(30, min(730, int(days)))
+    try:
+        return connector.trade_pnl_calendar(lim)
+    except Exception as e:
+        log.warning("trade_calendar: %s", e)
+        return {"ok": False, "total_pnl": 0.0, "days": [], "error": str(e)}
 
 
 @app.get("/api/logs")

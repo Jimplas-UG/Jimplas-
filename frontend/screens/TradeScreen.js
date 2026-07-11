@@ -3,6 +3,7 @@ import { ScrollView, Text, View } from 'react-native';
 import BinanceStatusStrip from '../components/BinanceStatusStrip';
 import DiagnosticsPanel from '../components/DiagnosticsPanel';
 import OpenPositionsPanel from '../components/OpenPositionsPanel';
+import TradeResultsCalendar from '../components/TradeResultsCalendar';
 import ScannerExecutionPanel, { ScannerQuoteStrip } from '../components/scanner/ScannerExecutionPanel';
 import { PilotCard, PilotHeroBalance, PilotSectionTitle } from '../components/pilot/PilotUI';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
@@ -92,6 +93,13 @@ export default function TradeScreen({ pad, desk, scanner, onOpenProfile, active 
         onRefresh={brokerFeed.refreshBrokerSnapshot}
         onRefreshAfterClose={brokerFeed.refreshAfterClose}
         onCloseMessage={(msg) => setLastBrokerMsg(msg)}
+      />
+
+      <PilotSectionTitle title="Performance" />
+      <TradeResultsCalendar
+        binanceBaseUrl={baseUrl}
+        brokerConnected={connected && useBrokerSession}
+        brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : []}
       />
     </ScrollView>
   );

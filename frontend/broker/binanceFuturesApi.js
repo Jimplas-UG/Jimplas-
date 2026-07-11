@@ -415,9 +415,26 @@ export async function fetchBinanceDiagnostics(apiBaseUrl, timeoutMs = 12000) {
   }
 }
 
-export async function postBinanceClosePosition(apiBaseUrl, { symbol = DEFAULT_CHART_SYMBOL } = {}) {
+export async function fetchBinanceTradeCalendar(apiBaseUrl, days = 400) {
+  const b = base(apiBaseUrl);
+  try {
+    const res = await binanceFetch(b, `/api/trade-calendar?days=${days}`, {}, 15000);
+    if (!res.ok) return { ok: false, days: [], total_pnl: 0 };
+    return await res.json();
+  } catch {
+    return { ok: false, days: [], total_pnl: 0 };
+  }
+}
+
+export async function postBinanceClosePosition(
+  apiBaseUrl,
+  { symbol = DEFAULT_CHART_SYMBOL, positionSide = null, closePair = false, volume = null } = {},
+) {
   const b = base(apiBaseUrl);
   const body = { symbol };
+  if (positionSide) body.position_side = String(positionSide).toUpperCase();
+  if (closePair) body.close_pair = true;
+  if (volume != null) body.volume = volume;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await binanceFetch(
