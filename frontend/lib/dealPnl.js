@@ -2,8 +2,12 @@
 
 export function dealNotional(deal) {
   const quote = Number(deal?.quote_qty ?? deal?.quoteQty ?? 0);
-  if (Number.isFinite(quote) && quote > 0) return quote;
   const vol = Number(deal?.volume ?? 0);
+  if (Number.isFinite(quote) && quote > 0 && vol > 0 && Math.abs(quote - vol) / vol < 0.05) {
+    const px = Number(deal?.price ?? 0);
+    if (px > 0 && px < 0.5) return vol * px;
+  }
+  if (Number.isFinite(quote) && quote > 0) return quote;
   const px = Number(deal?.price ?? 0);
   if (!Number.isFinite(vol) || !Number.isFinite(px)) return 0;
   return vol * px;

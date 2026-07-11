@@ -17,12 +17,19 @@ def effective_fill_price(
     quote_qty: float,
     *,
     mark: float | None = None,
+    entry_hint: float | None = None,
 ) -> float:
     """Prefer quoteQty/qty when reported price disagrees with notional or mark."""
     if qty <= 0:
         return price
-    implied = quote_qty / qty if quote_qty > 0 else 0.0
+    implied = 0.0
+    if quote_qty > 0 and abs(quote_qty - qty) / max(qty, 1e-12) > 0.05:
+        implied = quote_qty / qty
     if implied <= 0:
+        if entry_hint and entry_hint > 0 and price > 0:
+            ratio = max(price, entry_hint) / min(price, entry_hint)
+            if ratio > 10:
+                return entry_hint
         return price
     if price <= 0:
         return implied
@@ -32,6 +39,10 @@ def effective_fill_price(
     if mark and mark > 0:
         if abs(price - mark) / mark > 0.5 and abs(implied - mark) / mark <= 0.5:
             return implied
+    if entry_hint and entry_hint > 0:
+        ratio = max(price, entry_hint) / min(price, entry_hint)
+        if ratio > 10:
+            return entry_hint
     return price
 
 
@@ -81,10 +92,15 @@ def _fifo_pnl(
         lot = book[0]
         take = min(remaining, lot["qty"])
         entry = lot["price"]
+        exit_px = price
+        if entry > 0 and price > 0:
+            ratio = max(price, entry) / min(price, entry)
+            if ratio > 10:
+                exit_px = entry
         if leg == "SHORT":
-            pnl += (entry - price) * take
+            pnl += (entry - exit_px) * take
         else:
-            pnl += (price - entry) * take
+            pnl += (exit_px - entry) * take
         lot["qty"] -= take
         remaining -= take
         if lot["qty"] <= 1e-12:
@@ -116,9 +132,15 @@ def normalize_user_trades(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
             qty = _f(raw.get("volume", raw.get("qty")))
             quote_qty = _f(raw.get("quote_qty", raw.get("quoteQty")))
             reported_price = _f(raw.get("price"))
-            price = effective_fill_price(qty, reported_price, quote_qty)
             side = str(raw.get("type", raw.get("side", ""))).upper()
             leg = _leg_key(str(raw.get("position_side", raw.get("positionSide", ""))), side)
+            entry_hint = stacks[leg][0]["price"] if stacks[leg] else None
+            price = effective_fill_price(
+                qty,
+                reported_price,
+                quote_qty,
+                entry_hint=entry_hint,
+            )
             reported_pnl = _f(raw.get("profit", raw.get("realizedPnl")))
 
             if _open_leg(side, leg):
