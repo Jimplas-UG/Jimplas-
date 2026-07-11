@@ -1,5 +1,7 @@
 /** Trade calendar aggregation — week / month / year views from daily PnL rows. */
 
+import { displayDealPnl } from './dealPnl';
+
 export const CALENDAR_VIEWS = [
   { id: 'week', label: 'Week' },
   { id: 'month', label: 'Month' },
@@ -103,11 +105,11 @@ export function aggregateDealsToDays(deals) {
   const byDay = new Map();
   for (const d of deals ?? []) {
     const ts = Number(d.time ?? 0);
-    const pnl = Number(d.profit ?? 0);
-    if (!ts || Math.abs(pnl) < 1e-12) continue;
+    const shown = displayDealPnl(d);
+    if (!ts || Math.abs(shown) < 1e-12) continue;
     const key = new Date(ts).toISOString().slice(0, 10);
     const row = byDay.get(key) ?? { date: key, pnl: 0, trades: 0 };
-    row.pnl += pnl;
+    row.pnl += shown;
     row.trades += 1;
     byDay.set(key, row);
   }

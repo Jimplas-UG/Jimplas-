@@ -2,6 +2,7 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { formatFuturesPrice } from '../lib/futuresPrice';
+import { displayDealPnl, isCloseDeal } from '../lib/dealPnl';
 import { postBinanceClosePosition, postBinanceCloseAllPositions } from '../broker/binanceFuturesApi';
 import { formatPairLabel } from '../lib/futuresSymbol';
 
@@ -340,8 +341,8 @@ export default function OpenPositionsPanel({
           <Text style={[st.empty, { color: C.dim }]}>Recent fills appear here after trades execute.</Text>
         ) : (
           watchDeals.map((d, i) => {
-            const pl = Number(d.profit ?? 0);
-            const isCloseFill = pl !== 0;
+            const pl = displayDealPnl(d);
+            const isCloseFill = isCloseDeal(d);
             return (
               <View key={`${d.ticket ?? i}-${d.time ?? i}`} style={[st.logRow, { borderBottomColor: C.border }]}>
                 <Text style={[st.logTime, { color: C.dim }]}>{fmtDealTime(d.time)}</Text>

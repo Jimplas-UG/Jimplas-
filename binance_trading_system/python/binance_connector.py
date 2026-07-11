@@ -1014,6 +1014,69 @@ class BinanceConnector:
             return (fill - entry) * qty
         return (entry - fill) * qty
 
+    def _sanitize_fill_price(
+        self,
+        symbol: str,
+        exit_side: str,
+        fill: float,
+        entry: float | None = None,
+    ) -> float:
+        """Reject absurd avgPrice (e.g. 1.0 on a 0.002 alt) — use book or entry."""
+        sym = symbol.upper()
+        side_u = exit_side.upper()
+        tick = self.book_ticker(sym)
+        book = 0.0
+        if tick:
+            book = float(tick.get("ask") if side_u == "BUY" else tick.get("bid") or 0)
+        if fill <= 0:
+            if book > 0:
+                return book
+            return float(entry or 0)
+        if book > 0 and abs(fill - book) / max(book, 1e-12) > 0.5:
+            log.warning(
+                "sanitize_fill_price %s %s fill=%s book=%s entry=%s",
+                sym,
+                side_u,
+                fill,
+                book,
+                entry,
+            )
+            return book
+        if entry and entry > 0 and abs(fill - entry) / max(entry, 1e-12) > 50:
+            if book > 0:
+                return book
+            return float(entry)
+        return fill
+
+    def _finalize_close_pnl(
+        self,
+        symbol: str,
+        pos_side: str,
+        entry: float,
+        fill: float,
+        qty: float,
+        rpnl: float,
+        quote_qty: float = 0.0,
+    ) -> float:
+        """Use exchange realized PnL when sane; else recompute from entry/fill."""
+        from deal_pnl import is_phantom_pnl
+
+        notional = quote_qty if quote_qty > 0 else qty * fill
+        if not is_phantom_pnl(rpnl, qty, fill, notional):
+            return rpnl
+        est = self._estimate_close_pnl(pos_side, entry, fill, qty)
+        log.warning(
+            "phantom close pnl %s pos=%s entry=%s fill=%s qty=%s reported=%s est=%s",
+            symbol,
+            pos_side,
+            entry,
+            fill,
+            qty,
+            rpnl,
+            est,
+        )
+        return est
+
     def _deal_symbols_for_logs(self, symbol: str | None = None) -> list[str]:
         sym_u = symbol.upper() if symbol else ""
         if sym_u:
@@ -1071,12 +1134,16 @@ class BinanceConnector:
                         "type": side,
                         "volume": float(t.get("qty", 0)),
                         "price": float(t.get("price", 0)),
+                        "quote_qty": float(t.get("quoteQty", 0)),
                         "profit": float(t.get("realizedPnl", 0)),
                         "commission": float(t.get("commission", 0)),
+                        "position_side": str(t.get("positionSide") or ""),
                         "time": int(t.get("time", 0)),
                     }
                 )
-        deals.sort(key=lambda d: int(d.get("time") or 0), reverse=True)
+        from deal_pnl import normalize_user_trades
+
+        deals = normalize_user_trades(deals)
         return deals[:lim]
 
     def ensure_exchange_leverage(self, symbol: str, leverage: int | None = None) -> bool:
@@ -1423,14 +1490,19 @@ class BinanceConnector:
         except RuntimeError as e:
             return {"ok": False, "error": str(e)}
         order_id = resp.get("orderId")
-        fill = float(resp.get("avgPrice") or p.get("price_open") or 0)
         entry = float(p.get("price_open") or 0)
+        fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
+        if fill <= 0:
+            fill = float(p.get("price_open") or 0)
         rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
         if abs(rpnl) < 1e-12 and order_id:
             _time.sleep(0.12)
             rpnl, commission = self.realized_pnl_for_order(sym, int(order_id))
+        quote_qty = fill * qty
         if abs(rpnl) < 1e-12:
             rpnl = self._estimate_close_pnl(pos_side, entry, fill, qty)
+        else:
+            rpnl = self._finalize_close_pnl(sym, pos_side, entry, fill, qty, rpnl, quote_qty)
         self.invalidate_positions_cache()
         self.ensure_exchange_leverage(sym)
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
@@ -1559,16 +1631,21 @@ class BinanceConnector:
             except RuntimeError as e:
                 return {"ok": False, "error": str(e), "closed": closed}
             order_id = resp.get("orderId")
-            fill = float(resp.get("avgPrice") or p.get("price_open") or 0)
             entry = float(p.get("price_open") or 0)
+            fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
+            if fill <= 0:
+                fill = float(p.get("price_open") or 0)
             rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
             if abs(rpnl) < 1e-12 and order_id:
                 import time as _wait
 
                 _wait.sleep(0.12)
                 rpnl, commission = self.realized_pnl_for_order(sym, int(order_id))
+            quote_qty = fill * qty
             if abs(rpnl) < 1e-12:
                 rpnl = self._estimate_close_pnl(pos_side, entry, fill, qty)
+            else:
+                rpnl = self._finalize_close_pnl(sym, pos_side, entry, fill, qty, rpnl, quote_qty)
             closed.append(
                 {
                     "symbol": sym,

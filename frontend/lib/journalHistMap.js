@@ -1,5 +1,6 @@
 /** Maps journal row → HistRow tuple shape used in App.js */
 import { formatFuturesPrice } from './futuresPrice';
+import { displayDealPnl } from './dealPnl';
 export function mapJournalRowToHist(row) {
   const typ = row.type === 'P1' ? 'P1' : row.type === 'P2' ? 'P2' : row.type === 'P3' ? 'P3' : 'P2';
   const dir = row.dir === 'BUY' ? '▲' : '▼';
@@ -65,7 +66,7 @@ export function mapBinanceDealsToHistRows(deals) {
     const side = isBuy ? 'buy' : 'sell';
     const priceStr = d.price > 0 ? formatFuturesPrice(d.price) : '—';
     const volStr = `${d.volume ?? '—'} qty`;
-    const profit = Number(d.profit ?? 0);
+    const profit = displayDealPnl(d);
     let resultStr;
     let outcome;
     let kind;
@@ -94,7 +95,7 @@ export function binanceDealsDailyPnl(deals) {
   for (const d of deals) {
     if (!isBinanceDealRow(d)) continue;
     if ((d.time ?? 0) < todayStart) continue;
-    total += Number(d.profit ?? 0);
+    total += displayDealPnl(d);
   }
   return total;
 }
@@ -104,7 +105,7 @@ export function binanceDealsTotalPnl(deals) {
   let total = 0;
   for (const d of deals) {
     if (!isBinanceDealRow(d)) continue;
-    total += Number(d.profit ?? 0);
+    total += displayDealPnl(d);
   }
   return total;
 }
