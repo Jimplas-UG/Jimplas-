@@ -21,6 +21,7 @@ git --no-pager log -1 --oneline
 # Env: production URLs, execution armed, no dry-run
 ENVF=/etc/bilshenz.env
 for kv in \
+  'TRADE_HISTORY_SINCE=2026-07-11' \
   'FORWARD_DRY_RUN=0' \
   'SCANNER_EXEC=1' \
   'SCANNER_ENABLED=1' \
