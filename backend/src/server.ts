@@ -82,7 +82,7 @@ function resolveApkPath(): string | null {
 function serveInstallHtml(res: http.ServerResponse, apkPath: string | null, manifest: ReleaseManifest | null): void {
   const version = manifest?.versionName ?? '?';
   const build = manifest?.buildTime ?? '';
-  const apkHref = manifest?.apkUrl ?? '/download/bilshenz.apk';
+  const apkHref = '/download/bilshenz.apk';
   const ready = !!apkPath;
   const html = `<!DOCTYPE html>
 <html lang="en"><head>
@@ -118,13 +118,17 @@ function serveApkDownload(
   apkPath: string,
   downloadName?: string,
 ): void {
-  const stat = fs.statSync(apkPath);
+  let realPath = apkPath;
+  try {
+    realPath = fs.realpathSync(apkPath);
+  } catch {
+    /* use apkPath */
+  }
+  const stat = fs.statSync(realPath);
   const total = stat.size;
   const manifest = readReleaseManifest();
-  const fname =
-    downloadName ||
-    manifest?.apkFile ||
-    `bilshenz-v${manifest?.versionName ?? 'release'}.apk`;
+  // Short filename — long versioned names hang some mobile download managers at 100%.
+  const fname = 'bilshenz.apk';
   const baseHeaders: Record<string, string | number> = {
     'Content-Type': 'application/vnd.android.package-archive',
     'Content-Disposition': `attachment; filename="${fname}"`,
@@ -132,11 +136,13 @@ function serveApkDownload(
     'Cache-Control': 'no-store, no-cache, must-revalidate',
     Pragma: 'no-cache',
     Connection: 'close',
+    'X-Content-Type-Options': 'nosniff',
     'X-Bilshenz-Build': manifest?.buildTime ?? '',
     'X-Bilshenz-Commit': manifest?.gitShort ?? manifest?.gitCommit ?? '',
     'X-Bilshenz-Version': manifest?.versionName ?? '',
     'X-Bilshenz-VersionCode': manifest?.versionCode != null ? String(manifest.versionCode) : '',
     'X-Bilshenz-SHA256': manifest?.sha256 ?? '',
+    'X-Bilshenz-File': downloadName || manifest?.apkFile || path.basename(realPath),
   };
 
   const range = String(req.headers.range ?? '');
@@ -162,10 +168,13 @@ function serveApkDownload(
       res.end();
       return;
     }
-    const stream = fs.createReadStream(apkPath, { start, end });
+    const stream = fs.createReadStream(realPath, { start, end });
     stream.on('error', () => {
       if (!res.headersSent) res.writeHead(500);
       res.end();
+    });
+    stream.on('end', () => {
+      if (!res.writableEnded) res.end();
     });
     stream.pipe(res);
     return;
@@ -179,15 +188,19 @@ function serveApkDownload(
     res.end();
     return;
   }
-  const stream = fs.createReadStream(apkPath);
-  stream.on('error', () => {
-    if (!res.headersSent) res.writeHead(500);
+  // Buffered send — avoids mobile browsers stuck at 100% on slow stream close.
+  try {
+    const buf = fs.readFileSync(realPath);
+    if (buf.length !== total) {
+      res.writeHead(500, { 'Content-Type': 'text/plain', Connection: 'close' });
+      res.end('apk_size_mismatch');
+      return;
+    }
+    res.end(buf);
+  } catch {
+    if (!res.headersSent) res.writeHead(500, { Connection: 'close' });
     res.end();
-  });
-  res.on('close', () => {
-    if (!stream.destroyed) stream.destroy();
-  });
-  stream.pipe(res);
+  }
 }
 
 const PORT = Number(process.env.DESK_API_PORT) || 8791;
@@ -389,7 +402,11 @@ const server = http.createServer(async (req, res) => {
       ];
       for (const c of candidates) {
         if (fs.existsSync(c)) {
-          apkPath = c;
+          try {
+            apkPath = fs.realpathSync(c);
+          } catch {
+            apkPath = c;
+          }
           break;
         }
       }

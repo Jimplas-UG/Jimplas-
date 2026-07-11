@@ -1142,8 +1142,10 @@ class BinanceConnector:
                     }
                 )
         from deal_pnl import normalize_user_trades
+        from trade_history import include_trade_time
 
         deals = normalize_user_trades(deals)
+        deals = [d for d in deals if include_trade_time(d.get("time"))]
         return deals[:lim]
 
     def ensure_exchange_leverage(self, symbol: str, leverage: int | None = None) -> bool:
@@ -1522,6 +1524,9 @@ class BinanceConnector:
 
     def trade_pnl_calendar(self, days: int = 400) -> dict[str, Any]:
         """Aggregate realized PnL by UTC day from Binance income + userTrades."""
+        from trade_history import include_trade_time, trade_history_since_date
+
+        since_date = trade_history_since_date()
         if self.cfg.paper:
             from paper_simulator import paper_store
 
@@ -1529,7 +1534,7 @@ class BinanceConnector:
             by_day: dict[str, dict[str, float]] = {}
             for d in deals:
                 ts = int(d.get("time") or 0)
-                if ts <= 0:
+                if ts <= 0 or not include_trade_time(ts):
                     continue
                 key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
                 row = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
@@ -1539,7 +1544,10 @@ class BinanceConnector:
                     row["trades"] += 1
             days_out = [{"date": k, **v} for k, v in sorted(by_day.items())]
             total = sum(x["pnl"] for x in days_out)
-            return {"ok": True, "total_pnl": round(total, 2), "days": days_out[-days:]}
+            out = {"ok": True, "total_pnl": round(total, 2), "days": days_out[-days:]}
+            if since_date:
+                out["since"] = since_date
+            return out
 
         if not self.cfg.api_key:
             return {"ok": False, "total_pnl": 0.0, "days": []}
@@ -1554,7 +1562,7 @@ class BinanceConnector:
             )
             for row in income or []:
                 ts = int(row.get("time") or 0)
-                if ts <= 0:
+                if ts <= 0 or not include_trade_time(ts):
                     continue
                 key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
                 bucket = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
@@ -1579,9 +1587,14 @@ class BinanceConnector:
             for k, v in sorted(by_day.items())
         ]
         cutoff = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86400))
+        if since_date and since_date > cutoff:
+            cutoff = since_date
         days_out = [d for d in days_out if d["date"] >= cutoff]
         total = round(sum(d["pnl"] for d in days_out), 2)
-        return {"ok": True, "total_pnl": total, "days": days_out}
+        out = {"ok": True, "total_pnl": total, "days": days_out}
+        if since_date:
+            out["since"] = since_date
+        return out
 
     def close_position(self, symbol: str | None = None, volume: float | None = None) -> dict[str, Any]:
         import time as _time
