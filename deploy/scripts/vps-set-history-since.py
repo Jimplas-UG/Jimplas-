@@ -5,7 +5,7 @@ import sys
 
 HOST = os.environ.get("VPS_HOST", "157.245.33.42")
 PASSWORD = os.environ.get("VPS_PASSWORD", "")
-SINCE = os.environ.get("TRADE_HISTORY_SINCE", "2026-07-11")
+SINCE = os.environ.get("TRADE_HISTORY_SINCE", "2026-07-14")
 
 REMOTE = f"""#!/usr/bin/env python3
 from pathlib import Path

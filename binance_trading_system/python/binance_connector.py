@@ -1523,10 +1523,15 @@ class BinanceConnector:
         return {"ok": True, "closed": [leg_row], **leg_row, "latency_ms": latency_ms, "broker": "binance"}
 
     def trade_pnl_calendar(self, days: int = 400) -> dict[str, Any]:
-        """Aggregate realized PnL by UTC day from Binance income + userTrades."""
+        """Aggregate realized PnL by UTC day — sanitized fills only (never raw phantom income)."""
+        from deal_pnl import is_phantom_pnl
         from trade_history import include_trade_time, trade_history_since_date
 
         since_date = trade_history_since_date()
+        # Hard cap: a single income line cannot exceed this for calendar display.
+        # Partition-sized desks never realize 5-figure P&L on one fill legitimately.
+        max_leg = float(os.environ.get("TRADE_PNL_MAX_LEG", "5000"))
+
         if self.cfg.paper:
             from paper_simulator import paper_store
 
@@ -1536,13 +1541,14 @@ class BinanceConnector:
                 ts = int(d.get("time") or 0)
                 if ts <= 0 or not include_trade_time(ts):
                     continue
+                pnl = float(d.get("profit") or 0)
+                if abs(pnl) < 1e-12 or abs(pnl) > max_leg:
+                    continue
                 key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
                 row = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
-                pnl = float(d.get("profit") or 0)
-                if abs(pnl) > 1e-12:
-                    row["pnl"] += pnl
-                    row["trades"] += 1
-            days_out = [{"date": k, **v} for k, v in sorted(by_day.items())]
+                row["pnl"] += pnl
+                row["trades"] += 1
+            days_out = [{"date": k, "pnl": round(v["pnl"], 2), "trades": int(v["trades"])} for k, v in sorted(by_day.items())]
             total = sum(x["pnl"] for x in days_out)
             out = {"ok": True, "total_pnl": round(total, 2), "days": days_out[-days:]}
             if since_date:
@@ -1553,6 +1559,29 @@ class BinanceConnector:
             return {"ok": False, "total_pnl": 0.0, "days": []}
 
         by_day: dict[str, dict[str, float]] = {}
+
+        # Primary: sanitized userTrades (deal_pnl already applied in recent_deals).
+        try:
+            for d in self.recent_deals(min(500, max(100, int(days) * 3))):
+                ts = int(d.get("time") or 0)
+                if ts <= 0 or not include_trade_time(ts):
+                    continue
+                pnl = float(d.get("profit") or 0)
+                if abs(pnl) < 1e-12:
+                    continue
+                qty = float(d.get("volume") or 0)
+                px = float(d.get("price") or 0)
+                quote = float(d.get("quote_qty") or 0)
+                if is_phantom_pnl(pnl, qty, px, quote) or abs(pnl) > max_leg:
+                    continue
+                key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
+                bucket = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
+                bucket["pnl"] += pnl
+                bucket["trades"] += 1
+        except Exception as e:
+            log.warning("trade_pnl_calendar deals: %s", e)
+
+        # Supplement from income for days with no deal rows — drop phantoms / absurd legs.
         try:
             income = self._request(
                 "GET",
@@ -1564,27 +1593,22 @@ class BinanceConnector:
                 ts = int(row.get("time") or 0)
                 if ts <= 0 or not include_trade_time(ts):
                     continue
+                pnl = float(row.get("income") or 0)
+                if abs(pnl) < 1e-12 or abs(pnl) > max_leg:
+                    continue
                 key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
+                if key in by_day:
+                    continue
                 bucket = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
-                bucket["pnl"] += float(row.get("income") or 0)
+                bucket["pnl"] += pnl
                 bucket["trades"] += 1
         except Exception as e:
             log.warning("trade_pnl_calendar income: %s", e)
 
-        if not by_day:
-            for d in self.recent_deals(200):
-                ts = int(d.get("time") or 0)
-                pnl = float(d.get("profit") or 0)
-                if ts <= 0 or abs(pnl) < 1e-12:
-                    continue
-                key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
-                bucket = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
-                bucket["pnl"] += pnl
-                bucket["trades"] += 1
-
         days_out = [
             {"date": k, "pnl": round(v["pnl"], 2), "trades": int(v["trades"])}
             for k, v in sorted(by_day.items())
+            if abs(v["pnl"]) <= max_leg * 20  # day aggregate still within desk reality
         ]
         cutoff = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86400))
         if since_date and since_date > cutoff:

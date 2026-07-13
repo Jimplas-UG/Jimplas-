@@ -16,6 +16,7 @@ TESTS = [
     "test_close_orders.py",
     "test_leverage_policy.py",
     "test_deal_pnl.py",
+    "test_calendar_pnl.py",
     "test_trade_history.py",
 ]
 

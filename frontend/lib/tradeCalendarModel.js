@@ -24,13 +24,12 @@ export function indexDaysByDate(days) {
 }
 
 export function monthGrid(year, monthIndex0, dayMap) {
-  const first = new Date(Date.UTC(year, monthIndex0, 1));
   const last = new Date(Date.UTC(year, monthIndex0 + 1, 0));
   const cells = [];
+  // Full week Sun–Sat so weekend phantom / fills are visible and match Period Total.
   for (let d = 1; d <= last.getUTCDate(); d++) {
     const dt = new Date(Date.UTC(year, monthIndex0, d));
     const dow = dt.getUTCDay();
-    if (dow === 0 || dow === 6) continue;
     const key = `${year}-${String(monthIndex0 + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     const row = dayMap.get(key);
     cells.push({
@@ -51,14 +50,14 @@ export function weekCells(anchorDate, dayMap) {
   const mondayOffset = dow === 0 ? -6 : 1 - dow;
   const monday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + mondayOffset));
   const cells = [];
-  for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 7; i++) {
     const dt = new Date(monday.getTime() + i * 86400000);
     const key = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
     const row = dayMap.get(key);
     cells.push({
       date: key,
       day: dt.getUTCDate(),
-      label: ['MON', 'TUE', 'WED', 'THU', 'FRI'][i],
+      label: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'][i],
       pnl: Number(row?.pnl ?? 0),
       trades: Number(row?.trades ?? 0),
       hasData: !!row,

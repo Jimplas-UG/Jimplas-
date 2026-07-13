@@ -12,7 +12,20 @@ import {
   yearMonths,
 } from '../lib/tradeCalendarModel';
 
-const WEEKDAYS = ['MON', 'TUE', 'WED', 'THU', 'FRI'];
+const WEEKDAYS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+
+/** Drop desks-impossible day aggregates (phantom ~qty USD losses). */
+export function sanitizeCalendarDays(days, maxDayAbs = 20000) {
+  return (days ?? [])
+    .map((row) => {
+      const pnl = Number(row?.pnl ?? 0);
+      if (!Number.isFinite(pnl) || Math.abs(pnl) > maxDayAbs) {
+        return null;
+      }
+      return { ...row, pnl, trades: Number(row?.trades ?? 0) };
+    })
+    .filter(Boolean);
+}
 
 function PnlCell({ cell, C, compact }) {
   const pnl = Number(cell.pnl ?? 0);
@@ -72,8 +85,10 @@ export default function TradeResultsCalendar({ binanceBaseUrl, brokerConnected, 
         const j = await fetchBinanceTradeCalendar(binanceBaseUrl, 400);
         if (cancelled) return;
         if (j?.days?.length) {
-          setServerDays(j.days);
-          setTotalPnl(Number(j.total_pnl ?? 0));
+          const clean = sanitizeCalendarDays(j.days);
+          setServerDays(clean);
+          const sum = clean.reduce((s, d) => s + Number(d.pnl ?? 0), 0);
+          setTotalPnl(sum);
         } else {
           applyLocalDays(brokerDeals);
         }
@@ -245,8 +260,8 @@ const st = StyleSheet.create({
   grid: { flexDirection: 'row', flexWrap: 'wrap', padding: 8, gap: 6 },
   gridYear: { gap: 8 },
   cell: {
-    width: '18%',
-    minWidth: 58,
+    width: '12.5%',
+    minWidth: 42,
     flexGrow: 1,
     aspectRatio: 0.95,
     borderRadius: 12,
