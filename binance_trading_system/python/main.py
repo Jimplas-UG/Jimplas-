@@ -47,9 +47,9 @@ _PUBLIC_QUOTE_PREFIXES = ("/api/tick/", "/api/bars/", "/api/symbol/", "/api/scan
 
 def _is_public_quote(path: str) -> bool:
     return any(path.startswith(p) for p in _PUBLIC_QUOTE_PREFIXES)
-_SENSITIVE_PATHS = frozenset({"/api/login", "/api/order", "/api/attach", "/api/logout", "/api/margin", "/api/scanner/close"})
+_SENSITIVE_PATHS = frozenset({"/api/login", "/api/order", "/api/attach", "/api/logout", "/api/margin"})
 # Close paths are never rate-limited — emergency manual flatten must always work.
-_TRADE_PATHS = frozenset({"/api/close", "/api/close-all"})
+_TRADE_PATHS = frozenset({"/api/close", "/api/close-all", "/api/scanner/close"})
 _rate_buckets: dict[str, list[float]] = defaultdict(list)
 _DEFAULT_SYMBOL = (os.environ.get("BINANCE_SYMBOL") or "BTCUSDT").strip().upper()
 

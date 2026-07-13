@@ -264,7 +264,7 @@ class MomentumScanner:
         return ((coin.price - entry) / entry) * 100.0
 
     def _long_entry_allowed(self, coin: CoinStrategy, leg: int) -> bool:
-        """Recovery longs only after a confirmed short and real adverse move."""
+        """Recovery longs only after a confirmed short and adverse peak at exact threshold."""
         if not coin.short:
             return False
         if leg == 2 and coin.long1 is None:
@@ -272,16 +272,63 @@ class MomentumScanner:
         if not self._exchange_has_short(coin.symbol):
             log.warning("scanner LONG%d blocked %s: no exchange short", leg, coin.symbol)
             return False
-        now_ms = int(time.time() * 1000)
-        if coin.short_opened_ms and LONG_ENTRY_DELAY_MS > 0:
-            if now_ms - coin.short_opened_ms < LONG_ENTRY_DELAY_MS:
-                return False
-        adverse = self._short_adverse_pct(coin)
+        if not self._short_settle_elapsed(coin):
+            return False
         need = LONG1_ADVERSE_PCT if leg == 1 else LONG2_ADVERSE_PCT
+        # Fire once adverse peak touches threshold — do not require price to stay elevated.
         if coin.short_adverse_peak_pct < need:
             return False
-        if adverse < need:
+        return True
+
+    def _short_settle_elapsed(self, coin: CoinStrategy) -> bool:
+        if not coin.short_opened_ms or LONG_ENTRY_DELAY_MS <= 0:
+            return True
+        return int(time.time() * 1000) - coin.short_opened_ms >= LONG_ENTRY_DELAY_MS
+
+    def _mark_short_opened(self, coin: CoinStrategy, symbol: str) -> None:
+        """Start long-entry delay only after exchange confirms the short leg."""
+        sym = symbol.upper()
+        if getattr(self._connector.cfg, "paper", False):
+            coin.short_opened_ms = int(time.time() * 1000)
+            return
+        if self._exchange_has_short(sym):
+            coin.short_opened_ms = int(time.time() * 1000)
+            return
+        try:
+            self._connector.invalidate_positions_cache()
+        except Exception:
+            pass
+        if self._exchange_has_short(sym):
+            coin.short_opened_ms = int(time.time() * 1000)
+
+    def _adopt_exchange_short(
+        self,
+        coin: CoinStrategy,
+        symbol: str,
+        fallback_qty: float,
+        fallback_entry: float,
+        tp: float,
+    ) -> bool:
+        """Recover scanner short state when Binance filled but ACK was lost / duplicate blocked."""
+        sym = symbol.upper()
+        leg = self._exchange_short_leg(sym)
+        if not leg:
             return False
+        fill = float(leg.get("price_open") or fallback_entry or coin.price or 0)
+        qty = float(leg.get("volume") or fallback_qty or 0)
+        if fill <= 0 or qty <= 1e-12:
+            return False
+        coin.short = LegPosition("SELL", fill, qty, SHORT_LEVERAGE, MAGIC_SHORT, tp)
+        coin.status = STATUS_SHORT
+        coin.short_adverse_peak_pct = 0.0
+        coin.long1_was_closed = False
+        coin.long1_peak_price = None
+        coin.long2_peak_price = None
+        coin.recovery_peak_price = None
+        self._mark_short_opened(coin, sym)
+        self._last_exec_error = None
+        self._emit_signal(coin, "entered")
+        log.info("scanner adopted exchange SHORT %s qty=%s @ %s", sym, qty, fill)
         return True
 
     def set_exec_enabled(self, enabled: bool) -> None:
@@ -863,6 +910,8 @@ class MomentumScanner:
             if coin.highest_price and coin.highest_price > 0:
                 coin.retrace_pct = ((coin.highest_price - price) / coin.highest_price) * 100.0
             still_qualified = (coin.qualifying_pct or 0.0) >= GAIN_THRESHOLD_PCT
+            if still_qualified and qualify_pct < GAIN_THRESHOLD_PCT - RETRACE_ENTRY_PCT:
+                still_qualified = False
             if coin.status == STATUS_PENDING and (
                 coin.retrace_pct < RETRACE_ENTRY_PCT or not still_qualified
             ):
@@ -1016,7 +1065,7 @@ class MomentumScanner:
             if coin.price <= 0 and bars:
                 coin.price = float(bars[-1].get("c") or 0)
                 coin.last_update_ms = now_ms
-            coin.pct_3m, coin.pct_5m, coin.pct_15m = self._rolling_pcts(coin, now_ms)
+            coin.pct_1m, coin.pct_3m, coin.pct_5m, coin.pct_15m = self._rolling_pcts(coin, now_ms)
             coin.best_pct, coin.best_tf = self._best_move(coin)
             seeded += 1
         if seeded:
@@ -1152,15 +1201,21 @@ class MomentumScanner:
                 fill = float(r.fill_price or entry)
                 coin.short = LegPosition("SELL", fill, qty, SHORT_LEVERAGE, MAGIC_SHORT, tp)
                 coin.status = STATUS_SHORT
-                coin.short_opened_ms = int(time.time() * 1000)
                 coin.short_adverse_peak_pct = 0.0
                 coin.long1_was_closed = False
                 coin.long1_peak_price = None
                 coin.long2_peak_price = None
                 coin.recovery_peak_price = None
+                self._mark_short_opened(coin, sym)
                 self._last_exec_error = None
                 self._emit_signal(coin, "entered")
                 log.info("scanner SHORT %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
+            elif "duplicate" in str(r.error or "").lower():
+                if self._adopt_exchange_short(coin, sym, qty, entry, tp):
+                    pass
+                else:
+                    self._last_exec_error = f"{sym}: duplicate_order_no_position"
+                    coin.status = STATUS_PENDING
             else:
                 err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym}: {err}"
@@ -1254,6 +1309,18 @@ class MomentumScanner:
         long2_pnl = self._leg_pnl(coin.long2, price) if coin.long2 else 0.0
         coin.unrealized_pnl = short_pnl + long1_pnl + long2_pnl
 
+        if SMART_EXIT_NET_PCT > 0 and self._partition_usd > 0:
+            smart_target = self._partition_usd * SMART_EXIT_NET_PCT / 100.0
+            if coin.unrealized_pnl >= smart_target:
+                log.info(
+                    "scanner %s SMART_EXIT pnl=%.4f target=%.4f",
+                    sym,
+                    coin.unrealized_pnl,
+                    smart_target,
+                )
+                self._close_all(coin, "SMART_EXIT")
+                return
+
         adverse_pct = self._short_adverse_pct(coin)
         if adverse_pct > coin.short_adverse_peak_pct:
             coin.short_adverse_peak_pct = adverse_pct
@@ -1317,18 +1384,37 @@ class MomentumScanner:
         leg = coin.long1 if leg_name == "long1" else coin.long2 if leg_name == "long2" else None
         if not leg:
             return
-        self._connector.close_leg(sym, leg.magic, leg.qty)
-        if leg_name == "long1":
-            coin.long1 = None
-            coin.long1_peak_price = None
-            coin.long1_was_closed = True
-            coin.status = STATUS_SHORT if coin.short else STATUS_CLOSED
-        elif leg_name == "long2":
-            coin.long2 = None
-            coin.long2_peak_price = None
-            coin.status = STATUS_LONG1 if coin.long1 else (STATUS_SHORT if coin.short else STATUS_CLOSED)
-        if reason:
-            log.info("scanner closed leg %s %s reason=%s", sym, leg_name, reason)
+        pair_gate.begin_close(sym)
+        try:
+            if leg_name in ("long1", "long2") and hasattr(self._connector, "close_by_position_side"):
+                r = self._connector.close_by_position_side(sym, "LONG", leg.qty)
+            else:
+                r = self._connector.close_leg(sym, leg.magic, leg.qty)
+            if not r.get("ok"):
+                log.warning("scanner close leg failed %s %s: %s", sym, leg_name, r.get("error") or r)
+                return
+            if leg_name == "long1":
+                coin.long1 = None
+                coin.long1_peak_price = None
+                coin.long1_was_closed = True
+                coin.status = STATUS_SHORT if coin.short else STATUS_CLOSED
+            elif leg_name == "long2":
+                coin.long2 = None
+                coin.long2_peak_price = None
+                coin.status = STATUS_LONG1 if coin.long1 else (STATUS_SHORT if coin.short else STATUS_CLOSED)
+            self._connector.invalidate_positions_cache()
+            if reason:
+                log.info("scanner closed leg %s %s reason=%s", sym, leg_name, reason)
+        finally:
+            pair_gate.end_close(sym)
+
+    def _close_succeeded(self, close_result: dict[str, Any]) -> bool:
+        if close_result.get("ok"):
+            return True
+        if close_result.get("note") == "already_flat":
+            return True
+        closed = close_result.get("closed")
+        return isinstance(closed, list) and len(closed) > 0
 
     def _close_all(self, coin: CoinStrategy, reason: str) -> dict[str, Any]:
         sym = coin.symbol
@@ -1338,19 +1424,26 @@ class MomentumScanner:
         try:
             if getattr(self._connector.cfg, "paper", False):
                 closed_legs: list[dict[str, Any]] = []
+                all_ok = True
                 if coin.short:
                     r = self._connector.close_leg(sym, coin.short.magic, coin.short.qty)
                     if r.get("ok"):
                         closed_legs.append({**r, "side": "SELL", "symbol": sym})
+                    else:
+                        all_ok = False
                 if coin.long1:
                     r = self._connector.close_leg(sym, coin.long1.magic, coin.long1.qty)
                     if r.get("ok"):
                         closed_legs.append({**r, "side": "BUY", "symbol": sym})
+                    else:
+                        all_ok = False
                 if coin.long2:
                     r = self._connector.close_leg(sym, coin.long2.magic, coin.long2.qty)
                     if r.get("ok"):
                         closed_legs.append({**r, "side": "BUY", "symbol": sym})
-                close_result = {"ok": True, "closed": closed_legs, "broker": "binance"}
+                    else:
+                        all_ok = False
+                close_result = {"ok": all_ok, "closed": closed_legs, "broker": "binance"}
             else:
                 try:
                     live = self._connector.positions(sym, force=True)
@@ -1360,21 +1453,29 @@ class MomentumScanner:
                     close_result = self._connector.close_position(sym, None)
                 else:
                     close_result = {"ok": True, "closed": [], "broker": "binance", "note": "already_flat"}
-            self._reset_coin_state(coin)
-            self._connector.invalidate_positions_cache()
-            latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-            close_result["latency_ms"] = float(close_result.get("latency_ms") or latency_ms)
-            pair_gate.record_order(
-                symbol=sym,
-                side="CLOSE",
-                order_id=(close_result.get("closed") or [{}])[0].get("order") if close_result.get("closed") else None,
-                latency_ms=close_result["latency_ms"],
-                source="scanner",
-            )
-            log.info("scanner closed %s reason=%s latency_ms=%s", sym, reason, close_result["latency_ms"])
-            self._bump_trades_closed()
-            if self._one_at_a_time:
-                self._maybe_execute_best_pending()
+            if self._close_succeeded(close_result):
+                self._reset_coin_state(coin)
+                self._connector.invalidate_positions_cache()
+                latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+                close_result["latency_ms"] = float(close_result.get("latency_ms") or latency_ms)
+                pair_gate.record_order(
+                    symbol=sym,
+                    side="CLOSE",
+                    order_id=(close_result.get("closed") or [{}])[0].get("order") if close_result.get("closed") else None,
+                    latency_ms=close_result["latency_ms"],
+                    source="scanner",
+                )
+                log.info("scanner closed %s reason=%s latency_ms=%s", sym, reason, close_result["latency_ms"])
+                self._bump_trades_closed()
+                if self._one_at_a_time:
+                    self._maybe_execute_best_pending()
+            else:
+                log.warning(
+                    "scanner close failed %s reason=%s err=%s — scanner state retained",
+                    sym,
+                    reason,
+                    close_result.get("error") or close_result,
+                )
             return close_result
         finally:
             pair_gate.end_close(sym)
