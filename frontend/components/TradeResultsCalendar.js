@@ -46,32 +46,46 @@ export default function TradeResultsCalendar({ binanceBaseUrl, brokerConnected, 
   const [totalPnl, setTotalPnl] = useState(0);
   const [loading, setLoading] = useState(false);
 
-  const loadCalendar = useCallback(async () => {
-    if (!brokerConnected || !binanceBaseUrl?.trim()) {
-      const local = aggregateDealsToDays(brokerDeals);
-      setServerDays(local);
-      setTotalPnl(local.reduce((s, d) => s + d.pnl, 0));
-      return;
-    }
-    setLoading(true);
-    try {
-      const j = await fetchBinanceTradeCalendar(binanceBaseUrl, 400);
-      if (j?.days?.length) {
-        setServerDays(j.days);
-        setTotalPnl(Number(j.total_pnl ?? 0));
-      } else {
-        const local = aggregateDealsToDays(brokerDeals);
-        setServerDays(local);
-        setTotalPnl(local.reduce((s, d) => s + d.pnl, 0));
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [binanceBaseUrl, brokerConnected, brokerDeals]);
+  const dealsSignature = useMemo(() => {
+    if (!brokerDeals?.length) return '0';
+    const last = brokerDeals[0];
+    const stamp = last?.time ?? last?.timestamp ?? last?.id ?? '';
+    return `${brokerDeals.length}:${stamp}`;
+  }, [brokerDeals]);
+
+  const applyLocalDays = useCallback((deals) => {
+    const local = aggregateDealsToDays(deals);
+    setServerDays(local);
+    setTotalPnl(local.reduce((s, d) => s + d.pnl, 0));
+  }, []);
 
   useEffect(() => {
-    void loadCalendar();
-  }, [loadCalendar]);
+    if (!brokerConnected || !binanceBaseUrl?.trim()) {
+      applyLocalDays(brokerDeals);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    void (async () => {
+      try {
+        const j = await fetchBinanceTradeCalendar(binanceBaseUrl, 400);
+        if (cancelled) return;
+        if (j?.days?.length) {
+          setServerDays(j.days);
+          setTotalPnl(Number(j.total_pnl ?? 0));
+        } else {
+          applyLocalDays(brokerDeals);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [binanceBaseUrl, brokerConnected, dealsSignature, applyLocalDays]);
 
   const dayMap = useMemo(() => indexDaysByDate(serverDays), [serverDays]);
   const y = cursor.getUTCFullYear();

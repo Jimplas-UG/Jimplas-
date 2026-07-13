@@ -561,15 +561,18 @@ def api_scanner_close(body: ScannerCloseBody):
 
 
 @app.post("/api/scanner/exec")
-def api_scanner_exec(_body: ScannerExecBody | None = None):
-    """Execution arms automatically when Binance is linked. Halt via SCANNER_EXEC=0 or FORWARD_DRY_RUN=1."""
+def api_scanner_exec(body: ScannerExecBody | None = None):
+    """Arm or halt scanner entries. Emergency stop from the app sets enabled=false."""
+    if body is not None:
+        momentum_scanner.set_exec_enabled(body.enabled)
     st = momentum_scanner.status()
     return {
         "ok": True,
         "exec_enabled": st.get("exec_enabled"),
         "can_execute": st.get("can_execute"),
         "exec_block": st.get("exec_block"),
-        "env_controlled": True,
+        "user_exec_halted": st.get("user_exec_halted"),
+        "env_controlled": st.get("exec_env_controlled"),
     }
 
 

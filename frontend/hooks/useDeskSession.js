@@ -3,7 +3,7 @@ import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
 import { useBrokerLiveFeed } from './useBrokerLiveFeed';
 import { useRiskDesk } from './useRiskDesk';
 import { postBinanceMarginMode } from '../broker/binanceFuturesApi';
-import { syncScannerBridgeState } from '../lib/scannerRiskSync';
+import { syncScannerBridgeState, syncScannerExecHalt } from '../lib/scannerRiskSync';
 import { defaultSymbolForBroker } from '../lib/brokerMode';
 import { DEFAULT_CHART_SYMBOL, sanitizeFuturesSymbol } from '../lib/futuresSymbol';
 import { resolveAccountEquity } from '../utils/riskSizing';
@@ -44,26 +44,46 @@ export function useDeskSession({ enabled = true, loadBars = true, pollTicks = tr
     simEquity: SIM_DESK_EQUITY,
   });
 
+  const riskConfigRef = useRef(riskDesk.config);
+  riskConfigRef.current = riskDesk.config;
+
+  const partitionUsd = riskDesk.config.partitionUsd;
+  const shortPartitionPct = riskDesk.config.shortPartitionPct;
+  const long1PartitionPct = riskDesk.config.long1PartitionPct;
+  const long2PartitionPct = riskDesk.config.long2PartitionPct;
+  const emergencyStop = riskDesk.config.emergencyStop;
+
   const positions = useBrokerSession ? brokerFeed.positions : [];
 
   const syncScannerRisk = useCallback(async () => {
     if (!baseUrl?.trim() || !riskDesk.hydrated || !connected) return;
+    const cfg = riskConfigRef.current;
     const syncKey = [
       baseUrl,
-      riskDesk.config.partitionUsd,
-      riskDesk.config.shortPartitionPct,
-      riskDesk.config.long1PartitionPct,
-      riskDesk.config.long2PartitionPct,
+      cfg.partitionUsd,
+      cfg.shortPartitionPct,
+      cfg.long1PartitionPct,
+      cfg.long2PartitionPct,
+      cfg.emergencyStop ? 'halt' : 'run',
     ].join('|');
     if (syncKey === lastSyncKeyRef.current) return;
     lastSyncKeyRef.current = syncKey;
 
-    const r = await syncScannerBridgeState(baseUrl, { config: riskDesk.config }, { retries: 3, delayMs: 700 });
+    const r = await syncScannerBridgeState(baseUrl, { config: cfg }, { retries: 3, delayMs: 700 });
     if (!r.ok) {
       lastSyncKeyRef.current = '';
       console.warn('[desk] scanner risk sync failed', r.risk?.error || r);
     }
-  }, [baseUrl, connected, riskDesk.config, riskDesk.hydrated]);
+  }, [
+    baseUrl,
+    connected,
+    riskDesk.hydrated,
+    partitionUsd,
+    shortPartitionPct,
+    long1PartitionPct,
+    long2PartitionPct,
+    emergencyStop,
+  ]);
 
   const handleMarginModeChange = useCallback(
     async (mode) => {
@@ -102,16 +122,27 @@ export function useDeskSession({ enabled = true, loadBars = true, pollTicks = tr
       void syncScannerRisk();
     }, SCANNER_RISK_RESYNC_MS);
     return () => clearInterval(id);
-  }, [
-    baseUrl,
-    connected,
-    riskDesk.hydrated,
-    syncScannerRisk,
-    riskDesk.config.partitionUsd,
-    riskDesk.config.shortPartitionPct,
-    riskDesk.config.long1PartitionPct,
-    riskDesk.config.long2PartitionPct,
-  ]);
+  }, [baseUrl, connected, riskDesk.hydrated, syncScannerRisk]);
+
+  const triggerEmergencyStop = useCallback(async () => {
+    riskDesk.triggerEmergencyStop();
+    if (!baseUrl?.trim() || !connected) return;
+    lastSyncKeyRef.current = '';
+    const r = await syncScannerExecHalt(baseUrl, false);
+    if (!r.ok) {
+      console.warn('[desk] emergency stop server sync failed', r.error || r);
+    }
+  }, [baseUrl, connected, riskDesk.triggerEmergencyStop]);
+
+  const resumeTrading = useCallback(async () => {
+    riskDesk.resumeTrading();
+    if (!baseUrl?.trim() || !connected) return;
+    lastSyncKeyRef.current = '';
+    const r = await syncScannerExecHalt(baseUrl, true);
+    if (!r.ok) {
+      console.warn('[desk] resume trading server sync failed', r.error || r);
+    }
+  }, [baseUrl, connected, riskDesk.resumeTrading]);
 
   return {
     baseUrl,
@@ -123,6 +154,8 @@ export function useDeskSession({ enabled = true, loadBars = true, pollTicks = tr
     lastBrokerMsg,
     setLastBrokerMsg,
     handleMarginModeChange,
+    triggerEmergencyStop,
+    resumeTrading,
   };
 }
 

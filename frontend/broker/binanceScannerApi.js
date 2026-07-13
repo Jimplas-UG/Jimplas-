@@ -69,7 +69,37 @@ export async function postScannerClose(baseUrl, symbol) {
   }
 }
 
-/** Read scanner execution status (env-controlled; client cannot disable). */
+/** Read or set scanner execution halt (emergency stop). */
+export async function postScannerExecControl(baseUrl, enabled = true) {
+  const b = String(baseUrl || '').replace(/\/$/, '');
+  if (!b) return { ok: false, error: 'no_base_url' };
+  try {
+    const res = await binanceFetch(
+      b,
+      '/api/scanner/exec',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !!enabled }),
+      },
+      8000,
+    );
+    const data = await res.json().catch(() => ({}));
+    return {
+      ok: res.ok && data.ok !== false,
+      exec_enabled: data.exec_enabled,
+      can_execute: data.can_execute,
+      exec_block: data.exec_block,
+      user_exec_halted: data.user_exec_halted,
+      env_controlled: data.env_controlled,
+      status: res.status,
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Read scanner execution status. */
 export async function fetchScannerExecStatus(baseUrl) {
   const b = String(baseUrl || '').replace(/\/$/, '');
   if (!b) return { ok: false, error: 'no_base_url' };
@@ -86,6 +116,7 @@ export async function fetchScannerExecStatus(baseUrl) {
       exec_enabled: data.exec_enabled,
       can_execute: data.can_execute,
       exec_block: data.exec_block,
+      user_exec_halted: data.user_exec_halted,
       env_controlled: data.env_controlled,
       status: res.status,
     };
@@ -94,7 +125,7 @@ export async function fetchScannerExecStatus(baseUrl) {
   }
 }
 
-/** @deprecated Use fetchScannerExecStatus — execution is env + connect driven. */
+/** @deprecated Use postScannerExecControl / fetchScannerExecStatus. */
 export async function postScannerExecEnable(baseUrl) {
   return fetchScannerExecStatus(baseUrl);
 }

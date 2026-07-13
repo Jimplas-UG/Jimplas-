@@ -39,6 +39,27 @@ def test_connected_keys_arm_exec() -> None:
     assert st.get("exec_block") in (None, "")
 
 
+def test_emergency_stop_blocks() -> None:
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True))
+    c.configure("k", "s", True)
+    c._connected = True
+    s = _scanner(c)
+    os.environ.pop("FORWARD_DRY_RUN", None)
+    os.environ["SCANNER_EXEC"] = "1"
+    ok, reason = s._order_session_ok()
+    assert ok, reason
+    s.set_exec_enabled(False)
+    ok, reason = s._order_session_ok()
+    assert not ok
+    assert reason == "EMERGENCY_STOP"
+    st = s.status()
+    assert st.get("user_exec_halted") is True
+    assert st.get("can_execute") is False
+    s.set_exec_enabled(True)
+    ok, reason = s._order_session_ok()
+    assert ok, reason
+
+
 def test_forward_dry_run_blocks() -> None:
     c = BinanceConnector(BinanceConfig(paper=False, testnet=True))
     c.configure("k", "s", True)
@@ -55,5 +76,6 @@ def test_forward_dry_run_blocks() -> None:
 if __name__ == "__main__":
     test_disconnected_blocks_exec()
     test_connected_keys_arm_exec()
+    test_emergency_stop_blocks()
     test_forward_dry_run_blocks()
     print("test_exec_session: OK")

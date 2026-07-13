@@ -69,7 +69,7 @@ def _env_truthy(name: str, default: str = "") -> bool:
 
 
 def _exec_env_blocked() -> tuple[bool, str]:
-    """Server env kill-switches — only way to halt scanner orders (not the mobile app)."""
+    """Server env kill-switches — SCANNER_EXEC=0 or FORWARD_DRY_RUN=1."""
     if os.environ.get("SCANNER_EXEC", "1").strip().lower() in ("0", "false", "off"):
         return True, "SCANNER_EXEC=0"
     if _env_truthy("FORWARD_DRY_RUN"):
@@ -154,6 +154,7 @@ class MomentumScanner:
         self._long1_pct = LONG1_PARTITION_PCT
         self._long2_pct = LONG2_PARTITION_PCT
         self._risk_locked = False
+        self._user_exec_halted = False
         self._load_persisted_risk()
         self._recent_signals: deque[dict[str, Any]] = deque(maxlen=48)
         self._last_exec_error: str | None = None
@@ -284,11 +285,18 @@ class MomentumScanner:
         return True
 
     def set_exec_enabled(self, enabled: bool) -> None:
-        """No-op — execution is armed on Binance connect; halt via SCANNER_EXEC or FORWARD_DRY_RUN env."""
+        """App emergency stop / resume — blocks new entries; closes still allowed."""
+        halted = not enabled
+        if self._user_exec_halted == halted:
+            return
+        self._user_exec_halted = halted
+        self.invalidate_session_cache()
+        self._persist_risk_config()
         can_exec, block = self._order_session_ok()
         log.info(
-            "scanner set_exec_enabled(%s) ignored (env_controlled) can_execute=%s block=%s",
+            "scanner set_exec_enabled(%s) user_halted=%s can_execute=%s block=%s",
             enabled,
+            self._user_exec_halted,
             can_exec,
             block or "none",
         )
@@ -329,6 +337,8 @@ class MomentumScanner:
         blocked, reason = _exec_env_blocked()
         if blocked:
             result = (False, reason)
+        elif self._user_exec_halted:
+            result = (False, "EMERGENCY_STOP")
         else:
             result = self._session_connected()
         self._session_ok_cache = (now, result)
@@ -353,6 +363,7 @@ class MomentumScanner:
             "long1_pct": self._long1_pct,
             "long2_pct": self._long2_pct,
             "locked": self._risk_locked,
+            "exec_halted": self._user_exec_halted,
         }
         try:
             path = RISK_CONFIG_PATH
@@ -379,10 +390,13 @@ class MomentumScanner:
             if raw.get("long2_pct") is not None:
                 self._long2_pct = float(raw["long2_pct"])
             self._risk_locked = bool(raw.get("locked"))
+            if "exec_halted" in raw:
+                self._user_exec_halted = bool(raw.get("exec_halted"))
             log.info(
-                "scanner risk loaded partition=$%s locked=%s",
+                "scanner risk loaded partition=$%s locked=%s exec_halted=%s",
                 self._partition_usd,
                 self._risk_locked,
+                self._user_exec_halted,
             )
         except Exception as e:
             log.warning("load risk config: %s", e)
@@ -753,12 +767,14 @@ class MomentumScanner:
         pending = self._pending_candidates()
         active = sum(1 for c in self._coins.values() if c.active() or c.status == STATUS_SHORT or c.long1 or c.long2)
         can_exec, block_reason = self._order_session_ok()
+        env_blocked, _ = _exec_env_blocked()
         return {
             "enabled": self._enabled,
             "exec_enabled": can_exec,
             "can_execute": can_exec,
             "exec_block": block_reason or None,
-            "exec_env_controlled": True,
+            "user_exec_halted": self._user_exec_halted,
+            "exec_env_controlled": env_blocked,
             "last_exec_error": self._last_exec_error,
             "one_trade_at_a_time": self._one_at_a_time,
             "daily_limit": None,
