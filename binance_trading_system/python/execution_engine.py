@@ -542,10 +542,25 @@ class ExecutionEngine:
 
                     if signal.tp is not None:
                         try:
+                            tp_price = float(signal.tp)
+                            ref = float(signal.reference_price or 0)
+                            fill_px = float(fill or 0)
+                            # Re-anchor TP to actual fill so slippage does not skew +/-2.5% rule.
+                            if fill_px > 0 and ref > 0:
+                                side_u = side.upper()
+                                leg_u = (signal.leg or "").upper()
+                                if side_u == "SELL" or leg_u == "SHORT":
+                                    if signal.tp < ref:
+                                        pct = (ref - float(signal.tp)) / ref
+                                        tp_price = fill_px * (1.0 - pct)
+                                elif side_u == "BUY" or leg_u.startswith("LONG"):
+                                    if signal.tp > ref:
+                                        pct = (float(signal.tp) - ref) / ref
+                                        tp_price = fill_px * (1.0 + pct)
                             tp_resp = self._connector.place_tp_market(
                                 sym,
                                 side,
-                                float(signal.tp),
+                                tp_price,
                                 float(order_resp.get("quantity") or signal.quantity),
                                 client_id=f"{client_id}_TP",
                             )

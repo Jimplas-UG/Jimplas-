@@ -114,6 +114,7 @@ class CoinStrategy:
     long1: LegPosition | None = None
     long2: LegPosition | None = None
     long1_was_closed: bool = False
+    long2_was_closed: bool = False
     long1_peak_price: float | None = None
     long2_peak_price: float | None = None
     recovery_peak_price: float | None = None
@@ -264,11 +265,16 @@ class MomentumScanner:
         return ((coin.price - entry) / entry) * 100.0
 
     def _long_entry_allowed(self, coin: CoinStrategy, leg: int) -> bool:
-        """Recovery longs only after a confirmed short and adverse peak at exact threshold."""
+        """Recovery longs only after confirmed short + settle delay; each level is one-shot."""
         if not coin.short:
             return False
-        if leg == 2 and coin.long1 is None:
+        if leg == 1 and coin.long1_was_closed:
             return False
+        if leg == 2:
+            if coin.long1 is None:
+                return False
+            if coin.long2_was_closed:
+                return False
         if not self._exchange_has_short(coin.symbol):
             log.warning("scanner LONG%d blocked %s: no exchange short", leg, coin.symbol)
             return False
@@ -281,25 +287,59 @@ class MomentumScanner:
         return True
 
     def _short_settle_elapsed(self, coin: CoinStrategy) -> bool:
-        if not coin.short_opened_ms or LONG_ENTRY_DELAY_MS <= 0:
+        """Block recovery longs until SHORT settle clock is set and delay has passed."""
+        if LONG_ENTRY_DELAY_MS <= 0:
             return True
+        if not coin.short_opened_ms:
+            return False
         return int(time.time() * 1000) - coin.short_opened_ms >= LONG_ENTRY_DELAY_MS
 
     def _mark_short_opened(self, coin: CoinStrategy, symbol: str) -> None:
-        """Start long-entry delay only after exchange confirms the short leg."""
+        """Start long-entry delay on fill ACK (always); refresh when exchange confirms."""
+        if not coin.short_opened_ms:
+            coin.short_opened_ms = int(time.time() * 1000)
         sym = symbol.upper()
         if getattr(self._connector.cfg, "paper", False):
-            coin.short_opened_ms = int(time.time() * 1000)
             return
         if self._exchange_has_short(sym):
-            coin.short_opened_ms = int(time.time() * 1000)
             return
         try:
             self._connector.invalidate_positions_cache()
         except Exception:
             pass
-        if self._exchange_has_short(sym):
-            coin.short_opened_ms = int(time.time() * 1000)
+
+    def _cancel_symbol_orders(self, symbol: str) -> None:
+        if not hasattr(self._connector, "cancel_all_orders"):
+            return
+        try:
+            self._connector.cancel_all_orders(symbol.upper())
+        except Exception as e:
+            log.warning("cancel orders %s: %s", symbol, e)
+
+    def _place_leg_exchange_tp(self, coin: CoinStrategy, leg: LegPosition | None) -> None:
+        if not leg or not leg.tp_price or leg.qty <= 0:
+            return
+        if getattr(self._connector.cfg, "paper", False):
+            return
+        if not hasattr(self._connector, "place_tp_market"):
+            return
+        try:
+            self._connector.place_tp_market(
+                coin.symbol,
+                leg.side,
+                float(leg.tp_price),
+                float(leg.qty),
+                client_id=f"scn_tp_{leg.magic}_{int(time.time() * 1000) % 1_000_000}",
+            )
+        except Exception as e:
+            log.warning("re-place TP %s magic=%s: %s", coin.symbol, leg.magic, e)
+
+    def _refresh_exchange_tps(self, coin: CoinStrategy) -> None:
+        """After any partial close — wipe resting algos and re-arm remaining legs."""
+        self._cancel_symbol_orders(coin.symbol)
+        self._place_leg_exchange_tp(coin, coin.short)
+        self._place_leg_exchange_tp(coin, coin.long1)
+        self._place_leg_exchange_tp(coin, coin.long2)
 
     def _adopt_exchange_short(
         self,
@@ -322,6 +362,7 @@ class MomentumScanner:
         coin.status = STATUS_SHORT
         coin.short_adverse_peak_pct = 0.0
         coin.long1_was_closed = False
+        coin.long2_was_closed = False
         coin.long1_peak_price = None
         coin.long2_peak_price = None
         coin.recovery_peak_price = None
@@ -536,11 +577,15 @@ class MomentumScanner:
                         else STATUS_WATCHING
                     )
                 else:
+                    # Full LONG flatten — mark both recovery levels consumed this pair.
                     coin.long1 = None
                     coin.long2 = None
                     coin.long1_peak_price = None
                     coin.long2_peak_price = None
+                    coin.long1_was_closed = True
+                    coin.long2_was_closed = True
                     coin.status = STATUS_SHORT if coin.short else STATUS_WATCHING
+                    self._refresh_exchange_tps(coin)
             self._connector.invalidate_positions_cache()
             latency_ms = round((time.perf_counter() - t0) * 1000, 1)
             r["latency_ms"] = latency_ms
@@ -655,6 +700,7 @@ class MomentumScanner:
         coin.long1 = None
         coin.long2 = None
         coin.long1_was_closed = False
+        coin.long2_was_closed = False
         coin.long1_peak_price = None
         coin.long2_peak_price = None
         coin.recovery_peak_price = None
@@ -910,11 +956,8 @@ class MomentumScanner:
             if coin.highest_price and coin.highest_price > 0:
                 coin.retrace_pct = ((coin.highest_price - price) / coin.highest_price) * 100.0
             still_qualified = (coin.qualifying_pct or 0.0) >= GAIN_THRESHOLD_PCT
-            if still_qualified and qualify_pct < GAIN_THRESHOLD_PCT - RETRACE_ENTRY_PCT:
-                still_qualified = False
-            if coin.status == STATUS_PENDING and (
-                coin.retrace_pct < RETRACE_ENTRY_PCT or not still_qualified
-            ):
+            # Keep Pending once 15m spike was latched — do not cancel when live 15m fades mid-retrace.
+            if coin.status == STATUS_PENDING and coin.retrace_pct < RETRACE_ENTRY_PCT:
                 coin.status = STATUS_WATCHING
             elif (
                 coin.retrace_pct >= RETRACE_ENTRY_PCT
@@ -1199,10 +1242,12 @@ class MomentumScanner:
             self._last_exec_latency_ms = r.latency_ms or None
             if r.ok:
                 fill = float(r.fill_price or entry)
+                tp = fill * (1.0 - SHORT_TP_PCT / 100.0)
                 coin.short = LegPosition("SELL", fill, qty, SHORT_LEVERAGE, MAGIC_SHORT, tp)
                 coin.status = STATUS_SHORT
                 coin.short_adverse_peak_pct = 0.0
                 coin.long1_was_closed = False
+                coin.long2_was_closed = False
                 coin.long1_peak_price = None
                 coin.long2_peak_price = None
                 coin.recovery_peak_price = None
@@ -1263,7 +1308,8 @@ class MomentumScanner:
             self._last_exec_latency_ms = r.latency_ms or None
             if r.ok:
                 fill = float(r.fill_price or entry)
-                pos = LegPosition("BUY", fill, qty, lev, magic, tp)
+                tp_fill = fill * (1.0 + LONG_TP_PCT / 100.0)
+                pos = LegPosition("BUY", fill, qty, lev, magic, tp_fill)
                 if leg == 1:
                     coin.long1 = pos
                     coin.long1_peak_price = fill
@@ -1325,14 +1371,10 @@ class MomentumScanner:
         if adverse_pct > coin.short_adverse_peak_pct:
             coin.short_adverse_peak_pct = adverse_pct
 
-        # Long1 @ +2% adverse from short entry; Long2 @ +4% only after Long1 is open.
+        # Long1 @ +2%; Long2 @ +4% after Long1 — independent checks so a gap-to-+4% can arm both.
         if coin.long1 is None and self._long_entry_allowed(coin, 1):
             self._try_open_long(coin, 1)
-        elif (
-            coin.long1 is not None
-            and coin.long2 is None
-            and self._long_entry_allowed(coin, 2)
-        ):
+        if coin.long1 is not None and coin.long2 is None and self._long_entry_allowed(coin, 2):
             self._try_open_long(coin, 2)
 
         # Long1: TP at +2.5% or 0.5% retrace from its own peak.
@@ -1397,11 +1439,13 @@ class MomentumScanner:
                 coin.long1 = None
                 coin.long1_peak_price = None
                 coin.long1_was_closed = True
-                coin.status = STATUS_SHORT if coin.short else STATUS_CLOSED
+                coin.status = STATUS_LONG2 if coin.long2 else (STATUS_SHORT if coin.short else STATUS_CLOSED)
             elif leg_name == "long2":
                 coin.long2 = None
                 coin.long2_peak_price = None
+                coin.long2_was_closed = True
                 coin.status = STATUS_LONG1 if coin.long1 else (STATUS_SHORT if coin.short else STATUS_CLOSED)
+            self._refresh_exchange_tps(coin)
             self._connector.invalidate_positions_cache()
             if reason:
                 log.info("scanner closed leg %s %s reason=%s", sym, leg_name, reason)
