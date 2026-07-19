@@ -9,10 +9,18 @@ export const CALENDAR_VIEWS = [
   { id: 'all', label: 'All time' },
 ];
 
-function parseDayKey(dateStr) {
-  const [y, m, d] = String(dateStr || '').split('-').map(Number);
-  if (!y || !m || !d) return null;
-  return new Date(Date.UTC(y, m - 1, d));
+/** Local civil YYYY-MM-DD (matches phone + East Africa desk day). */
+export function dayKeyFromTs(tsMs) {
+  const d = new Date(Number(tsMs) || 0);
+  if (!Number.isFinite(d.getTime()) || d.getTime() <= 0) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
 }
 
 export function indexDaysByDate(days) {
@@ -24,18 +32,16 @@ export function indexDaysByDate(days) {
 }
 
 export function monthGrid(year, monthIndex0, dayMap) {
-  const last = new Date(Date.UTC(year, monthIndex0 + 1, 0));
+  const lastDay = new Date(year, monthIndex0 + 1, 0).getDate();
   const cells = [];
-  // Full week Sun–Sat so weekend phantom / fills are visible and match Period Total.
-  for (let d = 1; d <= last.getUTCDate(); d++) {
-    const dt = new Date(Date.UTC(year, monthIndex0, d));
-    const dow = dt.getUTCDay();
-    const key = `${year}-${String(monthIndex0 + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  for (let d = 1; d <= lastDay; d++) {
+    const dt = new Date(year, monthIndex0, d);
+    const key = `${year}-${pad2(monthIndex0 + 1)}-${pad2(d)}`;
     const row = dayMap.get(key);
     cells.push({
       date: key,
       day: d,
-      dow,
+      dow: dt.getDay(),
       pnl: Number(row?.pnl ?? 0),
       trades: Number(row?.trades ?? 0),
       hasData: !!row,
@@ -46,18 +52,18 @@ export function monthGrid(year, monthIndex0, dayMap) {
 
 export function weekCells(anchorDate, dayMap) {
   const d = new Date(anchorDate);
-  const dow = d.getUTCDay();
-  const mondayOffset = dow === 0 ? -6 : 1 - dow;
-  const monday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + mondayOffset));
+  const dow = d.getDay(); // 0=Sun
+  const sunday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - dow);
   const cells = [];
-    for (let i = 0; i < 7; i++) {
-    const dt = new Date(monday.getTime() + i * 86400000);
-    const key = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+  const labels = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+  for (let i = 0; i < 7; i++) {
+    const dt = new Date(sunday.getFullYear(), sunday.getMonth(), sunday.getDate() + i);
+    const key = `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
     const row = dayMap.get(key);
     cells.push({
       date: key,
-      day: dt.getUTCDate(),
-      label: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'][i],
+      day: dt.getDate(),
+      label: labels[i],
       pnl: Number(row?.pnl ?? 0),
       trades: Number(row?.trades ?? 0),
       hasData: !!row,
@@ -72,9 +78,9 @@ export function yearMonths(year, dayMap) {
     let pnl = 0;
     let trades = 0;
     let days = 0;
-    const last = new Date(Date.UTC(year, m + 1, 0)).getUTCDate();
+    const last = new Date(year, m + 1, 0).getDate();
     for (let d = 1; d <= last; d++) {
-      const key = `${year}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const key = `${year}-${pad2(m + 1)}-${pad2(d)}`;
       const row = dayMap.get(key);
       if (!row) continue;
       pnl += Number(row.pnl ?? 0);
@@ -83,7 +89,7 @@ export function yearMonths(year, dayMap) {
     }
     months.push({
       month: m,
-      label: new Date(Date.UTC(year, m, 1)).toLocaleString('en-US', { month: 'short', timeZone: 'UTC' }),
+      label: new Date(year, m, 1).toLocaleString('en-US', { month: 'short' }),
       pnl,
       trades,
       hasData: days > 0,
@@ -106,7 +112,9 @@ export function aggregateDealsToDays(deals) {
     const ts = Number(d.time ?? 0);
     const shown = displayDealPnl(d);
     if (!ts || Math.abs(shown) < 1e-12) continue;
-    const key = new Date(ts).toISOString().slice(0, 10);
+    if (d.is_close === false) continue;
+    const key = dayKeyFromTs(ts);
+    if (!key) continue;
     const row = byDay.get(key) ?? { date: key, pnl: 0, trades: 0 };
     row.pnl += shown;
     row.trades += 1;
@@ -123,5 +131,8 @@ export function fmtCalendarMoney(n) {
 }
 
 export function parseDayKeyUtc(dateStr) {
-  return parseDayKey(dateStr);
+  const [y, m, d] = String(dateStr || '').split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
 }
+

@@ -22,6 +22,7 @@ git --no-pager log -1 --oneline
 ENVF=/etc/bilshenz.env
 for kv in \
   'TRADE_HISTORY_SINCE=2026-07-14' \
+  'TRADE_CALENDAR_TZ=Africa/Nairobi' \
   'FORWARD_DRY_RUN=0' \
   'SCANNER_EXEC=1' \
   'SCANNER_ENABLED=1' \

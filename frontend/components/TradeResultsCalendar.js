@@ -41,7 +41,7 @@ function PnlCell({ cell, C, compact }) {
         <>
           <Text style={[st.cellPnl, { color: col }]}>{fmtCalendarMoney(pnl)}</Text>
           <Text style={[st.cellTrades, { color: C.dim }]}>
-            {cell.trades} {cell.trades === 1 ? 'trade' : 'trades'}
+            {cell.trades} {cell.trades === 1 ? 'close' : 'closes'}
           </Text>
         </>
       ) : (
@@ -58,6 +58,8 @@ export default function TradeResultsCalendar({ binanceBaseUrl, brokerConnected, 
   const [serverDays, setServerDays] = useState([]);
   const [totalPnl, setTotalPnl] = useState(0);
   const [loading, setLoading] = useState(false);
+
+  const [calendarMeta, setCalendarMeta] = useState({ tz: '', since: '', source: '' });
 
   const dealsSignature = useMemo(() => {
     if (!brokerDeals?.length) return '0';
@@ -88,7 +90,13 @@ export default function TradeResultsCalendar({ binanceBaseUrl, brokerConnected, 
           const clean = sanitizeCalendarDays(j.days);
           setServerDays(clean);
           const sum = clean.reduce((s, d) => s + Number(d.pnl ?? 0), 0);
-          setTotalPnl(sum);
+          // Period total always from days — ignore poisoned j.total_pnl
+          setTotalPnl(Number.isFinite(sum) ? sum : 0);
+          setCalendarMeta({
+            tz: j.tz || 'Africa/Nairobi',
+            since: j.since || '',
+            source: j.source || 'income',
+          });
         } else {
           applyLocalDays(brokerDeals);
         }
@@ -103,26 +111,26 @@ export default function TradeResultsCalendar({ binanceBaseUrl, brokerConnected, 
   }, [binanceBaseUrl, brokerConnected, dealsSignature, applyLocalDays]);
 
   const dayMap = useMemo(() => indexDaysByDate(serverDays), [serverDays]);
-  const y = cursor.getUTCFullYear();
-  const m = cursor.getUTCMonth();
+  const y = cursor.getFullYear();
+  const m = cursor.getMonth();
 
   const periodTotal = useMemo(() => {
     if (view === 'month') {
       const prefix = `${y}-${String(m + 1).padStart(2, '0')}`;
-      return serverDays.filter((d) => d.date?.startsWith(prefix)).reduce((s, d) => s + d.pnl, 0);
+      return serverDays.filter((d) => d.date?.startsWith(prefix)).reduce((s, d) => s + Number(d.pnl || 0), 0);
     }
     if (view === 'year') {
-      return serverDays.filter((d) => d.date?.startsWith(String(y))).reduce((s, d) => s + d.pnl, 0);
+      return serverDays.filter((d) => d.date?.startsWith(String(y))).reduce((s, d) => s + Number(d.pnl || 0), 0);
     }
     if (view === 'week') {
-      return weekCells(cursor, dayMap).reduce((s, c) => s + c.pnl, 0);
+      return weekCells(cursor, dayMap).reduce((s, c) => s + (c.hasData ? Number(c.pnl || 0) : 0), 0);
     }
     return totalPnl;
   }, [view, y, m, cursor, serverDays, dayMap, totalPnl]);
 
   const title =
     view === 'month'
-      ? cursor.toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })
+      ? cursor.toLocaleString('en-US', { month: 'long', year: 'numeric' })
       : view === 'year'
         ? String(y)
         : view === 'week'
@@ -131,9 +139,9 @@ export default function TradeResultsCalendar({ binanceBaseUrl, brokerConnected, 
 
   const shift = (dir) => {
     const next = new Date(cursor);
-    if (view === 'month') next.setUTCMonth(next.getUTCMonth() + dir);
-    else if (view === 'year') next.setUTCFullYear(next.getUTCFullYear() + dir);
-    else next.setUTCDate(next.getUTCDate() + dir * 7);
+    if (view === 'month') next.setMonth(next.getMonth() + dir);
+    else if (view === 'year') next.setFullYear(next.getFullYear() + dir);
+    else next.setDate(next.getDate() + dir * 7);
     setCursor(next);
   };
 
@@ -153,7 +161,9 @@ export default function TradeResultsCalendar({ binanceBaseUrl, brokerConnected, 
     <View style={[st.wrap, { borderColor: C.border, backgroundColor: C.panel }]}>
       <View style={[st.head, { borderBottomColor: C.border }]}>
         <Text style={[st.title, { color: C.text }]}>Trade results</Text>
-        <Text style={[st.badge, { color: loading ? C.amber : C.teal }]}>{loading ? '…' : 'LIVE'}</Text>
+        <Text style={[st.badge, { color: loading ? C.amber : C.teal }]}>
+          {loading ? '…' : calendarMeta.tz ? `LIVE · ${calendarMeta.tz.split('/').pop()}` : 'LIVE'}
+        </Text>
       </View>
 
       <View style={st.tabs}>

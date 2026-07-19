@@ -1523,99 +1523,85 @@ class BinanceConnector:
         return {"ok": True, "closed": [leg_row], **leg_row, "latency_ms": latency_ms, "broker": "binance"}
 
     def trade_pnl_calendar(self, days: int = 400) -> dict[str, Any]:
-        """Aggregate realized PnL by UTC day — sanitized fills only (never raw phantom income)."""
-        from deal_pnl import is_phantom_pnl
+        """
+        Aggregate realized PnL by desk-local calendar day (TRADE_CALENDAR_TZ).
+
+        Binance `/fapi/v1/income` REALIZED_PNL is the source of truth (complete account).
+        Sanitized userTrades are fallback only when income is empty — never mixed in a way
+        that undercounts a day after a few recent fills arrive.
+        """
+        from calendar_pnl import (
+            aggregate_deal_days,
+            aggregate_income_days,
+            calendar_tz_name,
+            finalize_calendar_days,
+        )
         from trade_history import include_trade_time, trade_history_since_date
 
         since_date = trade_history_since_date()
-        # Hard cap: a single income line cannot exceed this for calendar display.
-        # Partition-sized desks never realize 5-figure P&L on one fill legitimately.
-        max_leg = float(os.environ.get("TRADE_PNL_MAX_LEG", "5000"))
+        lim_days = max(1, min(400, int(days)))
+        tz_name = calendar_tz_name()
 
         if self.cfg.paper:
             from paper_simulator import paper_store
 
-            deals = paper_store.recent_deals(500)
-            by_day: dict[str, dict[str, float]] = {}
-            for d in deals:
-                ts = int(d.get("time") or 0)
-                if ts <= 0 or not include_trade_time(ts):
-                    continue
-                pnl = float(d.get("profit") or 0)
-                if abs(pnl) < 1e-12 or abs(pnl) > max_leg:
-                    continue
-                key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
-                row = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
-                row["pnl"] += pnl
-                row["trades"] += 1
-            days_out = [{"date": k, "pnl": round(v["pnl"], 2), "trades": int(v["trades"])} for k, v in sorted(by_day.items())]
-            total = sum(x["pnl"] for x in days_out)
-            out = {"ok": True, "total_pnl": round(total, 2), "days": days_out[-days:]}
+            by_day = aggregate_deal_days(
+                paper_store.recent_deals(500),
+                include_trade_time=include_trade_time,
+            )
+            days_out, total = finalize_calendar_days(by_day, days=lim_days, since_date=since_date)
+            out = {"ok": True, "total_pnl": total, "days": days_out, "source": "paper_deals", "tz": tz_name}
             if since_date:
                 out["since"] = since_date
             return out
 
         if not self.cfg.api_key:
-            return {"ok": False, "total_pnl": 0.0, "days": []}
+            return {"ok": False, "total_pnl": 0.0, "days": [], "tz": tz_name}
 
         by_day: dict[str, dict[str, float]] = {}
+        source = "income"
 
-        # Primary: sanitized userTrades (deal_pnl already applied in recent_deals).
         try:
-            for d in self.recent_deals(min(500, max(100, int(days) * 3))):
-                ts = int(d.get("time") or 0)
-                if ts <= 0 or not include_trade_time(ts):
-                    continue
-                pnl = float(d.get("profit") or 0)
-                if abs(pnl) < 1e-12:
-                    continue
-                qty = float(d.get("volume") or 0)
-                px = float(d.get("price") or 0)
-                quote = float(d.get("quote_qty") or 0)
-                if is_phantom_pnl(pnl, qty, px, quote) or abs(pnl) > max_leg:
-                    continue
-                key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
-                bucket = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
-                bucket["pnl"] += pnl
-                bucket["trades"] += 1
-        except Exception as e:
-            log.warning("trade_pnl_calendar deals: %s", e)
+            params: dict[str, Any] = {"incomeType": "REALIZED_PNL", "limit": 1000}
+            since_ms = 0
+            try:
+                from trade_history import trade_history_since_ms
 
-        # Supplement from income for days with no deal rows — drop phantoms / absurd legs.
-        try:
+                since_ms = int(trade_history_since_ms() or 0)
+            except Exception:
+                since_ms = 0
+            if since_ms > 0:
+                params["startTime"] = since_ms
             income = self._request(
                 "GET",
                 "/fapi/v1/income",
-                {"incomeType": "REALIZED_PNL", "limit": 1000},
+                params,
                 signed=True,
             )
-            for row in income or []:
-                ts = int(row.get("time") or 0)
-                if ts <= 0 or not include_trade_time(ts):
-                    continue
-                pnl = float(row.get("income") or 0)
-                if abs(pnl) < 1e-12 or abs(pnl) > max_leg:
-                    continue
-                key = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
-                if key in by_day:
-                    continue
-                bucket = by_day.setdefault(key, {"pnl": 0.0, "trades": 0})
-                bucket["pnl"] += pnl
-                bucket["trades"] += 1
+            by_day = aggregate_income_days(income or [], include_trade_time=include_trade_time)
         except Exception as e:
             log.warning("trade_pnl_calendar income: %s", e)
+            by_day = {}
 
-        days_out = [
-            {"date": k, "pnl": round(v["pnl"], 2), "trades": int(v["trades"])}
-            for k, v in sorted(by_day.items())
-            if abs(v["pnl"]) <= max_leg * 20  # day aggregate still within desk reality
-        ]
-        cutoff = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86400))
-        if since_date and since_date > cutoff:
-            cutoff = since_date
-        days_out = [d for d in days_out if d["date"] >= cutoff]
-        total = round(sum(d["pnl"] for d in days_out), 2)
-        out = {"ok": True, "total_pnl": total, "days": days_out}
+        if not by_day:
+            source = "deals"
+            try:
+                by_day = aggregate_deal_days(
+                    self.recent_deals(min(500, max(100, lim_days * 3))),
+                    include_trade_time=include_trade_time,
+                )
+            except Exception as e:
+                log.warning("trade_pnl_calendar deals: %s", e)
+                by_day = {}
+
+        days_out, total = finalize_calendar_days(by_day, days=lim_days, since_date=since_date)
+        out = {
+            "ok": True,
+            "total_pnl": total,
+            "days": days_out,
+            "source": source,
+            "tz": tz_name,
+        }
         if since_date:
             out["since"] = since_date
         return out
