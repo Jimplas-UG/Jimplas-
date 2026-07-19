@@ -5,7 +5,13 @@ import { fetchBinanceSession, pickReachableBinanceBridgeUrl, binanceFetch } from
 import { getDefaultBinanceBridgeUrl, resolveBridgeUrlForDevice } from '../utils/binanceApiUrl';
 import { isLocalhostApiUrl } from '../utils/bridgeLanUrl';
 import { getBrokerMode } from '../lib/brokerMode';
-import { hasBinanceCredentials, isHardBinanceAuthFailure, loadStoredBinanceCredentials, restoreBinanceBridgeSession, tryBinanceSessionConnect } from '../lib/binanceSession';
+import {
+  hasBinanceCredentials,
+  isHardBinanceAuthFailure,
+  loadStoredBinanceCredentials,
+  restoreBinanceBridgeSession,
+  tryBinanceSessionConnect,
+} from '../lib/binanceSession';
 
 const BinanceBridgeContext = createContext(null);
 
@@ -13,9 +19,10 @@ const STORAGE_BINANCE_BASE = '@bilshenz_v1/binanceApiBaseUrl';
 const STORAGE_BINANCE_CONNECTED = '@bilshenz_v1/binanceApiConnected';
 const STORAGE_BINANCE_URL_REV = '@bilshenz_v1/binanceApiUrlRev';
 const BINANCE_URL_REV = '3';
-const HEALTH_TIMEOUT_MS = 1500;
-const RESTORE_TIMEOUT_MS = 4000;
-const SESSION_TIMEOUT_MS = 2500;
+/** Prefer status; health is fallback discover only. */
+const HEALTH_TIMEOUT_MS = 800;
+const RESTORE_TIMEOUT_MS = 3500;
+const SESSION_TIMEOUT_MS = 1500;
 
 function canonicalBinanceUrl() {
   const u = getBinanceApiUrl();
@@ -55,28 +62,34 @@ export function BinanceBridgeProvider({ children }) {
 
     const probeInBackground = async (resolved, conn) => {
       let url = resolved;
-      try {
-        const health = await binanceFetch(url, '/health', {}, HEALTH_TIMEOUT_MS);
-        if (!health.ok) {
+
+      // Fast path: hit /api/status first (no health gate). Live desk URLs are usually correct.
+      let session = await fetchBinanceSession(url, SESSION_TIMEOUT_MS, 0);
+      if (cancelled) return;
+
+      if (!session.ok) {
+        try {
+          const health = await binanceFetch(url, '/health', {}, HEALTH_TIMEOUT_MS);
+          if (!health.ok) {
+            const reachable = await pickReachableBinanceBridgeUrl(url);
+            if (reachable) url = reachable;
+          }
+        } catch {
           const reachable = await pickReachableBinanceBridgeUrl(url);
           if (reachable) url = reachable;
         }
-      } catch {
-        const reachable = await pickReachableBinanceBridgeUrl(url);
-        if (reachable) url = reachable;
+        if (cancelled) return;
+        if (url !== resolved) {
+          setBaseUrlState(url);
+          await AsyncStorage.multiSet([
+            [STORAGE_BINANCE_BASE, url],
+            [STORAGE_BINANCE_URL_REV, BINANCE_URL_REV],
+          ]);
+          session = await fetchBinanceSession(url, SESSION_TIMEOUT_MS, 0);
+          if (cancelled) return;
+        }
       }
 
-      if (cancelled) return;
-      if (url !== resolved) {
-        setBaseUrlState(url);
-        await AsyncStorage.multiSet([
-          [STORAGE_BINANCE_BASE, url],
-          [STORAGE_BINANCE_URL_REV, BINANCE_URL_REV],
-        ]);
-      }
-
-      const session = await fetchBinanceSession(url, SESSION_TIMEOUT_MS, 0);
-      if (cancelled) return;
       if (session.ok) {
         setSessionExec(execFromBridgeSession(session));
         setConnected(true);
@@ -89,12 +102,22 @@ export function BinanceBridgeProvider({ children }) {
       const mode = getBrokerMode();
       const canLogin = mode === 'paper' || hasBinanceCredentials(creds);
       if (!canLogin) {
-        if (conn === '1') await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '0');
+        if (conn === '1') {
+          setConnected(false);
+          await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '0');
+        }
         return;
       }
 
       const restored = await tryBinanceSessionConnect(url, RESTORE_TIMEOUT_MS);
-      if (cancelled || !restored.ok) return;
+      if (cancelled) return;
+      if (!restored.ok) {
+        if (conn === '1' && isHardBinanceAuthFailure(restored.error)) {
+          setConnected(false);
+          await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '0');
+        }
+        return;
+      }
       setBaseUrlState(restored.url);
       await AsyncStorage.multiSet([
         [STORAGE_BINANCE_BASE, restored.url],
@@ -117,6 +140,11 @@ export function BinanceBridgeProvider({ children }) {
 
         const resolved = resolveStoredUrl(storedUrl, urlRev);
         setBaseUrlState(resolved);
+        // Optimistic: last session was live → open WS / polls immediately while confirming.
+        if (conn === '1') {
+          setConnected(true);
+          setSessionEpoch((n) => n + 1);
+        }
         setHydrated(true);
 
         void probeInBackground(resolved, conn);
@@ -140,6 +168,8 @@ export function BinanceBridgeProvider({ children }) {
       [STORAGE_BINANCE_BASE, v],
       [STORAGE_BINANCE_URL_REV, BINANCE_URL_REV],
     ]).catch(() => {});
+    // New URL bound → kick session consumers immediately (WS remount / epoch refresh).
+    setSessionEpoch((n) => n + 1);
   }, []);
 
   const applyBridgeSession = useCallback((session) => {
@@ -188,9 +218,9 @@ export function BinanceBridgeProvider({ children }) {
         return;
       }
       if (restored.hardFail) markConnected(false);
-      /* transient failure — stay connected, retry on next tick */
     };
-    const boot = setTimeout(tick, 3000);
+    // First keepalive quickly after optimistic connect.
+    const boot = setTimeout(tick, 1200);
     const id = setInterval(tick, 30000);
     return () => {
       cancelled = true;

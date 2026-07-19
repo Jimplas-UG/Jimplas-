@@ -44,13 +44,15 @@ function AppContent() {
     setMounted((m) => (m[name] ? m : { ...m, [name]: true }));
   }, []);
 
-  const deskEnabled = !!baseUrl?.trim() && (tab === 'risk' || tab === 'trade');
-  const scannerEnabled = !!baseUrl?.trim() && (tab === 'scanner' || tab === 'trade');
+  const hasApi = !!baseUrl?.trim();
+  // Open scanner + desk feeds as soon as API URL is bound (any tab).
+  const deskEnabled = hasApi;
+  const scannerEnabled = hasApi;
 
   const desk = useDeskSession({
     enabled: deskEnabled,
-    loadBars: false,
-    pollTicks: deskEnabled,
+    loadBars: tab === 'trade',
+    pollTicks: true,
   });
   const tickScanner = useTickScanner(baseUrl, {
     enabled: scannerEnabled,

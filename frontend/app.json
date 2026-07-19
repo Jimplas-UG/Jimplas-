@@ -2,7 +2,7 @@
   "expo": {
     "name": "Bilshenz",
     "slug": "bilshenz-desk",
-    "version": "1.3.6",
+    "version": "1.3.7",
     "jsEngine": "hermes",
     "newArchEnabled": false,
     "updates": {

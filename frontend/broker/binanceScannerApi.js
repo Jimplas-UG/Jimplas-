@@ -161,7 +161,7 @@ export function subscribeScannerStream(baseUrl, onSnapshot, { onError, onOpen } 
   let ws = null;
   let closed = false;
   let reconnectTimer = null;
-  let backoffMs = 1500;
+  let backoffMs = 350;
 
   const connect = () => {
     if (closed) return;
@@ -174,7 +174,7 @@ export function subscribeScannerStream(baseUrl, onSnapshot, { onError, onOpen } 
     }
 
     ws.onopen = () => {
-      backoffMs = 1500;
+      backoffMs = 350;
       onOpen?.();
     };
 

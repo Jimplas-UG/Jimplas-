@@ -147,7 +147,7 @@ class BinanceUserDataStream:
         keepalive_task: asyncio.Task | None = None
         while self._running:
             if not self._connector.cfg.api_key or self._connector.cfg.paper:
-                await asyncio.sleep(5.0)
+                await asyncio.sleep(0.25)
                 continue
             listen_key = await self._create_listen_key()
             if not listen_key:

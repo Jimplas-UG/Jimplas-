@@ -264,13 +264,18 @@ export async function connectBinanceBridge({
 export async function tryBinanceSessionConnect(baseUrl, timeoutMs = 10000) {
   const mode = getBrokerMode();
   const pref = String(baseUrl || '').trim().replace(/\/$/, '');
-  const hit = pref ? await probeBridgeHealth(pref, 500) : null;
-  const url = hit || (await pickReachableBinanceBridgeUrl(pref));
-  if (!url) {
-    return { ok: false, url: baseUrl, error: 'Cannot reach Binance bridge' };
+  // Prefer the bound URL immediately — do not wait on health before status.
+  let url = pref;
+  let session = pref ? await fetchBinanceSession(pref, Math.min(2000, timeoutMs), 0) : { ok: false };
+  if (!session.ok) {
+    const hit = pref ? await probeBridgeHealth(pref, 400) : null;
+    url = hit || (await pickReachableBinanceBridgeUrl(pref));
+    if (!url) {
+      return { ok: false, url: baseUrl, error: 'Cannot reach Binance bridge' };
+    }
+    session = await fetchBinanceSession(url, 4000, 0);
   }
 
-  const session = await fetchBinanceSession(url, 4000, 0);
   if (session.ok) {
     rememberBridgeUrl(url);
     return { ok: true, url, session };
@@ -296,10 +301,14 @@ export async function tryBinanceSessionConnect(baseUrl, timeoutMs = 10000) {
 
 export async function restoreBinanceBridgeSession(baseUrl, timeoutMs = 10000) {
   const pref = String(baseUrl || '').trim().replace(/\/$/, '');
-  const hit = pref ? await probeBridgeHealth(pref, 500) : null;
-  const url = hit || (await pickReachableBinanceBridgeUrl(pref)) || pref;
-
-  const session = await fetchBinanceSession(url, 4000, 0);
+  // Status first on preferred URL — skip health gate when the session is already live.
+  let url = pref;
+  let session = pref ? await fetchBinanceSession(pref, 2000, 0) : { ok: false };
+  if (!session.ok) {
+    const hit = pref ? await probeBridgeHealth(pref, 400) : null;
+    url = hit || (await pickReachableBinanceBridgeUrl(pref)) || pref;
+    session = await fetchBinanceSession(url, 4000, 0);
+  }
   if (session.ok) {
     rememberBridgeUrl(url);
     return { ok: true, url, session, hardFail: false };
