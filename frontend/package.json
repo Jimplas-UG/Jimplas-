@@ -33,9 +33,10 @@
     "web": "node scripts/run-expo-web.js",
     "web:raw": "expo start --web",
     "web:mobile": "node scripts/start-web-mobile.js",
-    "assets:generate": "node scripts/generate-assets.js",
-    "prebuild:android": "node scripts/generate-assets.js && npx expo prebuild --platform android --clean",
-    "build:apk:local": "node scripts/generate-assets.js && npx expo prebuild --platform android --clean && cd android && gradlew.bat assembleRelease",
+    "assets:generate": "node scripts/apply-source-icon.js",
+    "assets:generate:svg": "node scripts/generate-assets.js",
+    "prebuild:android": "node scripts/apply-source-icon.js && npx expo prebuild --platform android --clean",
+    "build:apk:local": "node scripts/apply-source-icon.js && npx expo prebuild --platform android --clean && cd android && gradlew.bat assembleRelease",
     "build:apk:eas": "eas build --platform android --profile production --non-interactive"
   },
   "dependencies": {
