@@ -32,8 +32,8 @@ export function fastSplash() {
 }
 
 export function shouldPlayOpening() {
-  // Release APK: skip cinematic overlay — heavy Reanimated splash caused launch crashes on device.
-  if (typeof __DEV__ === 'undefined' || __DEV__ === false) return false;
+  // Lightweight BrandLogoSplash is safe on release APKs (no 9-step cinematic).
+  // Skip only when explicitly disabled (Expo Go reload convenience).
   return !skipSplash();
 }
 

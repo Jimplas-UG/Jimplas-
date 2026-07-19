@@ -63,7 +63,7 @@ module.exports = ({ config }) => {
     android: {
       ...config.android,
       package: 'com.jimplas.bilshenz',
-      versionCode: 134,
+      versionCode: 135,
       permissions: ['INTERNET', 'ACCESS_NETWORK_STATE'],
       adaptiveIcon: config.android?.adaptiveIcon ?? {
         foregroundImage: './assets/adaptive-icon.png',

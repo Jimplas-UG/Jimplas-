@@ -1,12 +1,13 @@
 import React, { useLayoutEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
-import CinematicSplash, { SPLASH_MAX_MS } from './CinematicSplash';
+import BrandLogoSplash, { BRAND_SPLASH_MAX_MS } from './BrandLogoSplash';
 import { hideBootSplash } from '../lib/bootSplash';
 
-export { SPLASH_MAX_MS };
+export const SPLASH_MAX_MS = BRAND_SPLASH_MAX_MS;
 
 /**
- * Cinematic opening only — dismisses native static splash immediately, then plays animation.
+ * Opening overlay — shared BS logo, then home tab.
+ * Dismisses the native splash immediately so the PNG logo is what the user sees.
  */
 export default function AppOpeningSplash({ onComplete }) {
   useLayoutEffect(() => {
@@ -15,7 +16,7 @@ export default function AppOpeningSplash({ onComplete }) {
 
   return (
     <View style={styles.overlay}>
-      <CinematicSplash onComplete={onComplete} />
+      <BrandLogoSplash onComplete={onComplete} />
     </View>
   );
 }
@@ -25,6 +26,6 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     zIndex: 10000,
     elevation: 10000,
-    backgroundColor: '#0A0E17',
+    backgroundColor: '#000000',
   },
 });

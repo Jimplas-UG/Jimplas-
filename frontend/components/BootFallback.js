@@ -1,6 +1,6 @@
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import StaticHexLogo from './logo/StaticHexLogo';
+import BrandLogo from './logo/BrandLogo';
 
 /**
  * Minimal shell when main desk UI fails to mount — avoids permanent black screen.
@@ -8,7 +8,7 @@ import StaticHexLogo from './logo/StaticHexLogo';
 export default function BootFallback({ message, onRetry }) {
   return (
     <View style={styles.root}>
-      <StaticHexLogo size={96} animated />
+      <BrandLogo size={112} />
       <Text style={styles.title}>Bilshenz</Text>
       <Text style={styles.msg}>{message || 'Starting desk…'}</Text>
       {onRetry ? (

@@ -86,8 +86,8 @@ if (appJs.includes('SplashScreen.preventAutoHideAsync()') && !fs.existsSync(path
   ok('App.js splash guard clean');
 }
 
-if (!appJs.includes('AppOpeningSplash') && !appJs.includes('CinematicSplash')) {
-  fail('App.js must use AppOpeningSplash (9-step cinematic opening)');
+if (!appJs.includes('AppOpeningSplash') && !appJs.includes('CinematicSplash') && !appJs.includes('BrandLogoSplash')) {
+  fail('App.js must use AppOpeningSplash (brand logo opening)');
 } else {
   ok('AppOpeningSplash wired in App.js');
 }
@@ -98,10 +98,10 @@ if (!fs.existsSync(path.join(ROOT, 'lib', 'bootSplash.js'))) {
   ok('bootSplash.js present');
 }
 
-if (!fs.existsSync(path.join(ROOT, 'components', 'logo', 'buildHexLogoSvg.js'))) {
-  fail('Missing buildHexLogoSvg.js — icon assets will be wrong');
+if (!fs.existsSync(path.join(ROOT, 'assets', 'source-icon-raw.png'))) {
+  fail('Missing source-icon-raw.png — shared BS icon required');
 } else {
-  ok('icon generator present');
+  ok('shared source icon present');
 }
 
 try {
