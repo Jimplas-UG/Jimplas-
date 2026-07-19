@@ -360,12 +360,10 @@ export function useBinanceLiveFeed({
 
   const refreshAfterClose = useCallback(async () => {
     if (!sessionActive || !enabled || !baseUrl?.trim()) return;
-    for (let i = 0; i < 5; i++) {
-      await refreshBrokerSnapshot();
-      if (i < 4) {
-        await new Promise((r) => setTimeout(r, 350));
-      }
-    }
+    // Immediate refresh + one quick follow-up (positions/user stream usually settle in <200ms).
+    await refreshBrokerSnapshot();
+    await new Promise((r) => setTimeout(r, 180));
+    await refreshBrokerSnapshot();
   }, [sessionActive, enabled, baseUrl, refreshBrokerSnapshot]);
 
   useEffect(() => {

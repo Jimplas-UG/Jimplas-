@@ -103,8 +103,9 @@ export default function OpenPositionsPanel({
             ? `Closed ${label} ${fmtVol(closed.volume)} @ ${fmtPx(closed.fill_price)} · P&L ${fmtUsd(realized)}`
             : `${label} closed`;
           onCloseMessage?.(msg);
-          if (onRefreshAfterClose) await onRefreshAfterClose();
-          else await onRefresh?.();
+          // Don't block the close button on UI refresh — run in background.
+          if (onRefreshAfterClose) void onRefreshAfterClose();
+          else if (onRefresh) void onRefresh();
         } else {
           Alert.alert('Close failed', parseCloseError(r));
         }

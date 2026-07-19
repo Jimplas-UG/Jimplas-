@@ -1021,9 +1021,16 @@ class BinanceConnector:
         fill: float,
         entry: float | None = None,
     ) -> float:
-        """Reject absurd avgPrice (e.g. 1.0 on a 0.002 alt) — use book or entry."""
+        """Reject absurd avgPrice (e.g. 1.0 on a 0.002 alt) — use book or entry.
+
+        Fast path: trust exchange avgPrice when it is already present and sane vs entry
+        (skips an extra bookTicker round-trip on the close hot path).
+        """
         sym = symbol.upper()
         side_u = exit_side.upper()
+        if fill > 0 and entry and entry > 0 and abs(fill - entry) / max(entry, 1e-12) <= 50:
+            return fill
+
         tick = self.book_ticker(sym)
         book = 0.0
         if tick:
@@ -1454,7 +1461,7 @@ class BinanceConnector:
 
         targets = [
             p
-            for p in self.positions(sym, force=True)
+            for p in self.positions(sym, force=False)
             if str(p.get("positionSide") or "").upper() == ps
             or (
                 ps == "SHORT"
@@ -1463,6 +1470,18 @@ class BinanceConnector:
             )
             or (ps == "LONG" and str(p.get("type", "")).upper() == "BUY")
         ]
+        if not targets:
+            targets = [
+                p
+                for p in self.positions(sym, force=True)
+                if str(p.get("positionSide") or "").upper() == ps
+                or (
+                    ps == "SHORT"
+                    and str(p.get("type", "")).upper() == "SELL"
+                    and str(p.get("positionSide") or "SHORT").upper() != "LONG"
+                )
+                or (ps == "LONG" and str(p.get("type", "")).upper() == "BUY")
+            ]
         if not targets:
             return {"ok": False, "error": f"no_{ps.lower()}_leg"}
 
@@ -1496,17 +1515,14 @@ class BinanceConnector:
         fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
         if fill <= 0:
             fill = float(p.get("price_open") or 0)
+        # Best-effort income lookup once — never sleep on the close ACK path.
         rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
-        if abs(rpnl) < 1e-12 and order_id:
-            _time.sleep(0.12)
-            rpnl, commission = self.realized_pnl_for_order(sym, int(order_id))
         quote_qty = fill * qty
         if abs(rpnl) < 1e-12:
             rpnl = self._estimate_close_pnl(pos_side, entry, fill, qty)
         else:
             rpnl = self._finalize_close_pnl(sym, pos_side, entry, fill, qty, rpnl, quote_qty)
         self.invalidate_positions_cache()
-        self.ensure_exchange_leverage(sym)
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         leg_row = {
             "symbol": sym,
@@ -1659,11 +1675,6 @@ class BinanceConnector:
             if fill <= 0:
                 fill = float(p.get("price_open") or 0)
             rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
-            if abs(rpnl) < 1e-12 and order_id:
-                import time as _wait
-
-                _wait.sleep(0.12)
-                rpnl, commission = self.realized_pnl_for_order(sym, int(order_id))
             quote_qty = fill * qty
             if abs(rpnl) < 1e-12:
                 rpnl = self._estimate_close_pnl(pos_side, entry, fill, qty)

@@ -435,13 +435,13 @@ export async function postBinanceClosePosition(
   if (positionSide) body.position_side = String(positionSide).toUpperCase();
   if (closePair) body.close_pair = true;
   if (volume != null) body.volume = volume;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await binanceFetch(
         b,
         '/api/close',
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
-        30000,
+        12000,
       );
       const text = await res.text();
       let j = {};
@@ -452,8 +452,8 @@ export async function postBinanceClosePosition(
       }
       let snippet = trimSnippet(text || (res.ok ? 'OK' : 'Empty body'));
       if (!res.ok) {
-        if (res.status === 429 && attempt < 2) {
-          await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+        if (res.status === 429 && attempt < 1) {
+          await new Promise((r) => setTimeout(r, 200));
           continue;
         }
         if (typeof j.detail === 'string') snippet = j.detail;
@@ -471,8 +471,8 @@ export async function postBinanceClosePosition(
         error: j.error ?? j.detail?.error,
       };
     } catch (e) {
-      if (attempt < 2) {
-        await new Promise((r) => setTimeout(r, 600));
+      if (attempt < 1) {
+        await new Promise((r) => setTimeout(r, 120));
         continue;
       }
       return { ok: false, status: 0, bodySnippet: trimSnippet(e instanceof Error ? e.message : String(e)), connected: false };

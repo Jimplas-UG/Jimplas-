@@ -979,7 +979,6 @@ def api_close(body: CloseBody):
             if not r.get("ok"):
                 err = r.get("error") or "close_failed"
                 raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
-        momentum_scanner.reconcile_from_exchange()
         connector.invalidate_positions_cache()
     finally:
         pair_gate.end_close(sym)
@@ -990,7 +989,16 @@ def api_close(body: CloseBody):
         latency_ms=float(r.get("latency_ms") or 0),
         source="manual",
     )
-    _flush_scanner_snapshot()
+
+    def _bg_after_manual_close() -> None:
+        try:
+            momentum_scanner.reconcile_from_exchange()
+            connector.invalidate_positions_cache()
+            _flush_scanner_snapshot()
+        except Exception as e:
+            log.warning("post-close reconcile: %s", e)
+
+    threading.Thread(target=_bg_after_manual_close, daemon=True, name="close-reconcile").start()
     return r
 
 
@@ -1004,9 +1012,17 @@ def api_close_all():
     r = connector.close_all_positions()
     if not r.get("ok"):
         raise HTTPException(status_code=400, detail=r)
-    momentum_scanner.reconcile_from_exchange()
-    connector.align_isolated_margin_open_symbols()
-    _flush_scanner_snapshot()
+
+    def _bg_after_close_all() -> None:
+        try:
+            momentum_scanner.reconcile_from_exchange()
+            connector.align_isolated_margin_open_symbols()
+            connector.invalidate_positions_cache()
+            _flush_scanner_snapshot()
+        except Exception as e:
+            log.warning("post-close-all reconcile: %s", e)
+
+    threading.Thread(target=_bg_after_close_all, daemon=True, name="close-all-reconcile").start()
     return r
 
 
