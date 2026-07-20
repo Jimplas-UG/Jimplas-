@@ -53,18 +53,24 @@ async function main() {
   // Keep an exact working copy of the shared file for inspection / re-runs.
   await fs.promises.writeFile(path.join(OUT, 'source-icon.png'), srcBuf);
 
-  // Store icon: inset so the golden ring clears OS squircle masks.
-  await (await framed(sharp, srcBuf, 1024, 0.82)).toFile(path.join(OUT, 'icon.png'));
-  // Android adaptive safe zone ~66% — keep entire emblem (ring included) inside.
-  await (await framed(sharp, srcBuf, 1024, 0.64)).toFile(path.join(OUT, 'adaptive-icon.png'));
-  // Native / opening splash — larger, still fully visible.
-  await (await framed(sharp, srcBuf, 1024, 0.88)).toFile(path.join(OUT, 'splash-icon.png'));
-  await (await framed(sharp, srcBuf, 48, 0.88)).toFile(path.join(OUT, 'favicon.png'));
+  // Android adaptive safe zone ~66% diameter — inset until full golden ring clears squircle.
+  const SCALES = {
+    icon: 0.66,
+    adaptive: 0.48,
+    splash: 0.76,
+    favicon: 0.76,
+    brand: 0.86,
+  };
+
+  await (await framed(sharp, srcBuf, 1024, SCALES.icon)).toFile(path.join(OUT, 'icon.png'));
+  await (await framed(sharp, srcBuf, 1024, SCALES.adaptive)).toFile(path.join(OUT, 'adaptive-icon.png'));
+  await (await framed(sharp, srcBuf, 1024, SCALES.splash)).toFile(path.join(OUT, 'splash-icon.png'));
+  await (await framed(sharp, srcBuf, 48, SCALES.favicon)).toFile(path.join(OUT, 'favicon.png'));
 
   const brandDir = path.join(OUT, 'brand');
   fs.mkdirSync(brandDir, { recursive: true });
   // In-app / opening splash mark — shared art, light pad only.
-  await (await framed(sharp, srcBuf, 512, 0.94)).toFile(path.join(brandDir, 'bs-app-logo.png'));
+  await (await framed(sharp, srcBuf, 512, SCALES.brand)).toFile(path.join(brandDir, 'bs-app-logo.png'));
 
   const kb = Math.round(fs.statSync(path.join(OUT, 'icon.png')).size / 1024);
   console.log('ICON_OK', OUT, `from=${path.basename(SRC)} icon=${kb}KB`);
