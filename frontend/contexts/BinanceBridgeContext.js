@@ -219,12 +219,10 @@ export function BinanceBridgeProvider({ children }) {
       }
       if (restored.hardFail) markConnected(false);
     };
-    // First keepalive quickly after optimistic connect.
-    const boot = setTimeout(tick, 1200);
-    const id = setInterval(tick, 30000);
+    void tick();
+    const id = setInterval(tick, 15000);
     return () => {
       cancelled = true;
-      clearTimeout(boot);
       clearInterval(id);
     };
   }, [hydrated, connected, baseUrl, markConnected]);

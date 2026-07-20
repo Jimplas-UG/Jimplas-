@@ -292,18 +292,20 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 log.warning("env session restore failed: %s", e)
 
-    await restore_persisted_session()
-    try:
-        snap = connector.status_snapshot(skip_ping=False)
-        if snap.get("connected"):
-            log.info("scanner ready for execution (Binance session active)")
-            _flush_scanner_snapshot()
-            # Recover position/order state after restart
-            pos = connector.positions()
-            orders = connector.open_orders()
-            log.info("startup recovery: %s open positions, %s open orders", len(pos), len(orders))
-    except Exception as e:
-        log.warning("scanner exec restore on startup skipped: %s", e)
+    async def startup_session_and_recovery() -> None:
+        await restore_persisted_session()
+        try:
+            snap = connector.status_snapshot(skip_ping=False)
+            if snap.get("connected"):
+                log.info("scanner ready for execution (Binance session active)")
+                _flush_scanner_snapshot()
+                pos = connector.positions()
+                orders = connector.open_orders()
+                log.info("startup recovery: %s open positions, %s open orders", len(pos), len(orders))
+        except Exception as e:
+            log.warning("scanner exec restore on startup skipped: %s", e)
+
+    asyncio.create_task(startup_session_and_recovery())
     log.info("Binance tick WebSocket stream started")
     yield
     await scanner_stream.stop()

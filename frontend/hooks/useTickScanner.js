@@ -4,6 +4,8 @@ import { fetchScannerSnapshot, subscribeScannerStream } from '../broker/binanceS
 
 const CACHE_KEY = '@bilshenz_v1/scannerSnapshotCache';
 const CACHE_TTL_MS = 90_000;
+const WS_STALE_MS = 5000;
+const REST_POLL_MS = 3000;
 
 function applyPayload(setters, payload) {
   if (!payload) return;
@@ -52,7 +54,7 @@ async function writeSnapshotCache(payload) {
 }
 
 /**
- * Live tick momentum scanner feed — WebSocket primary, REST bootstrap + reconnect fallback.
+ * Live tick momentum scanner feed — WebSocket primary, always-on REST fallback when WS stale.
  */
 export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, connected = false } = {}) {
   const [rows, setRows] = useState([]);
@@ -63,7 +65,8 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
   const [error, setError] = useState('');
   const [scannerMeta, setScannerMeta] = useState(null);
   const [lastTs, setLastTs] = useState(0);
-  const booted = useRef(false);
+  const lastWsAtRef = useRef(0);
+  const pollBusyRef = useRef(false);
 
   const apply = useCallback((payload) => {
     applyPayload(
@@ -76,10 +79,7 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
   const refresh = useCallback(async () => {
     if (!baseUrl?.trim()) return;
     const snap = await fetchScannerSnapshot(baseUrl, 5000);
-    if (snap.ok) {
-      booted.current = true;
-      apply(snap);
-    }
+    if (snap.ok) apply(snap);
   }, [baseUrl, apply]);
 
   useEffect(() => {
@@ -93,43 +93,45 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
     }
 
     let cancelled = false;
-    booted.current = false;
+    lastWsAtRef.current = 0;
+
+    const pollRest = async (force = false) => {
+      if (cancelled || pollBusyRef.current) return;
+      const wsFresh = lastWsAtRef.current > 0 && Date.now() - lastWsAtRef.current < WS_STALE_MS;
+      if (!force && wsFresh) return;
+      pollBusyRef.current = true;
+      try {
+        const snap = await fetchScannerSnapshot(baseUrl, 4000);
+        if (!cancelled && snap.ok) apply(snap);
+      } finally {
+        pollBusyRef.current = false;
+      }
+    };
 
     void (async () => {
       const cached = await readSnapshotCache();
-      if (!cancelled && cached?.rows?.length) {
-        apply(cached);
-        booted.current = true;
-      }
-      const snap = await fetchScannerSnapshot(baseUrl, 5000);
-      if (cancelled) return;
-      if (snap.ok) {
-        apply(snap);
-        booted.current = true;
-      } else if (!booted.current) {
-        setError(snap.error || 'Scanner unavailable');
-      }
+      if (!cancelled && cached?.rows?.length) apply(cached);
+      await pollRest(true);
     })();
 
     const unsub = subscribeScannerStream(
       baseUrl,
       (payload) => {
-        booted.current = true;
+        lastWsAtRef.current = Date.now();
         apply(payload);
       },
       {
-        onError: (msg) => {
-          if (!booted.current) setError(msg || 'Scanner WS error');
+        onOpen: () => {
+          lastWsAtRef.current = Date.now();
+        },
+        onError: () => {
+          lastWsAtRef.current = 0;
+          void pollRest(true);
         },
       },
     );
 
-    const poll = setInterval(() => {
-      if (booted.current) return;
-      void fetchScannerSnapshot(baseUrl, 4000).then((snap) => {
-        if (!cancelled && snap.ok) apply(snap);
-      });
-    }, 4000);
+    const poll = setInterval(() => void pollRest(false), REST_POLL_MS);
 
     return () => {
       cancelled = true;

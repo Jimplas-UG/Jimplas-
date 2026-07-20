@@ -369,43 +369,55 @@ export function useBinanceLiveFeed({
   useEffect(() => {
     if (!quotesActive || !pollTicks) return undefined;
     let cancelled = false;
-    let wsActive = false;
     let lastWsAt = 0;
     const tickSetters = { setBid, setAsk, setPrice, setSpreadPips, setResolvedSymbol };
+    const WS_STALE_MS = 5000;
+    const POLL_HEALTHY_MS = 10000;
+    const POLL_STALE_MS = 3000;
+
+    const fallbackPoll = async () => {
+      if (cancelled) return;
+      const wsFresh = lastWsAt > 0 && Date.now() - lastWsAt < WS_STALE_MS;
+      if (wsFresh) return;
+      const tk = await fetchBinanceTick(baseUrl, symRef.current);
+      if (!cancelled) applyTickState(tk, tickSetters);
+    };
 
     const stopWs = subscribeBinanceTickStream(
       baseUrl,
       symRef.current,
       (tk) => {
         if (cancelled) return;
-        wsActive = true;
         lastWsAt = Date.now();
         applyTickState(tk, tickSetters);
       },
       {
         onOpen: () => {
-          if (!cancelled) wsActive = true;
+          if (!cancelled) lastWsAt = Date.now();
         },
         onError: () => {
-          wsActive = false;
+          lastWsAt = 0;
+          void fallbackPoll();
+        },
+        onClose: () => {
+          lastWsAt = 0;
+          void fallbackPoll();
         },
       },
     );
 
-    const fallbackPoll = async () => {
-      if (cancelled) return;
-      if (wsActive && Date.now() - lastWsAt < 12000) return;
-      const tk = await fetchBinanceTick(baseUrl, symRef.current);
-      if (!cancelled) applyTickState(tk, tickSetters);
-    };
-
     void fallbackPoll();
-    const id = setInterval(fallbackPoll, 15000);
+    const id = setInterval(() => {
+      const stale = !lastWsAt || Date.now() - lastWsAt >= WS_STALE_MS;
+      if (stale) void fallbackPoll();
+    }, POLL_STALE_MS);
+    const slowId = setInterval(fallbackPoll, POLL_HEALTHY_MS);
 
     return () => {
       cancelled = true;
       stopWs();
       clearInterval(id);
+      clearInterval(slowId);
     };
   }, [quotesActive, pollTicks, baseUrl, reloadNonce]);
 

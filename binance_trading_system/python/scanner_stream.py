@@ -19,8 +19,8 @@ log = logging.getLogger("scanner_stream")
 
 MAINNET_WS = "wss://fstream.binance.com/ws"
 TESTNET_WS = "wss://stream.binancefuture.com/ws"
-RECONNECT_MIN_SEC = 1.0
-RECONNECT_MAX_SEC = 30.0
+RECONNECT_MIN_SEC = 0.05
+RECONNECT_MAX_SEC = 5.0
 # Offload on_tick so asyncio can answer Binance WS keepalive pings (prevents 1011 timeouts).
 _TICK_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="scanner-tick")
 

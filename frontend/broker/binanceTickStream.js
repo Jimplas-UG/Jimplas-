@@ -2,6 +2,7 @@
  * Binance bridge WebSocket tick stream — replaces REST polling when available.
  */
 import { getBridgeToken, getDeskApiKey } from '../lib/envConfig';
+import { resetWsBackoff, scheduleWsReconnect } from '../lib/wsReconnect';
 
 function wsBase(httpBase) {
   return String(httpBase || '')
@@ -26,17 +27,19 @@ export function binanceTickWsUrl(baseUrl, symbol) {
 
 /**
  * Subscribe to live ticks. Calls onTick on each message; returns cleanup function.
- * Falls back gracefully — caller should keep REST poll as backup until first WS tick.
+ * Reconnects immediately on drop, then fast capped backoff.
  */
-export function subscribeBinanceTickStream(baseUrl, symbol, onTick, { onError, onOpen } = {}) {
+export function subscribeBinanceTickStream(baseUrl, symbol, onTick, { onError, onOpen, onClose } = {}) {
   if (!baseUrl?.trim() || !symbol || typeof WebSocket === 'undefined') {
     return () => {};
   }
 
   let ws = null;
   let closed = false;
-  let reconnectTimer = null;
-  let backoffMs = 350;
+  const timerRef = { current: null };
+  const backoffRef = { current: 0 };
+
+  const isClosed = () => closed;
 
   const connect = () => {
     if (closed) return;
@@ -45,12 +48,12 @@ export function subscribeBinanceTickStream(baseUrl, symbol, onTick, { onError, o
       ws = new WebSocket(url);
     } catch (e) {
       onError?.(e instanceof Error ? e.message : String(e));
-      scheduleReconnect();
+      scheduleWsReconnect({ closed: isClosed, timerRef, backoffRef, connect, immediate: true });
       return;
     }
 
     ws.onopen = () => {
-      backoffMs = 350;
+      resetWsBackoff(backoffRef);
       onOpen?.();
     };
 
@@ -58,6 +61,7 @@ export function subscribeBinanceTickStream(baseUrl, symbol, onTick, { onError, o
       try {
         const tk = JSON.parse(String(ev.data ?? ''));
         if (tk && Number.isFinite(tk.bid) && Number.isFinite(tk.ask)) {
+          resetWsBackoff(backoffRef);
           onTick(tk);
         }
       } catch {
@@ -72,26 +76,20 @@ export function subscribeBinanceTickStream(baseUrl, symbol, onTick, { onError, o
     ws.onclose = () => {
       ws = null;
       onError?.('WebSocket closed');
-      if (!closed) scheduleReconnect();
+      onClose?.();
+      if (!closed) {
+        scheduleWsReconnect({ closed: isClosed, timerRef, backoffRef, connect, immediate: true });
+      }
     };
-  };
-
-  const scheduleReconnect = () => {
-    if (closed || reconnectTimer) return;
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null;
-      backoffMs = Math.min(30000, Math.round(backoffMs * 1.6));
-      connect();
-    }, backoffMs);
   };
 
   connect();
 
   return () => {
     closed = true;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
     }
     try {
       ws?.close();

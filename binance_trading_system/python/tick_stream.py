@@ -20,8 +20,8 @@ log = logging.getLogger("tick_stream")
 MAINNET_WS = "wss://fstream.binance.com/ws"
 TESTNET_WS = "wss://stream.binancefuture.com/ws"
 MAX_TICK_AGE_SEC = 120.0
-RECONNECT_MIN_SEC = 1.0
-RECONNECT_MAX_SEC = 30.0
+RECONNECT_MIN_SEC = 0.05
+RECONNECT_MAX_SEC = 5.0
 
 
 def _parse_book_ticker(msg: dict[str, Any]) -> dict[str, Any] | None:

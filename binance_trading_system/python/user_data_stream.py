@@ -17,8 +17,8 @@ log = logging.getLogger("user_data_stream")
 
 MAINNET_WS = "wss://fstream.binance.com/ws"
 TESTNET_WS = "wss://stream.binancefuture.com/ws"
-RECONNECT_MIN_SEC = 1.0
-RECONNECT_MAX_SEC = 20.0
+RECONNECT_MIN_SEC = 0.05
+RECONNECT_MAX_SEC = 5.0
 
 
 class BinanceUserDataStream:
@@ -152,7 +152,7 @@ class BinanceUserDataStream:
             listen_key = await self._create_listen_key()
             if not listen_key:
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 1.5, RECONNECT_MAX_SEC)
+                backoff = min(RECONNECT_MAX_SEC, max(RECONNECT_MIN_SEC, backoff * 1.4))
                 continue
             self._listen_key = listen_key
             base = TESTNET_WS if self._get_testnet() else MAINNET_WS
@@ -185,6 +185,6 @@ class BinanceUserDataStream:
             if not self._running:
                 break
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 1.5, RECONNECT_MAX_SEC)
+            backoff = min(RECONNECT_MAX_SEC, max(RECONNECT_MIN_SEC, backoff * 1.4))
         if keepalive_task:
             keepalive_task.cancel()
