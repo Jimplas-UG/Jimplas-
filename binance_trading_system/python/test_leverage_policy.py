@@ -58,10 +58,21 @@ def test_sizing_differs_for_longs() -> None:
     print("OK sizing leverage primary 5x / recovery 10x")
 
 
+def test_policy_display_long_first() -> None:
+    from leverage_policy import policy_display_leverage
+
+    assert policy_display_leverage(side="BUY", position_side="LONG") == 5
+    assert policy_display_leverage(side="SELL", position_side="SHORT") == 10
+    assert policy_display_leverage(side="BUY") == 5
+    assert policy_display_leverage(side="SELL") == 10
+    print("OK display leverage long 5x / short 10x")
+
+
 if __name__ == "__main__":
     test_constants()
     test_required_per_leg()
     test_apply_overrides_wrong_request()
     test_exchange_leverage_always_5()
     test_sizing_differs_for_longs()
+    test_policy_display_long_first()
     print("test_leverage_policy: ALL OK")

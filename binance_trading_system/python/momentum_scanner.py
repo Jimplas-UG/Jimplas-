@@ -37,7 +37,7 @@ LONG_TP_PCT = float(os.environ.get("SCANNER_LONG_TP_PCT", "2.5"))
 LONG_BOTH_PULLBACK_PCT = float(os.environ.get("SCANNER_LONG_PULLBACK_PCT", "0.5"))
 LONG_ENTRY_DELAY_MS = int(os.environ.get("SCANNER_LONG_DELAY_MS", "3000"))
 SMART_EXIT_NET_PCT = float(os.environ.get("SCANNER_SMART_EXIT_PCT", "1.0"))
-# Leverage fixed in leverage_policy.py — SHORT 5x, LONG1/LONG2 10x only.
+# Leverage fixed in leverage_policy.py — primary Long 5x, Short1/Short2 10x sizing.
 DEFAULT_PARTITION_USD = float(os.environ.get("SCANNER_PARTITION_USD", os.environ.get("SCANNER_RISK_USDT", "100")))
 SHORT_PARTITION_PCT = float(os.environ.get("SCANNER_SHORT_PARTITION_PCT", "50"))
 LONG1_PARTITION_PCT = float(os.environ.get("SCANNER_LONG1_PARTITION_PCT", "40"))

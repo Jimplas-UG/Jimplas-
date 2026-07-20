@@ -44,10 +44,10 @@ def exchange_leverage(leg: str = "") -> int:
 
 
 def policy_display_leverage(*, side: str, position_side: str = "") -> int:
-    """UI/policy leverage per open leg (short 5x, hedge longs 10x effective)."""
+    """UI/policy leverage: primary long 5x, recovery shorts 10x effective."""
     ps = (position_side or "").upper()
     side_u = side.upper()
-    if ps == "LONG" or (side_u == "BUY" and ps != "SHORT"):
+    if ps == "SHORT" or side_u == "SELL":
         return LONG1_LEVERAGE
     return SHORT_LEVERAGE
 
