@@ -295,7 +295,7 @@ async def lifespan(app: FastAPI):
     async def startup_session_and_recovery() -> None:
         await restore_persisted_session()
         try:
-            snap = connector.status_snapshot(skip_ping=False)
+            snap = connector.status_snapshot(skip_ping=True, light=True)
             if snap.get("connected"):
                 log.info("scanner ready for execution (Binance session active)")
                 _flush_scanner_snapshot()
@@ -453,12 +453,7 @@ def health():
     except Exception:
         pass
     latency_ms = None
-    try:
-        t0 = time.perf_counter()
-        connector.ping()
-        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-    except Exception:
-        pass
+    # Never ping Binance on /health — used for fast URL discovery; latency lives in /api/diagnostics.
     return {
         "ok": True,
         "service": "bilshenz-binance-bridge",
@@ -615,7 +610,7 @@ def _attempt_binance_login(api_key: str, api_secret: str, testnet: bool) -> tupl
     connector.cfg.paper = False
     connector.configure(api_key, api_secret, testnet)
     try:
-        acct = connector.account_info()
+        acct = connector.account_info_light()
         connector._connected = acct is not None
         if acct is not None:
             momentum_scanner.invalidate_session_cache()
@@ -638,7 +633,7 @@ def _attempt_binance_login(api_key: str, api_secret: str, testnet: bool) -> tupl
 
 
 @app.post("/api/login")
-def api_login(body: LoginBody):
+async def api_login(body: LoginBody):
     """Fast login — time sync + account verify; alt env in one request when enabled."""
     t0 = time.perf_counter()
     resolved_testnet = bool(body.testnet)
@@ -649,10 +644,14 @@ def api_login(body: LoginBody):
         resolved_testnet,
         body.auto_detect_env,
     )
-    acct, err = _attempt_binance_login(body.api_key, body.api_secret, resolved_testnet)
+    acct, err = await asyncio.to_thread(
+        _attempt_binance_login, body.api_key, body.api_secret, resolved_testnet
+    )
 
     if acct is None and body.auto_detect_env and _is_key_env_mismatch(err or ""):
-        alt_acct, alt_err = _attempt_binance_login(body.api_key, body.api_secret, not resolved_testnet)
+        alt_acct, alt_err = await asyncio.to_thread(
+            _attempt_binance_login, body.api_key, body.api_secret, not resolved_testnet
+        )
         if alt_acct is not None:
             acct = alt_acct
             resolved_testnet = not resolved_testnet
@@ -667,7 +666,11 @@ def api_login(body: LoginBody):
         )
 
     threading.Thread(target=connector.warm_order_cache, daemon=True).start()
-    save_binance_session(body.api_key, body.api_secret, resolved_testnet)
+    threading.Thread(
+        target=save_binance_session,
+        args=(body.api_key, body.api_secret, resolved_testnet),
+        daemon=True,
+    ).start()
 
     def _post_login_seed() -> None:
         try:
@@ -771,7 +774,7 @@ def api_validate_symbol(symbol: str):
 
 @app.get("/api/status")
 def api_status():
-    snap = connector.status_snapshot(skip_ping=connector._connected)
+    snap = connector.status_snapshot(skip_ping=connector._connected, light=connector._connected)
     st = momentum_scanner.status()
     return {
         **snap,

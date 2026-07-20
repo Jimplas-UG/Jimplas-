@@ -67,7 +67,7 @@ export async function apiRegister(payload) {
 }
 
 export async function apiLoginEmail(email, password) {
-  return authFetch('/v1/auth/login', { method: 'POST', body: { email, password } });
+  return authFetch('/v1/auth/login', { method: 'POST', body: { email, password }, timeoutMs: 12000 });
 }
 
 export async function apiSendPhoneOtp(phone) {
@@ -90,7 +90,7 @@ export async function apiOAuthApple(idToken) {
   return authFetch('/v1/auth/oauth/apple', { method: 'POST', body: { idToken } });
 }
 
-export async function apiRefresh(refreshToken, timeoutMs = 20000) {
+export async function apiRefresh(refreshToken, timeoutMs = 10000) {
   return authFetch('/v1/auth/refresh', { method: 'POST', body: { refreshToken }, timeoutMs });
 }
 

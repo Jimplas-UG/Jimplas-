@@ -782,7 +782,30 @@ class BinanceConnector:
             log.warning("symbol_leverage: %s", e)
         return int(self.cfg.leverage)
 
-    def status_snapshot(self, *, skip_ping: bool = False) -> dict[str, Any]:
+    def account_info_light(self) -> dict[str, Any] | None:
+        """Single Binance account call — for login/status hot paths."""
+        if self.cfg.paper:
+            return self.account_info()
+        data = self._request("GET", "/fapi/v2/account", signed=True)
+        total = float(data.get("totalWalletBalance", 0))
+        upnl = float(data.get("totalUnrealizedProfit", 0))
+        margin = float(data.get("totalPositionInitialMargin", 0))
+        free = float(data.get("availableBalance", 0))
+        return {
+            "login": self.cfg.api_key[:8] + "…",
+            "server": "testnet" if self.cfg.testnet else "mainnet",
+            "balance": total,
+            "equity": total + upnl,
+            "margin": margin,
+            "margin_free": free,
+            "profit": upnl,
+            "currency": "USDT",
+            "trade_allowed": True,
+            "leverage": int(self.cfg.leverage),
+            "margin_type": self.cfg.margin_type,
+        }
+
+    def status_snapshot(self, *, skip_ping: bool = False, light: bool = False) -> dict[str, Any]:
         if self.cfg.paper:
             return {
                 "connected": True,
@@ -801,7 +824,7 @@ class BinanceConnector:
                     "testnet": self.cfg.testnet,
                     "error": f"Cannot reach Binance {env} — check network or VPN",
                 }
-            acct = self.account_info()
+            acct = self.account_info_light() if light else self.account_info()
             self._connected = acct is not None
             return {
                 "connected": self._connected,

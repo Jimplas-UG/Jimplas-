@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, Text, TextInput, View } from 'react-native';
 import { useAuth } from '../../contexts/AuthContext';
 import { useBilshenzTheme } from '../../contexts/ThemeContext';
-import { apiSendPhoneOtp, friendlyAuthError } from '../../lib/authApi';
+import { apiSendPhoneOtp, apiSendEmailOtp, friendlyAuthError } from '../../lib/authApi';
 import { createAuthStyles } from '../../theme/authStyles';
 import AuthShell from '../../components/auth/AuthShell';
 import PasswordField from '../../components/auth/PasswordField';

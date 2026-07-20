@@ -10,6 +10,7 @@ export const STORAGE_AUTH_REFRESH = '@bilshenz_v1/authRefreshToken';
 export const STORAGE_AUTH_USER = '@bilshenz_v1/authUser';
 export const STORAGE_AUTH_LOGGED_IN = '@bilshenz_v1/authLoggedIn';
 export const STORAGE_AUTH_BIOMETRIC = '@bilshenz_v1/authBiometricEnabled';
+export const STORAGE_AUTH_EXPIRES_AT = '@bilshenz_v1/authExpiresAt';
 export const SECURE_REFRESH_KEY = 'bilshenz.auth.refreshToken';
 
 function canUseSecureStore() {
@@ -17,12 +18,17 @@ function canUseSecureStore() {
 }
 
 export async function saveAuthSession({ accessToken, refreshToken, user, expiresIn }) {
+  const expiresAt =
+    expiresIn && Number.isFinite(expiresIn)
+      ? String(Date.now() + Number(expiresIn) * 1000)
+      : '';
   await AsyncStorage.multiSet([
     [STORAGE_AUTH_ACCESS, accessToken || ''],
     [STORAGE_AUTH_USER, JSON.stringify(user || null)],
     [STORAGE_AUTH_BIOMETRIC, await AsyncStorage.getItem(STORAGE_AUTH_BIOMETRIC).then((v) => v || '0')],
     [STORAGE_AUTH_REFRESH, refreshToken || ''],
     [STORAGE_AUTH_LOGGED_IN, accessToken && user ? '1' : '0'],
+    [STORAGE_AUTH_EXPIRES_AT, expiresAt],
   ]);
   if (canUseSecureStore() && refreshToken) {
     await SecureStore.setItemAsync(SECURE_REFRESH_KEY, refreshToken);
@@ -35,6 +41,7 @@ export async function loadAuthSession() {
     STORAGE_AUTH_USER,
     STORAGE_AUTH_REFRESH,
     STORAGE_AUTH_LOGGED_IN,
+    STORAGE_AUTH_EXPIRES_AT,
   ]);
   const m = Object.fromEntries(pairs);
   let refreshToken = '';
@@ -52,11 +59,15 @@ export async function loadAuthSession() {
   } catch {
     user = null;
   }
+  const expiresAt = Number(m[STORAGE_AUTH_EXPIRES_AT] || 0);
+  const expiresInSec =
+    expiresAt > Date.now() ? Math.max(60, Math.floor((expiresAt - Date.now()) / 1000)) : 0;
   return {
     accessToken: m[STORAGE_AUTH_ACCESS] || '',
     refreshToken,
     user,
     loggedIn: m[STORAGE_AUTH_LOGGED_IN] === '1',
+    expiresInSec,
   };
 }
 
@@ -66,6 +77,7 @@ export async function clearAuthSession() {
     STORAGE_AUTH_REFRESH,
     STORAGE_AUTH_USER,
     STORAGE_AUTH_LOGGED_IN,
+    STORAGE_AUTH_EXPIRES_AT,
   ]);
   if (canUseSecureStore()) {
     try {

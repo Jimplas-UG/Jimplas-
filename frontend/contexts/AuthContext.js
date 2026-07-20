@@ -323,7 +323,7 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     let cancelled = false;
 
-    const hydrateLocal = async () => {
+    const bootstrap = async () => {
       try {
         const [{ hw, enrolled }, bioOn, stored] = await Promise.all([
           probeBiometricHardware(),
@@ -341,35 +341,33 @@ export function AuthProvider({ children }) {
             setSessionPinned(true);
           }
         }
+
+        if (stored.refreshToken) {
+          const needsRefresh =
+            !stored.accessToken ||
+            !stored.expiresInSec ||
+            stored.expiresInSec < 120;
+          if (needsRefresh) {
+            const refreshed = await tryRefreshToken(stored.refreshToken, 8000);
+            if (!cancelled && refreshed.ok) {
+              const again = await loadAuthSession();
+              scheduleRefresh(again.expiresInSec || 14 * 60);
+            }
+          } else {
+            scheduleRefresh(stored.expiresInSec);
+          }
+        } else if (stored.accessToken && stored.user) {
+          const me = await apiMe(stored.accessToken, 4000);
+          if (!cancelled && me.ok) setUser(me.data.user);
+        }
       } catch {
-        /* ignore */
+        /* keep pinned local session */
       } finally {
         if (!cancelled) setHydrated(true);
       }
     };
 
-    const restoreRemote = async () => {
-      try {
-        const stored = await loadAuthSession();
-        if (cancelled) return;
-
-        if (stored.refreshToken) {
-          const refreshed = await tryRefreshToken(stored.refreshToken, 12000);
-          if (!cancelled && refreshed.ok) scheduleRefresh();
-          return;
-        }
-
-        if (stored.accessToken && stored.user) {
-          const me = await apiMe(stored.accessToken, 5000);
-          if (!cancelled && me.ok) setUser(me.data.user);
-        }
-      } catch {
-        /* keep pinned local session */
-      }
-    };
-
-    void hydrateLocal();
-    void restoreRemote();
+    void bootstrap();
 
     return () => {
       cancelled = true;
@@ -379,10 +377,13 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active' && sessionPinned && refreshToken) {
-        void tryRefreshToken(refreshToken, 8000);
-      } else if (state === 'active' && accessToken) {
+      if (state !== 'active' || !sessionPinned) return;
+      if (accessToken) {
         void refreshProfile();
+        return;
+      }
+      if (refreshToken) {
+        void tryRefreshToken(refreshToken, 8000);
       }
     });
     return () => sub.remove();

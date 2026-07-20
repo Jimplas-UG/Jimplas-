@@ -355,6 +355,14 @@ export async function refreshSession(refreshToken: string): Promise<{ user: Publ
   }
   const user = findUserById(claims.sub);
   if (!user) throw new AuthError('User not found', 404);
+  const issuedMs = new Date(stored.createdAt).getTime();
+  if (Date.now() - issuedMs < 3 * 60 * 1000) {
+    const accessToken = await signAccessToken(user.id, user.email);
+    return {
+      user: toPublicUser(user),
+      tokens: { accessToken, refreshToken, expiresIn: accessTtlSec() },
+    };
+  }
   revokeRefreshToken(stored.id);
   const tokens = await issueTokens(user);
   return { user: toPublicUser(user), tokens };

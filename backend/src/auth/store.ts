@@ -12,19 +12,30 @@ const EMAIL_TOKENS_FILE = path.join(DATA_DIR, 'email_tokens.json');
 
 type DbShape<T> = { items: T[] };
 
+const fileCache = new Map<string, { mtimeMs: number; data: DbShape<unknown> }>();
+
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-function readDb<T>(file: string): DbShape<T> {
+function readDbCached<T>(file: string): DbShape<T> {
   ensureDataDir();
   if (!fs.existsSync(file)) return { items: [] };
   try {
+    const mtimeMs = fs.statSync(file).mtimeMs;
+    const hit = fileCache.get(file);
+    if (hit && hit.mtimeMs === mtimeMs) return hit.data as DbShape<T>;
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return Array.isArray(raw?.items) ? raw : { items: [] };
+    const data: DbShape<T> = Array.isArray(raw?.items) ? raw : { items: [] };
+    fileCache.set(file, { mtimeMs, data: data as DbShape<unknown> });
+    return data;
   } catch {
     return { items: [] };
   }
+}
+
+function readDb<T>(file: string): DbShape<T> {
+  return readDbCached<T>(file);
 }
 
 function writeDb<T>(file: string, data: DbShape<T>) {
@@ -32,6 +43,11 @@ function writeDb<T>(file: string, data: DbShape<T>) {
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
   fs.renameSync(tmp, file);
+  try {
+    fileCache.set(file, { mtimeMs: fs.statSync(file).mtimeMs, data: data as DbShape<unknown> });
+  } catch {
+    fileCache.delete(file);
+  }
 }
 
 export function listUsers(): UserRecord[] {

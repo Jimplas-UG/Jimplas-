@@ -193,7 +193,7 @@ export async function connectBinanceBridge({
 
     // One retry on transient abort/timeout (common on mobile networks).
     if (!attempt.ok && isTransientBridgeError(attempt.detail)) {
-      await new Promise((r) => setTimeout(r, 800));
+      await new Promise((r) => setTimeout(r, 200));
       attempt = await loginOnce(url, key, secret, testnet, loginTimeout, autoDetectEnv);
     }
 
