@@ -4,12 +4,12 @@ import { useBilshenzTheme } from '../../contexts/ThemeContext';
 import { PilotCard, PilotSectionTitle } from '../pilot/PilotUI';
 import ScannerEngineVisual from './ScannerEngineVisual';
 import { radius, spacing } from '../../theme/designTokens';
-import { isExecutionQueueStatus } from '../../lib/scannerExecution';
+import { isExecutionQueueStatus, isActiveTradeStatus, formatScannerStatus } from '../../lib/scannerExecution';
 
 function statusColor(status, C) {
   if (status === 'Pending') return C.accentLight;
   if (status === 'Watching') return C.amber;
-  if (status === 'Short' || status === 'Long1' || status === 'Long2') return C.teal;
+  if (isActiveTradeStatus(status)) return C.teal;
   return C.dim2;
 }
 
@@ -17,7 +17,7 @@ function rowPriority(row) {
   const status = row?.status || '';
   if (status === 'Pending') return 0;
   if (status === 'Watching') return 1;
-  if (status === 'Short' || status === 'Long1' || status === 'Long2') return 2;
+  if (isActiveTradeStatus(status)) return 2;
   return 3;
 }
 
@@ -195,7 +195,7 @@ function MarketTableRow({ row, C }) {
           textAlign: 'right',
         }}
         numberOfLines={1}>
-        {isExecutionQueueStatus(row.status) ? row.status : row.status === 'Scanning' ? '—' : row.status || '—'}
+        {isExecutionQueueStatus(row.status) ? row.status : row.status === 'Scanning' ? '—' : formatScannerStatus(row.status) || '—'}
       </Text>
       <Text
         style={{

@@ -61,9 +61,9 @@ MAGIC_LONG2 = 88003
 STATUS_SCANNING = "Scanning"
 STATUS_WATCHING = "Watching"
 STATUS_PENDING = "Pending"
-STATUS_SHORT = "Short"
-STATUS_LONG1 = "Long 1"
-STATUS_LONG2 = "Long 2"
+STATUS_SHORT = "Short 1"
+STATUS_LONG1 = "Long"
+STATUS_LONG2 = "Short 2"
 STATUS_CLOSED = "Closed"
 
 
@@ -861,13 +861,13 @@ class MomentumScanner:
                 continue
             legs = []
             if coin.short:
-                legs.append({"leg": "SHORT", "side": "SELL", "entry": coin.short.entry, "qty": coin.short.qty})
+                legs.append({"leg": "Short 1", "side": "SELL", "entry": coin.short.entry, "qty": coin.short.qty})
             if coin.long1:
-                legs.append({"leg": "LONG1", "side": "BUY", "entry": coin.long1.entry, "qty": coin.long1.qty})
+                legs.append({"leg": "Long", "side": "BUY", "entry": coin.long1.entry, "qty": coin.long1.qty})
             if coin.long2:
                 legs.append(
                     {
-                        "leg": "LONG2",
+                        "leg": "Short 2",
                         "side": coin.long2.side,
                         "entry": coin.long2.entry,
                         "qty": coin.long2.qty,

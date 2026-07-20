@@ -7,6 +7,7 @@ import {
   GAIN_THRESHOLD_PCT,
   RETRACE_ENTRY_PCT,
   executionStatusHint,
+  formatScannerStatus,
   pickExecutionCandidates,
 } from '../../lib/scannerExecution';
 import { spacing, radius } from '../../theme/designTokens';
@@ -105,7 +106,8 @@ export default function ScannerExecutionPanel({ rows, scannerMeta, ready, execut
     <PilotCard style={{ marginBottom: spacing.md, padding: spacing.md }}>
       <PilotSectionTitle title="Execution queue" />
       <Text style={{ color: C.dim, fontSize: 11, lineHeight: 16, marginBottom: spacing.sm }}>
-        Short when a symbol gains ≥{GAIN_THRESHOLD_PCT}% (1m–15m), then retraces {RETRACE_ENTRY_PCT}% from the peak.
+        Long when a symbol gains ≥{GAIN_THRESHOLD_PCT}% (1m–15m), then retraces {RETRACE_ENTRY_PCT}% from the peak.
+        Recovery shorts open at −2% and −4% against the long entry.
       </Text>
 
       {!ready ? (
@@ -202,8 +204,8 @@ export function ScannerQuoteStrip({ candidate }) {
         <Text style={{ color: C.accentLight, fontSize: 10, fontWeight: '800' }}>{label}</Text>
       </View>
       <Text style={{ color: C.text, fontSize: 22, fontWeight: '800', marginTop: 8 }}>{fmtPx(price)}</Text>
-      <Text style={{ color: C.dim, fontSize: 10, marginTop: 4 }}>
-        {candidate.status} · {fmtPct(candidate.pctGain)} on {candidate.timeframe || 'tick'}
+        <Text style={{ color: C.dim, fontSize: 10, marginTop: 4 }}>
+        {formatScannerStatus(candidate.status)} · {fmtPct(candidate.pctGain)} on {candidate.timeframe || 'tick'}
       </Text>
     </View>
   );
