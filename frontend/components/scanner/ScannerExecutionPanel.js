@@ -101,6 +101,10 @@ export default function ScannerExecutionPanel({ rows, scannerMeta, ready, execut
   const { colors: C } = useBilshenzTheme();
 
   const candidates = useMemo(() => pickExecutionCandidates(rows), [rows]);
+  const visibleEvents = useMemo(
+    () => (executionEvents || []).filter((e) => e.stage !== 'duplicate' && e.stage !== 'in_flight').slice(0, 6),
+    [executionEvents],
+  );
 
   return (
     <PilotCard style={{ marginBottom: spacing.md, padding: spacing.md }}>
@@ -135,12 +139,12 @@ export default function ScannerExecutionPanel({ rows, scannerMeta, ready, execut
         </View>
       )}
 
-      {executionEvents?.length ? (
+      {visibleEvents.length ? (
         <View style={{ marginTop: spacing.md }}>
           <Text style={{ color: C.dim, fontSize: 10, fontWeight: '800', letterSpacing: 0.6, marginBottom: 8 }}>
             EXECUTION LOG
           </Text>
-          {executionEvents.slice(0, 6).map((evt) => (
+          {visibleEvents.map((evt) => (
             <View
               key={`${evt.ts}-${evt.symbol}-${evt.stage}-${evt.client_order_id || ''}`}
               style={{

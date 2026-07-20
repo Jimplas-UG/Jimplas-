@@ -133,6 +133,9 @@ class CoinStrategy:
     unrealized_pnl: float = 0.0
     last_update_ms: int = 0
     entry_signal_key: str = ""
+    submitted_entry_signal_id: str = ""
+    submitted_short1_signal_id: str = ""
+    submitted_short2_signal_id: str = ""
     _history: deque[PricePoint] = field(default_factory=lambda: deque(maxlen=2500))
 
     def active(self) -> bool:
@@ -469,6 +472,47 @@ class MomentumScanner:
         self._emit_signal(coin, "short1_entered")
         log.info("scanner adopted exchange SHORT %s qty=%s @ %s", sym, qty, fill)
         return True
+
+    def _recover_primary_long_entry(
+        self,
+        coin: CoinStrategy,
+        symbol: str,
+        fallback_qty: float,
+        fallback_entry: float,
+        tp: float,
+    ) -> bool:
+        """After fill/duplicate/in_flight — sync scanner state from exchange; never re-send."""
+        sym = symbol.upper()
+        try:
+            self._connector.invalidate_positions_cache()
+        except Exception:
+            pass
+        if self._adopt_exchange_long1(coin, sym, fallback_qty, fallback_entry, tp):
+            coin.submitted_entry_signal_id = coin.submitted_entry_signal_id or f"{sym}_LONG_{coin.entry_signal_key}"
+            return True
+        if self._exchange_has_long(sym):
+            return self._adopt_exchange_long1(coin, sym, fallback_qty, fallback_entry, tp)
+        return False
+
+    def _recover_short1_entry(
+        self,
+        coin: CoinStrategy,
+        symbol: str,
+        fallback_qty: float,
+        fallback_entry: float,
+        tp: float,
+    ) -> bool:
+        sym = symbol.upper()
+        try:
+            self._connector.invalidate_positions_cache()
+        except Exception:
+            pass
+        if self._adopt_exchange_short(coin, sym, fallback_qty, fallback_entry, tp):
+            coin.submitted_short1_signal_id = coin.submitted_short1_signal_id or f"{sym}_SHORT1_{coin.entry_signal_key}"
+            return True
+        if self._exchange_has_short(sym):
+            return self._adopt_exchange_short(coin, sym, fallback_qty, fallback_entry, tp)
+        return False
 
     def set_exec_enabled(self, enabled: bool) -> None:
         """App emergency stop / resume — blocks new entries; closes still allowed."""
@@ -821,6 +865,9 @@ class MomentumScanner:
         coin.highest_price = None
         coin.qualifying_pct = 0.0
         coin.entry_signal_key = ""
+        coin.submitted_entry_signal_id = ""
+        coin.submitted_short1_signal_id = ""
+        coin.submitted_short2_signal_id = ""
         coin.unrealized_pnl = 0.0
         coin.retrace_pct = 0.0
 
@@ -1310,12 +1357,19 @@ class MomentumScanner:
         return qty
 
     def _execute_pending_long1(self, coin: CoinStrategy) -> None:
-        """Fire Long1 to Binance immediately when 15m-qualified retrace triggers."""
+        """Fire primary long once per entry signal — never re-send on every tick."""
         sym = coin.symbol
         if not self._entry_signal_ok(coin):
             return
         ok, _ = self._order_session_ok()
         if not ok or sym in self._in_flight or coin.long1:
+            return
+        signal_id = f"{sym}_LONG_{coin.entry_signal_key or coin.last_update_ms}"
+        if coin.submitted_entry_signal_id == signal_id:
+            entry = coin.price
+            qty = self._qty_for(sym, entry, SHORT_LEVERAGE, self._short_pct)
+            tp = entry * (1.0 + LONG_TP_PCT / 100.0)
+            self._recover_primary_long_entry(coin, sym, qty, entry, tp)
             return
         if self._one_at_a_time and self._has_open_strategy() and self._global_active_symbol() != sym:
             self._maybe_execute_best_pending()
@@ -1344,10 +1398,15 @@ class MomentumScanner:
                 log.warning("scanner LONG1 blocked %s: %s", sym, hedge_err)
                 return
         self._in_flight.add(sym)
+        signal_id = f"{sym}_LONG_{coin.entry_signal_key or coin.last_update_ms}"
         try:
             entry = coin.price
             qty = self._qty_for(sym, entry, SHORT_LEVERAGE, self._short_pct)
             tp = entry * (1.0 + LONG_TP_PCT / 100.0)
+            if coin.submitted_entry_signal_id == signal_id:
+                self._recover_primary_long_entry(coin, sym, qty, entry, tp)
+                return
+            coin.submitted_entry_signal_id = signal_id
             signal = ExecutionSignal(
                 symbol=sym,
                 side="BUY",
@@ -1357,7 +1416,7 @@ class MomentumScanner:
                 magic=MAGIC_LONG1,
                 leg="LONG1",
                 tp=tp,
-                signal_id=f"{sym}_LONG_{coin.entry_signal_key or coin.last_update_ms}",
+                signal_id=signal_id,
                 signal_ts_ms=int(time.time() * 1000),
                 partition_usd=self._partition_usd,
                 partition_pct=self._short_pct,
@@ -1380,14 +1439,15 @@ class MomentumScanner:
                 self._last_exec_error = None
                 self._emit_signal(coin, "entered")
                 log.info("scanner LONG %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
-            elif "duplicate" in str(r.error or "").lower():
-                if not self._adopt_exchange_long1(coin, sym, qty, entry, tp):
-                    self._last_exec_error = f"{sym}: duplicate_order_no_position"
-                    coin.status = STATUS_PENDING
+            elif r.stage in ("duplicate", "in_flight") or "duplicate" in str(r.error or "").lower():
+                if not self._recover_primary_long_entry(coin, sym, qty, entry, tp):
+                    self._last_exec_error = None
+                    log.info("scanner %s entry already submitted (%s) — skipping re-send", sym, r.stage or r.error)
             else:
+                coin.submitted_entry_signal_id = ""
                 err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym}: {err}"
-                log.warning("scanner LONG1 failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
+                log.warning("scanner LONG failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
                 coin.status = STATUS_PENDING
         finally:
             self._in_flight.discard(sym)
@@ -1401,10 +1461,17 @@ class MomentumScanner:
         if pair_gate.is_close_pending(sym):
             return
         self._in_flight.add(sym)
+        signal_id = f"{sym}_SHORT1_{coin.entry_signal_key or coin.last_update_ms}"
         try:
             entry = coin.price
             qty = self._qty_for(sym, entry, LONG1_LEVERAGE, self._long1_pct)
             tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
+            if coin.submitted_short1_signal_id == signal_id:
+                if coin.short:
+                    return
+                self._recover_short1_entry(coin, sym, qty, entry, tp)
+                return
+            coin.submitted_short1_signal_id = signal_id
             signal = ExecutionSignal(
                 symbol=sym,
                 side="SELL",
@@ -1414,7 +1481,7 @@ class MomentumScanner:
                 magic=MAGIC_SHORT,
                 leg="LONG1",
                 tp=tp,
-                signal_id=f"{sym}_SHORT1_{coin.entry_signal_key or coin.last_update_ms}",
+                signal_id=signal_id,
                 signal_ts_ms=int(time.time() * 1000),
                 partition_usd=self._partition_usd,
                 partition_pct=self._long1_pct,
@@ -1435,10 +1502,11 @@ class MomentumScanner:
                 self._last_exec_error = None
                 self._emit_signal(coin, "short1_entered")
                 log.info("scanner SHORT1 %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
-            elif "duplicate" in str(r.error or "").lower():
-                if not self._adopt_exchange_short(coin, sym, qty, entry, tp):
-                    self._last_exec_error = f"{sym}: duplicate_short1_no_position"
+            elif r.stage in ("duplicate", "in_flight") or "duplicate" in str(r.error or "").lower():
+                if not self._recover_short1_entry(coin, sym, qty, entry, tp):
+                    log.info("scanner %s short1 already submitted (%s) — skipping re-send", sym, r.stage or r.error)
             else:
+                coin.submitted_short1_signal_id = ""
                 err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym} SHORT1: {err}"
                 log.warning("scanner SHORT1 failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
@@ -1454,10 +1522,14 @@ class MomentumScanner:
         if pair_gate.is_close_pending(sym):
             return
         self._in_flight.add(sym)
+        signal_id = f"{sym}_SHORT2_{coin.entry_signal_key or coin.last_update_ms}"
         try:
             entry = coin.price
             qty = self._qty_for(sym, entry, LONG2_LEVERAGE, self._long2_pct)
             tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
+            if coin.submitted_short2_signal_id == signal_id:
+                return
+            coin.submitted_short2_signal_id = signal_id
             signal = ExecutionSignal(
                 symbol=sym,
                 side="SELL",
@@ -1467,7 +1539,7 @@ class MomentumScanner:
                 magic=MAGIC_LONG2,
                 leg="LONG2",
                 tp=tp,
-                signal_id=f"{sym}_SHORT2_{coin.entry_signal_key or coin.last_update_ms}",
+                signal_id=signal_id,
                 signal_ts_ms=int(time.time() * 1000),
                 partition_usd=self._partition_usd,
                 partition_pct=self._long2_pct,
@@ -1488,7 +1560,10 @@ class MomentumScanner:
                 self._last_exec_error = None
                 self._emit_signal(coin, "short2_entered")
                 log.info("scanner SHORT2 %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
+            elif r.stage in ("duplicate", "in_flight") or "duplicate" in str(r.error or "").lower():
+                log.info("scanner %s short2 already submitted (%s) — skipping re-send", sym, r.stage or r.error)
             else:
+                coin.submitted_short2_signal_id = ""
                 err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym} SHORT2: {err}"
                 log.warning("scanner SHORT2 failed %s: %s latency_ms=%s", sym, err, r.latency_ms)

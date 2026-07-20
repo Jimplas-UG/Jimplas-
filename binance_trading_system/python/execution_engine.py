@@ -150,6 +150,7 @@ class ExecutionEngine:
         self._events: deque[ExecutionEvent] = deque(maxlen=64)
         self._filled_client_ids: set[str] = set()
         self._inflight_client_ids: set[str] = set()
+        self._duplicate_emitted: set[str] = set()
         self._last_error: str | None = None
         self._account_cache: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._account_cache_ts = 0.0
@@ -371,13 +372,16 @@ class ExecutionEngine:
         if client_id in self._filled_client_ids:
             result.error = "duplicate_order"
             result.stage = "duplicate"
-            self._log_failure(signal, reason="duplicate_order", retry_decision="no_retry_duplicate")
-            self._emit(signal, "duplicate", client_order_id=client_id, error=result.error)
+            if client_id not in self._duplicate_emitted:
+                self._duplicate_emitted.add(client_id)
+                self._log_failure(signal, reason="duplicate_order", retry_decision="no_retry_duplicate")
+                self._emit(signal, "duplicate", client_order_id=client_id, error=result.error)
             return result
         if client_id in self._inflight_client_ids:
             result.error = "order_in_flight"
             result.stage = "in_flight"
-            self._emit(signal, "in_flight", client_order_id=client_id, error=result.error)
+            if client_id not in self._duplicate_emitted:
+                self._emit(signal, "in_flight", client_order_id=client_id, error=result.error)
             return result
 
         try:

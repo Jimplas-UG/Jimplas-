@@ -416,6 +416,36 @@ def test_pending_keeps_latched_15m_during_retrace() -> None:
             os.environ["SCANNER_EXEC"] = prev
 
 
+def test_pending_entry_not_resent_on_every_tick() -> None:
+    class CountingConnector(FakeConnector):
+        def __init__(self) -> None:
+            super().__init__()
+            self.exec_calls = 0
+
+        def place_market_order(self, symbol, side, quantity, **kwargs) -> dict:
+            self.exec_calls += 1
+            return super().place_market_order(symbol, side, quantity, **kwargs)
+
+    conn = CountingConnector()
+    sc = MomentumScanner(conn, lambda: True)
+    sym = "ACEUSDT"
+    sc.load_symbols([sym])
+    coin = sc._coins[sym]
+    coin.status = STATUS_PENDING
+    coin.price = 0.1229
+    coin.best_pct = 6.0
+    coin.qualifying_pct = 6.0
+    coin.pct_15m = 6.0
+    coin.retrace_pct = 0.8
+    coin.highest_price = 0.125
+    coin.entry_signal_key = "ACEUSDT_1250_600"
+    for _ in range(5):
+        sc._try_open_long1_entry(coin)
+    assert conn.exec_calls == 1, f"expected one exchange order, got {conn.exec_calls}"
+    assert coin.submitted_entry_signal_id, "entry signal should be marked submitted"
+    print("OK pending entry fires once per signal")
+
+
 def test_stale_pending_demoted_when_live_15m_collapses() -> None:
     prev = os.environ.get("SCANNER_EXEC")
     os.environ["SCANNER_EXEC"] = "0"
@@ -459,6 +489,7 @@ if __name__ == "__main__":
         test_short2_does_not_reenter_after_close()
         test_gap_to_4pct_opens_short1_then_short2()
         test_settle_delay_blocks_short1()
+        test_pending_entry_not_resent_on_every_tick()
         test_pending_keeps_latched_15m_during_retrace()
         test_stale_pending_demoted_when_live_15m_collapses()
     except AssertionError as e:
