@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed leverage policy — SHORT 5x, LONG1/LONG2 10x only."""
+"""Fixed leverage policy — primary long 5x, recovery shorts 10x."""
 from __future__ import annotations
 
 import os
@@ -27,8 +27,9 @@ def test_constants() -> None:
 
 def test_required_per_leg() -> None:
     assert required_leverage("SHORT") == 5
-    assert required_leverage("LONG1") == 10
-    assert required_leverage("LONG2") == 10
+    assert required_leverage("LONG1", "BUY") == 5
+    assert required_leverage("LONG1", "SELL") == 10
+    assert required_leverage("LONG2", "SELL") == 10
     assert required_leverage("MANUAL", "SELL") == 5
     assert required_leverage("MANUAL", "BUY") is None
     print("OK required per leg")
@@ -36,8 +37,9 @@ def test_required_per_leg() -> None:
 
 def test_apply_overrides_wrong_request() -> None:
     assert apply_leverage_policy("SHORT", "SELL", 20) == 5
-    assert apply_leverage_policy("LONG1", "BUY", 5) == 10
-    assert apply_leverage_policy("LONG2", "BUY", 3) == 10
+    assert apply_leverage_policy("LONG1", "BUY", 10) == 5
+    assert apply_leverage_policy("LONG1", "SELL", 5) == 10
+    assert apply_leverage_policy("LONG2", "SELL", 3) == 10
     print("OK apply overrides wrong leverage")
 
 
@@ -50,9 +52,10 @@ def test_exchange_leverage_always_5() -> None:
 
 def test_sizing_differs_for_longs() -> None:
     assert sizing_leverage("SHORT") == 5
-    assert sizing_leverage("LONG1") == 10
-    assert sizing_leverage("LONG2") == 10
-    print("OK sizing leverage 5/10/10")
+    assert sizing_leverage("LONG1", "BUY") == 5
+    assert sizing_leverage("LONG1", "SELL") == 10
+    assert sizing_leverage("LONG2", "SELL") == 10
+    print("OK sizing leverage primary 5x / recovery 10x")
 
 
 if __name__ == "__main__":

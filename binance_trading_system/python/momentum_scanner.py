@@ -2,9 +2,9 @@
 Tick-by-tick multi-coin momentum scanner + retracement strategy.
 
 Monitors 1m / 3m / 5m / 15m rolling % on every price tick (max study window 15m).
-Entry: 15m move >= 5% gain, then >= 0.7% retrace from peak → Long1 (40% partition, 10x).
-Recovery: -2% adverse from Long1 → Long2 (40%); after Long2 open, -4% adverse → recovery Short (50%, 5x).
-Long2 requires confirmed exchange Long1, settle delay, and tracked adverse peak (no guess).
+Entry: 15m move >= 5% gain, then >= 0.7% retrace from peak → Long (50% partition, 5x).
+Recovery: -2% adverse from Long → Short1 (40%, 10x); at -4% adverse from Long → Short2 (40%, 10x).
+Each recovery leg requires confirmed anchor long, settle delay, and tracked adverse peak (no guess).
 Each leg TP at 2.5%; optional 0.5% pullback exit remains as backup.
 """
 
@@ -119,6 +119,7 @@ class CoinStrategy:
     long2: LegPosition | None = None
     long1_was_closed: bool = False
     long2_was_closed: bool = False
+    short_was_closed: bool = False
     long1_peak_price: float | None = None
     long2_peak_price: float | None = None
     recovery_peak_price: float | None = None
@@ -312,14 +313,14 @@ class MomentumScanner:
             return 0.0
         return ((entry - coin.price) / entry) * 100.0
 
-    def _long2_entry_allowed(self, coin: CoinStrategy) -> bool:
-        """Long2 after Long1 + settle delay when price falls 2% from Long1 entry."""
+    def _short1_entry_allowed(self, coin: CoinStrategy) -> bool:
+        """Short1 after primary long + settle delay when price falls 2% from long entry."""
         if not coin.long1 or coin.long1_was_closed:
             return False
-        if coin.long2 is not None or coin.long2_was_closed:
+        if coin.short is not None or coin.short_was_closed:
             return False
         if not self._exchange_has_long(coin.symbol):
-            log.warning("scanner LONG2 blocked %s: no exchange long1", coin.symbol)
+            log.warning("scanner SHORT1 blocked %s: no exchange long", coin.symbol)
             return False
         if not self._long1_settle_elapsed(coin):
             return False
@@ -327,15 +328,15 @@ class MomentumScanner:
             return False
         return True
 
-    def _short_recovery_allowed(self, coin: CoinStrategy) -> bool:
-        """Recovery short after Long2 when price falls 4% from Long2 entry."""
-        if not coin.long2:
+    def _short2_entry_allowed(self, coin: CoinStrategy) -> bool:
+        """Short2 after Short1 when price falls 4% from primary long entry."""
+        if not coin.long1 or not coin.short:
             return False
-        if coin.short is not None:
+        if coin.long2 is not None or coin.long2_was_closed:
             return False
-        if not self._long2_settle_elapsed(coin):
+        if not self._short1_settle_elapsed(coin):
             return False
-        if coin.long2_adverse_peak_pct < LONG2_ADVERSE_PCT:
+        if coin.long1_adverse_peak_pct < LONG2_ADVERSE_PCT:
             return False
         return True
 
@@ -346,12 +347,12 @@ class MomentumScanner:
             return False
         return int(time.time() * 1000) - coin.long1_opened_ms >= LONG_ENTRY_DELAY_MS
 
-    def _long2_settle_elapsed(self, coin: CoinStrategy) -> bool:
+    def _short1_settle_elapsed(self, coin: CoinStrategy) -> bool:
         if LONG_ENTRY_DELAY_MS <= 0:
             return True
-        if not coin.long2_opened_ms:
+        if not coin.short_opened_ms:
             return False
-        return int(time.time() * 1000) - coin.long2_opened_ms >= LONG_ENTRY_DELAY_MS
+        return int(time.time() * 1000) - coin.short_opened_ms >= LONG_ENTRY_DELAY_MS
 
     def _mark_long1_opened(self, coin: CoinStrategy, symbol: str) -> None:
         if not coin.long1_opened_ms:
@@ -432,7 +433,7 @@ class MomentumScanner:
         qty = float(leg.get("volume") or fallback_qty or 0)
         if fill <= 0 or qty <= 1e-12:
             return False
-        coin.long1 = LegPosition("BUY", fill, qty, LONG1_LEVERAGE, MAGIC_LONG1, tp)
+        coin.long1 = LegPosition("BUY", fill, qty, SHORT_LEVERAGE, MAGIC_LONG1, tp)
         coin.status = STATUS_LONG1
         coin.long1_peak_price = fill
         coin.long1_adverse_peak_pct = 0.0
@@ -440,7 +441,7 @@ class MomentumScanner:
         self._mark_long1_opened(coin, sym)
         self._last_exec_error = None
         self._emit_signal(coin, "entered")
-        log.info("scanner adopted exchange LONG1 %s qty=%s @ %s", sym, qty, fill)
+        log.info("scanner adopted exchange LONG %s qty=%s @ %s", sym, qty, fill)
         return True
 
     def _adopt_exchange_short(
@@ -460,11 +461,12 @@ class MomentumScanner:
         qty = float(leg.get("volume") or fallback_qty or 0)
         if fill <= 0 or qty <= 1e-12:
             return False
-        coin.short = LegPosition("SELL", fill, qty, SHORT_LEVERAGE, MAGIC_SHORT, tp)
+        coin.short = LegPosition("SELL", fill, qty, LONG1_LEVERAGE, MAGIC_SHORT, tp)
         coin.status = STATUS_SHORT
+        coin.recovery_peak_price = fill
         self._mark_short_opened(coin, sym)
         self._last_exec_error = None
-        self._emit_signal(coin, "recovery_short_entered")
+        self._emit_signal(coin, "short1_entered")
         log.info("scanner adopted exchange SHORT %s qty=%s @ %s", sym, qty, fill)
         return True
 
@@ -738,8 +740,8 @@ class MomentumScanner:
 
     def _ensure_pair_coherence(self, coin: CoinStrategy) -> bool:
         """
-        Active pair = open Long1 on exchange. Long2/Short are recovery legs while Long1 lives.
-        If Long1 is gone, flatten the full symbol — never leave orphan hedges.
+        Active pair = open primary long on exchange. Short1/Short2 are recovery legs while long lives.
+        If the long is gone, flatten the full symbol — never leave orphan hedges.
         """
         sym = coin.symbol
         if getattr(self._connector.cfg, "paper", False):
@@ -804,6 +806,7 @@ class MomentumScanner:
         coin.long2 = None
         coin.long1_was_closed = False
         coin.long2_was_closed = False
+        coin.short_was_closed = False
         coin.long1_peak_price = None
         coin.long2_peak_price = None
         coin.recovery_peak_price = None
@@ -862,7 +865,14 @@ class MomentumScanner:
             if coin.long1:
                 legs.append({"leg": "LONG1", "side": "BUY", "entry": coin.long1.entry, "qty": coin.long1.qty})
             if coin.long2:
-                legs.append({"leg": "LONG2", "side": "BUY", "entry": coin.long2.entry, "qty": coin.long2.qty})
+                legs.append(
+                    {
+                        "leg": "LONG2",
+                        "side": coin.long2.side,
+                        "entry": coin.long2.entry,
+                        "qty": coin.long2.qty,
+                    }
+                )
             blocks.append(
                 {
                     "symbol": coin.symbol,
@@ -1336,21 +1346,21 @@ class MomentumScanner:
         self._in_flight.add(sym)
         try:
             entry = coin.price
-            qty = self._qty_for(sym, entry, LONG1_LEVERAGE, self._long1_pct)
+            qty = self._qty_for(sym, entry, SHORT_LEVERAGE, self._short_pct)
             tp = entry * (1.0 + LONG_TP_PCT / 100.0)
             signal = ExecutionSignal(
                 symbol=sym,
                 side="BUY",
                 quantity=qty,
                 reference_price=entry,
-                leverage=LONG1_LEVERAGE,
+                leverage=SHORT_LEVERAGE,
                 magic=MAGIC_LONG1,
                 leg="LONG1",
                 tp=tp,
-                signal_id=f"{sym}_LONG1_{coin.entry_signal_key or coin.last_update_ms}",
+                signal_id=f"{sym}_LONG_{coin.entry_signal_key or coin.last_update_ms}",
                 signal_ts_ms=int(time.time() * 1000),
                 partition_usd=self._partition_usd,
-                partition_pct=self._long1_pct,
+                partition_pct=self._short_pct,
                 margin_type="ISOLATED",
             )
             self._emit_signal(coin, "executing")
@@ -1359,7 +1369,7 @@ class MomentumScanner:
             if r.ok:
                 fill = float(r.fill_price or entry)
                 tp = fill * (1.0 + LONG_TP_PCT / 100.0)
-                coin.long1 = LegPosition("BUY", fill, qty, LONG1_LEVERAGE, MAGIC_LONG1, tp)
+                coin.long1 = LegPosition("BUY", fill, qty, SHORT_LEVERAGE, MAGIC_LONG1, tp)
                 coin.status = STATUS_LONG1
                 coin.long1_peak_price = fill
                 coin.long1_adverse_peak_pct = 0.0
@@ -1369,7 +1379,7 @@ class MomentumScanner:
                     self._connector.ensure_exchange_leverage(sym)
                 self._last_exec_error = None
                 self._emit_signal(coin, "entered")
-                log.info("scanner LONG1 %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
+                log.info("scanner LONG %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
             elif "duplicate" in str(r.error or "").lower():
                 if not self._adopt_exchange_long1(coin, sym, qty, entry, tp):
                     self._last_exec_error = f"{sym}: duplicate_order_no_position"
@@ -1382,9 +1392,9 @@ class MomentumScanner:
         finally:
             self._in_flight.discard(sym)
 
-    def _try_open_recovery_short(self, coin: CoinStrategy) -> None:
+    def _try_open_short1(self, coin: CoinStrategy) -> None:
         sym = coin.symbol
-        if not self._short_recovery_allowed(coin):
+        if not self._short1_entry_allowed(coin):
             return
         if sym in self._in_flight:
             return
@@ -1393,103 +1403,110 @@ class MomentumScanner:
         self._in_flight.add(sym)
         try:
             entry = coin.price
-            qty = self._qty_for(sym, entry, SHORT_LEVERAGE, self._short_pct)
+            qty = self._qty_for(sym, entry, LONG1_LEVERAGE, self._long1_pct)
             tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
             signal = ExecutionSignal(
                 symbol=sym,
                 side="SELL",
                 quantity=qty,
                 reference_price=entry,
-                leverage=SHORT_LEVERAGE,
+                leverage=LONG1_LEVERAGE,
                 magic=MAGIC_SHORT,
-                leg="SHORT",
+                leg="LONG1",
                 tp=tp,
-                signal_id=f"{sym}_SHORT_{coin.entry_signal_key or coin.last_update_ms}",
+                signal_id=f"{sym}_SHORT1_{coin.entry_signal_key or coin.last_update_ms}",
                 signal_ts_ms=int(time.time() * 1000),
                 partition_usd=self._partition_usd,
-                partition_pct=self._short_pct,
+                partition_pct=self._long1_pct,
                 margin_type="ISOLATED",
             )
-            self._emit_signal(coin, "recovery_executing")
+            self._emit_signal(coin, "short1_executing")
             r = self._engine.execute(signal)
             self._last_exec_latency_ms = r.latency_ms or None
             if r.ok:
                 fill = float(r.fill_price or entry)
                 tp = fill * (1.0 - SHORT_TP_PCT / 100.0)
-                coin.short = LegPosition("SELL", fill, qty, SHORT_LEVERAGE, MAGIC_SHORT, tp)
+                coin.short = LegPosition("SELL", fill, qty, LONG1_LEVERAGE, MAGIC_SHORT, tp)
                 coin.status = STATUS_SHORT
+                coin.recovery_peak_price = fill
                 self._mark_short_opened(coin, sym)
+                if hasattr(self._connector, "ensure_exchange_leverage"):
+                    self._connector.ensure_exchange_leverage(sym)
                 self._last_exec_error = None
-                self._emit_signal(coin, "recovery_short_entered")
-                log.info("scanner recovery SHORT %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
+                self._emit_signal(coin, "short1_entered")
+                log.info("scanner SHORT1 %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
             elif "duplicate" in str(r.error or "").lower():
                 if not self._adopt_exchange_short(coin, sym, qty, entry, tp):
-                    self._last_exec_error = f"{sym}: duplicate_short_no_position"
+                    self._last_exec_error = f"{sym}: duplicate_short1_no_position"
             else:
                 err = str(r.error or "order_failed")
-                self._last_exec_error = f"{sym} SHORT: {err}"
-                log.warning("scanner recovery SHORT failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
+                self._last_exec_error = f"{sym} SHORT1: {err}"
+                log.warning("scanner SHORT1 failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
         finally:
             self._in_flight.discard(sym)
 
-    def _try_open_short(self, coin: CoinStrategy) -> None:
-        """Recovery short only — requires Long2 adverse move."""
-        self._try_open_recovery_short(coin)
-
-    def _try_open_long(self, coin: CoinStrategy, leg: int) -> None:
+    def _try_open_short2(self, coin: CoinStrategy) -> None:
         sym = coin.symbol
-        if leg != 2:
-            return
-        if not coin.long1:
-            log.warning("scanner LONG2 blocked %s: no_long1", sym)
-            return
-        if not self._long2_entry_allowed(coin):
+        if not self._short2_entry_allowed(coin):
             return
         if sym in self._in_flight:
+            return
+        if pair_gate.is_close_pending(sym):
             return
         self._in_flight.add(sym)
         try:
             entry = coin.price
-            lev = LONG2_LEVERAGE
-            magic = MAGIC_LONG2
-            leg_pct = self._long2_pct
-            qty = self._qty_for(sym, entry, lev, leg_pct)
-            tp = entry * (1.0 + LONG_TP_PCT / 100.0)
+            qty = self._qty_for(sym, entry, LONG2_LEVERAGE, self._long2_pct)
+            tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
             signal = ExecutionSignal(
                 symbol=sym,
-                side="BUY",
+                side="SELL",
                 quantity=qty,
                 reference_price=entry,
-                leverage=lev,
-                magic=magic,
+                leverage=LONG2_LEVERAGE,
+                magic=MAGIC_LONG2,
                 leg="LONG2",
                 tp=tp,
-                signal_id=f"{sym}_LONG2_{coin.entry_signal_key or coin.last_update_ms}",
+                signal_id=f"{sym}_SHORT2_{coin.entry_signal_key or coin.last_update_ms}",
                 signal_ts_ms=int(time.time() * 1000),
                 partition_usd=self._partition_usd,
-                partition_pct=leg_pct,
+                partition_pct=self._long2_pct,
                 margin_type="ISOLATED",
             )
+            self._emit_signal(coin, "short2_executing")
             r = self._engine.execute(signal)
             self._last_exec_latency_ms = r.latency_ms or None
             if r.ok:
                 fill = float(r.fill_price or entry)
-                tp_fill = fill * (1.0 + LONG_TP_PCT / 100.0)
-                coin.long2 = LegPosition("BUY", fill, qty, lev, magic, tp_fill)
+                tp = fill * (1.0 - SHORT_TP_PCT / 100.0)
+                coin.long2 = LegPosition("SELL", fill, qty, LONG2_LEVERAGE, MAGIC_LONG2, tp)
                 coin.long2_peak_price = fill
                 coin.status = STATUS_LONG2
                 self._mark_long2_opened(coin)
                 if hasattr(self._connector, "ensure_exchange_leverage"):
                     self._connector.ensure_exchange_leverage(sym)
                 self._last_exec_error = None
-                self._emit_signal(coin, "long2_entered")
-                log.info("scanner LONG2 %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
+                self._emit_signal(coin, "short2_entered")
+                log.info("scanner SHORT2 %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
             else:
                 err = str(r.error or "order_failed")
-                self._last_exec_error = f"{sym} LONG2: {err}"
-                log.warning("scanner LONG2 failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
+                self._last_exec_error = f"{sym} SHORT2: {err}"
+                log.warning("scanner SHORT2 failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
         finally:
             self._in_flight.discard(sym)
+
+    def _try_open_recovery_short(self, coin: CoinStrategy) -> None:
+        if coin.short is None:
+            self._try_open_short1(coin)
+        else:
+            self._try_open_short2(coin)
+
+    def _try_open_short(self, coin: CoinStrategy) -> None:
+        self._try_open_short1(coin)
+
+    def _try_open_long(self, coin: CoinStrategy, leg: int) -> None:
+        if leg == 2:
+            self._try_open_short2(coin)
 
     def _leg_pnl(self, leg: LegPosition, price: float) -> float:
         if leg.side == "BUY":
@@ -1532,21 +1549,16 @@ class MomentumScanner:
             if adv1 > coin.long1_adverse_peak_pct:
                 coin.long1_adverse_peak_pct = adv1
 
-        if coin.long2:
-            adv2 = self._long_adverse_pct(coin, 2)
-            if adv2 > coin.long2_adverse_peak_pct:
-                coin.long2_adverse_peak_pct = adv2
+        if coin.long1 and coin.short is None and self._short1_entry_allowed(coin):
+            self._try_open_short1(coin)
 
-        if coin.long1 and coin.long2 is None and self._long2_entry_allowed(coin):
-            self._try_open_long(coin, 2)
+        if coin.long1 and coin.short and coin.long2 is None and self._short2_entry_allowed(coin):
+            self._try_open_short2(coin)
 
-        if coin.long2 and coin.short is None and self._short_recovery_allowed(coin):
-            self._try_open_recovery_short(coin)
-
-        # Long1: TP at +2.5% or 0.5% retrace from its own peak.
+        # Primary long: TP at +2.5% or 0.5% retrace from its own peak.
         if coin.long1:
             if coin.long1.tp_price and price >= coin.long1.tp_price:
-                self._close_leg(coin, "long1", reason="LONG1_TP")
+                self._close_leg(coin, "long1", reason="LONG_TP")
             elif coin.long1_peak_price is not None:
                 if price > coin.long1_peak_price:
                     coin.long1_peak_price = price
@@ -1555,47 +1567,74 @@ class MomentumScanner:
                     pullback_pct = ((peak - price) / peak) * 100.0
                     if pullback_pct >= LONG_BOTH_PULLBACK_PCT:
                         log.info(
-                            "scanner %s LONG1_PULLBACK %.2f%% (peak=%s price=%s)",
+                            "scanner %s LONG_PULLBACK %.2f%% (peak=%s price=%s)",
                             coin.symbol,
                             pullback_pct,
                             peak,
                             price,
                         )
-                        self._close_leg(coin, "long1", reason="LONG1_PULLBACK")
+                        self._close_leg(coin, "long1", reason="LONG_PULLBACK")
 
-        # Long2: TP at +2.5% or 0.5% retrace from its own peak.
-        if coin.long2:
-            if coin.long2.tp_price and price >= coin.long2.tp_price:
-                self._close_leg(coin, "long2", reason="LONG2_TP")
-            elif coin.long2_peak_price is not None:
-                if price > coin.long2_peak_price:
-                    coin.long2_peak_price = price
-                peak = coin.long2_peak_price
-                if peak > 0:
-                    pullback_pct = ((peak - price) / peak) * 100.0
-                    if pullback_pct >= LONG_BOTH_PULLBACK_PCT:
+        # Short1: TP at -2.5% or 0.5% bounce from trough.
+        if coin.short:
+            if coin.short.tp_price and price <= coin.short.tp_price:
+                self._close_all(coin, "SHORT1_TP")
+                return
+            if coin.recovery_peak_price is not None:
+                if price < coin.recovery_peak_price:
+                    coin.recovery_peak_price = price
+                trough = coin.recovery_peak_price
+                if trough > 0:
+                    bounce_pct = ((price - trough) / trough) * 100.0
+                    if bounce_pct >= LONG_BOTH_PULLBACK_PCT:
                         log.info(
-                            "scanner %s LONG2_PULLBACK %.2f%% (peak=%s price=%s)",
+                            "scanner %s SHORT1_PULLBACK %.2f%% (trough=%s price=%s)",
                             coin.symbol,
-                            pullback_pct,
-                            peak,
+                            bounce_pct,
+                            trough,
                             price,
                         )
-                        self._close_leg(coin, "long2", reason="LONG2_PULLBACK")
+                        self._close_leg(coin, "short", reason="SHORT1_PULLBACK")
 
-        if coin.short and coin.short.tp_price and price <= coin.short.tp_price:
-            self._close_all(coin, "SHORT_TP")
-            return
+        # Short2: TP at -2.5% or 0.5% bounce from trough.
+        if coin.long2 and coin.long2.side == "SELL":
+            if coin.long2.tp_price and price <= coin.long2.tp_price:
+                self._close_leg(coin, "long2", reason="SHORT2_TP")
+            elif coin.long2_peak_price is not None:
+                if price < coin.long2_peak_price:
+                    coin.long2_peak_price = price
+                trough = coin.long2_peak_price
+                if trough > 0:
+                    bounce_pct = ((price - trough) / trough) * 100.0
+                    if bounce_pct >= LONG_BOTH_PULLBACK_PCT:
+                        log.info(
+                            "scanner %s SHORT2_PULLBACK %.2f%% (trough=%s price=%s)",
+                            coin.symbol,
+                            bounce_pct,
+                            trough,
+                            price,
+                        )
+                        self._close_leg(coin, "long2", reason="SHORT2_PULLBACK")
 
     def _close_leg(self, coin: CoinStrategy, leg_name: str, reason: str = "") -> None:
         sym = coin.symbol
-        leg = coin.long1 if leg_name == "long1" else coin.long2 if leg_name == "long2" else None
+        if leg_name == "long1":
+            leg = coin.long1
+        elif leg_name == "long2":
+            leg = coin.long2
+        elif leg_name == "short":
+            leg = coin.short
+        else:
+            leg = None
         if not leg:
             return
         pair_gate.begin_close(sym)
         try:
-            if leg_name in ("long1", "long2") and hasattr(self._connector, "close_by_position_side"):
-                r = self._connector.close_by_position_side(sym, "LONG", leg.qty)
+            if hasattr(self._connector, "close_by_position_side"):
+                if leg.side == "BUY":
+                    r = self._connector.close_by_position_side(sym, "LONG", leg.qty)
+                else:
+                    r = self._connector.close_by_position_side(sym, "SHORT", leg.qty)
             else:
                 r = self._connector.close_leg(sym, leg.magic, leg.qty)
             if not r.get("ok"):
@@ -1611,6 +1650,11 @@ class MomentumScanner:
                 coin.long2_peak_price = None
                 coin.long2_was_closed = True
                 coin.status = STATUS_LONG1 if coin.long1 else (STATUS_SHORT if coin.short else STATUS_CLOSED)
+            elif leg_name == "short":
+                coin.short = None
+                coin.recovery_peak_price = None
+                coin.short_was_closed = True
+                coin.status = STATUS_LONG2 if coin.long2 else (STATUS_LONG1 if coin.long1 else STATUS_CLOSED)
             self._refresh_exchange_tps(coin)
             self._connector.invalidate_positions_cache()
             if reason:

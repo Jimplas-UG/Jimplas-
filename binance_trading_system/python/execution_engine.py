@@ -272,26 +272,16 @@ class ExecutionEngine:
         return None
 
     def _validate_short_first(self, signal: ExecutionSignal) -> str | None:
-        """All trades start with short — block standalone BUY except recovery LONG1/LONG2."""
+        """Long-first scanner: primary entry is LONG1 BUY; recovery shorts use LONG1/LONG2 SELL."""
         side = signal.side.upper()
         leg = (signal.leg or "").upper()
         if side != "BUY":
             return None
-        if leg not in ("LONG1", "LONG2"):
-            return "buy_blocked_short_first_policy"
-        sym = signal.symbol.upper()
-        if getattr(self._connector.cfg, "paper", False):
+        if leg == "LONG1":
             return None
-        short_qty = 0.0
-        if hasattr(self._connector, "exchange_short_qty"):
-            short_qty = float(self._connector.exchange_short_qty(sym) or 0)
-        if short_qty <= 1e-12:
-            return "buy_blocked_no_exchange_short"
-        if hasattr(self._connector, "ensure_hedge_mode"):
-            ok, err = self._connector.ensure_hedge_mode()
-            if not ok:
-                return f"hedge_mode_required:{err}"
-        return None
+        if leg == "LONG2":
+            return "buy_blocked_not_primary_long"
+        return "buy_blocked_short_first_policy"
 
     def _validate_scanner_leg(self, signal: ExecutionSignal) -> str | None:
         """Scanner multi-leg strategy requires hedge mode on live accounts."""
