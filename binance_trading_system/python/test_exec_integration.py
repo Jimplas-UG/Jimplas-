@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Integration test: qualified pending signal triggers ExecutionEngine short order."""
+"""Integration test: qualified pending signal triggers ExecutionEngine Long1 order."""
 from __future__ import annotations
 
 import os
@@ -14,7 +14,7 @@ os.environ.pop("FORWARD_DRY_RUN", None)
 
 from momentum_scanner import (  # noqa: E402
     MomentumScanner,
-    STATUS_SHORT,
+    STATUS_LONG1,
 )
 
 
@@ -41,14 +41,7 @@ class ExecConnector:
         return {"ok": True, "order_id": 99}
 
 
-def _seed(sc: MomentumScanner, sym: str, base: float = 100.0) -> None:
-    sc.load_symbols([sym])
-    now = time.time()
-    for m in range(16, 0, -1):
-        sc.on_tick(sym, base, ts_ms=int((now - m * 60) * 1000))
-
-
-def test_pending_triggers_short_order() -> None:
+def test_pending_triggers_long1_order() -> None:
     conn = ExecConnector()
     sc = MomentumScanner(conn, lambda: True)
     sym = "TAGUSDT"
@@ -64,15 +57,15 @@ def test_pending_triggers_short_order() -> None:
     coin.pct_15m = 6.0
     coin.retrace_pct = 0.8
     coin.highest_price = 1.26
-    sc._try_open_short(coin)
-    assert coin.status == STATUS_SHORT, f"expected SHORT got {coin.status}"
+    sc._try_open_long1_entry(coin)
+    assert coin.status == STATUS_LONG1, f"expected LONG1 got {coin.status}"
     assert len(conn.orders) >= 1, "order should be sent on qualification"
-    assert conn.orders[0]["side"] == "SELL"
+    assert conn.orders[0]["side"] == "BUY"
     events = sc._engine.events()
     assert any(e["stage"] == "filled" for e in events)
-    print("OK pending -> auto short order")
+    print("OK pending -> auto long1 order")
 
 
 if __name__ == "__main__":
-    test_pending_triggers_short_order()
+    test_pending_triggers_long1_order()
     print("test_exec_integration: OK")
