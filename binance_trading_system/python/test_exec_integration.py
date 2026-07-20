@@ -60,6 +60,8 @@ def test_pending_triggers_short_order() -> None:
     coin.status = STATUS_PENDING
     coin.price = 1.25
     coin.best_pct = 6.0
+    coin.qualifying_pct = 6.0
+    coin.pct_15m = 6.0
     coin.retrace_pct = 0.8
     coin.highest_price = 1.26
     sc._try_open_short(coin)
