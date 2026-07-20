@@ -1435,7 +1435,7 @@ class MomentumScanner:
                 coin.long2_adverse_peak_pct = 0.0
                 self._mark_long1_opened(coin, sym)
                 if hasattr(self._connector, "ensure_exchange_leverage"):
-                    self._connector.ensure_exchange_leverage(sym)
+                    self._connector.ensure_exchange_leverage(sym, SHORT_LEVERAGE)
                 self._last_exec_error = None
                 self._emit_signal(coin, "entered")
                 log.info("scanner LONG %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
@@ -1498,7 +1498,7 @@ class MomentumScanner:
                 coin.recovery_peak_price = fill
                 self._mark_short_opened(coin, sym)
                 if hasattr(self._connector, "ensure_exchange_leverage"):
-                    self._connector.ensure_exchange_leverage(sym)
+                    self._connector.ensure_exchange_leverage(sym, LONG1_LEVERAGE)
                 self._last_exec_error = None
                 self._emit_signal(coin, "short1_entered")
                 log.info("scanner SHORT1 %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
@@ -1556,7 +1556,7 @@ class MomentumScanner:
                 coin.status = STATUS_LONG2
                 self._mark_long2_opened(coin)
                 if hasattr(self._connector, "ensure_exchange_leverage"):
-                    self._connector.ensure_exchange_leverage(sym)
+                    self._connector.ensure_exchange_leverage(sym, LONG2_LEVERAGE)
                 self._last_exec_error = None
                 self._emit_signal(coin, "short2_entered")
                 log.info("scanner SHORT2 %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
@@ -1593,9 +1593,12 @@ class MomentumScanner:
             return
 
         sym = coin.symbol
-        if (coin.long1 or coin.short) and not getattr(self._connector.cfg, "paper", False):
+        if (coin.long1 or coin.short or coin.long2) and not getattr(self._connector.cfg, "paper", False):
             if hasattr(self._connector, "ensure_exchange_leverage"):
-                self._connector.ensure_exchange_leverage(sym)
+                from leverage_policy import symbol_exchange_leverage
+
+                has_short = bool(coin.short) or bool(coin.long2 and coin.long2.side == "SELL")
+                self._connector.ensure_exchange_leverage(sym, symbol_exchange_leverage(has_recovery_short=has_short))
 
         price = coin.price
         if not coin.long1 and not coin.long2 and not coin.short:

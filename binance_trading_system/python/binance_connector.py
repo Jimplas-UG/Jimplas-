@@ -346,14 +346,15 @@ class BinanceConnector:
     def prepare_symbol_cached(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> None:
         sym = symbol.upper()
         mt = "ISOLATED"
-        from leverage_policy import exchange_leverage
+        from leverage_policy import ALLOWED_LEVERAGES, SHORT_LEVERAGE
 
-        exchange_lev = exchange_leverage()
-        if int(leverage) != exchange_lev:
+        requested = int(leverage or SHORT_LEVERAGE)
+        exchange_lev = requested if requested in ALLOWED_LEVERAGES else SHORT_LEVERAGE
+        if requested != exchange_lev:
             log.warning(
-                "prepare_symbol_cached %s: requested %sx ignored — exchange locked at %sx",
+                "prepare_symbol_cached %s: requested %sx clamped to %sx",
                 sym,
-                leverage,
+                requested,
                 exchange_lev,
             )
         leverage = exchange_lev
@@ -1179,10 +1180,12 @@ class BinanceConnector:
         return deals[:lim]
 
     def ensure_exchange_leverage(self, symbol: str, leverage: int | None = None) -> bool:
-        """Keep symbol leverage at policy exchange level (5x) — Binance is per-symbol."""
-        from leverage_policy import SHORT_LEVERAGE
+        """Set symbol leverage on Binance (Long 5x / recovery shorts 10x)."""
+        from leverage_policy import ALLOWED_LEVERAGES, SHORT_LEVERAGE
 
         target = int(leverage if leverage is not None else SHORT_LEVERAGE)
+        if target not in ALLOWED_LEVERAGES:
+            target = SHORT_LEVERAGE
         sym = symbol.upper()
         if self.cfg.paper:
             self.cfg.leverage = target
@@ -1203,7 +1206,7 @@ class BinanceConnector:
             self.cfg.leverage = target
             self.cfg.symbol = sym
             self._prepared_cache = {k: v for k, v in self._prepared_cache.items() if k[0] != sym}
-            log.info("exchange leverage %s restored %sx -> %sx", sym, current, target)
+            log.info("exchange leverage %s set %sx -> %sx", sym, current, target)
             return True
         except RuntimeError as e:
             log.warning("ensure_exchange_leverage %s: %s", sym, e)

@@ -427,7 +427,7 @@ class ExecutionEngine:
                 policy_lev,
             )
         signal.leverage = apply_leverage_policy(signal.leg, signal.side, signal.leverage)
-        exchange_lev = exchange_leverage(signal.leg)
+        exchange_lev = exchange_leverage(signal.leg, signal.side)
 
         free = self._available_margin()
         notional = float(signal.quantity) * signal.reference_price
@@ -444,6 +444,8 @@ class ExecutionEngine:
 
         try:
             self._connector.prepare_symbol_cached(sym, exchange_lev, "ISOLATED")
+            if hasattr(self._connector, "ensure_exchange_leverage"):
+                self._connector.ensure_exchange_leverage(sym, exchange_lev)
             last_err: Exception | None = None
             for attempt in range(MAX_RETRIES + 1):
                 try:

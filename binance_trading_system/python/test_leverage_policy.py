@@ -43,11 +43,12 @@ def test_apply_overrides_wrong_request() -> None:
     print("OK apply overrides wrong leverage")
 
 
-def test_exchange_leverage_always_5() -> None:
-    assert exchange_leverage("SHORT") == 5
-    assert exchange_leverage("LONG1") == 5
-    assert exchange_leverage("LONG2") == 5
-    print("OK exchange leverage always 5x on Binance API")
+def test_exchange_leverage_per_leg() -> None:
+    assert exchange_leverage("LONG1", "BUY") == 5
+    assert exchange_leverage("LONG1", "SELL") == 10
+    assert exchange_leverage("LONG2", "SELL") == 10
+    assert exchange_leverage("SHORT", "SELL") == 5
+    print("OK exchange leverage long 5x / recovery short 10x")
 
 
 def test_sizing_differs_for_longs() -> None:
@@ -59,12 +60,14 @@ def test_sizing_differs_for_longs() -> None:
 
 
 def test_policy_display_long_first() -> None:
-    from leverage_policy import policy_display_leverage
+    from leverage_policy import policy_display_leverage, symbol_exchange_leverage
 
     assert policy_display_leverage(side="BUY", position_side="LONG") == 5
     assert policy_display_leverage(side="SELL", position_side="SHORT") == 10
     assert policy_display_leverage(side="BUY") == 5
     assert policy_display_leverage(side="SELL") == 10
+    assert symbol_exchange_leverage(has_recovery_short=False) == 5
+    assert symbol_exchange_leverage(has_recovery_short=True) == 10
     print("OK display leverage long 5x / short 10x")
 
 
@@ -72,7 +75,7 @@ if __name__ == "__main__":
     test_constants()
     test_required_per_leg()
     test_apply_overrides_wrong_request()
-    test_exchange_leverage_always_5()
+    test_exchange_leverage_per_leg()
     test_sizing_differs_for_longs()
     test_policy_display_long_first()
     print("test_leverage_policy: ALL OK")

@@ -213,9 +213,8 @@ def test_forward_dry_run_blocks() -> None:
     print("OK FORWARD_DRY_RUN blocks execution")
 
 
-def test_long1_exchange_stays_5x() -> None:
+def test_long1_exchange_is_5x() -> None:
     conn = MockConnector()
-    conn._short_qty = 100.0
     eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
     r = eng.execute(_signal(side="BUY", leg="LONG1", leverage=5, tp=None, signal_id="lev_long1_1"))
     assert r.ok, r.error
@@ -223,7 +222,21 @@ def test_long1_exchange_stays_5x() -> None:
     assert prep and prep[-1]["lev"] == 5
     ensure = [c for c in conn.calls if c.get("op") == "ensure_lev"]
     assert ensure and ensure[-1]["lev"] == 5
-    print("OK LONG1 keeps exchange at 5x (10x sizing only)")
+    print("OK LONG exchange leverage is 5x")
+
+
+def test_recovery_short_exchange_is_10x() -> None:
+    conn = MockConnector()
+    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    r = eng.execute(
+        _signal(side="SELL", leg="LONG1", leverage=10, tp=None, signal_id="lev_short1_1")
+    )
+    assert r.ok, r.error
+    prep = [c for c in conn.calls if c.get("op") == "prepare"]
+    assert prep and prep[-1]["lev"] == 10
+    ensure = [c for c in conn.calls if c.get("op") == "ensure_lev"]
+    assert ensure and any(c["lev"] == 10 for c in ensure)
+    print("OK recovery SHORT1 exchange leverage is 10x")
 
 
 def test_short_forces_5x_leverage() -> None:
@@ -233,7 +246,7 @@ def test_short_forces_5x_leverage() -> None:
     assert r.ok, r.error
     prep = [c for c in conn.calls if c.get("op") == "prepare"]
     assert prep and prep[-1]["lev"] == 5
-    print("OK SHORT forces 5x leverage")
+    print("OK manual SHORT forces 5x leverage")
 
 
 def test_latency_under_target_when_network_allows() -> None:
@@ -259,7 +272,8 @@ if __name__ == "__main__":
         test_duplicate_prevention,
         test_insufficient_margin,
         test_forward_dry_run_blocks,
-        test_long1_exchange_stays_5x,
+        test_long1_exchange_is_5x,
+        test_recovery_short_exchange_is_10x,
         test_short_forces_5x_leverage,
         test_latency_under_target_when_network_allows,
     ]
