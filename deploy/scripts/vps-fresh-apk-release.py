@@ -49,8 +49,10 @@ npm run build 2>/dev/null || true
 
 systemctl restart bilshenz-binance-api
 systemctl restart bilshenz-desk-api
+systemctl restart bilshenz-forward-bot 2>/dev/null || true
+systemctl restart bilshenz-watchdog 2>/dev/null || true
 sleep 4
-systemctl is-active bilshenz-binance-api bilshenz-desk-api
+systemctl is-active bilshenz-binance-api bilshenz-desk-api bilshenz-forward-bot 2>/dev/null || systemctl is-active bilshenz-binance-api bilshenz-desk-api
 
 # Purge stale APK before build
 rm -f /opt/bilshenz/frontend/dist/*.apk /opt/bilshenz/frontend/dist/*.sha256 \

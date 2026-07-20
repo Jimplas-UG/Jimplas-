@@ -107,14 +107,23 @@ def test_qualified_buy_executes() -> None:
     print("OK qualified BUY executes")
 
 
-def test_buy_blocked_without_exchange_short() -> None:
+def test_primary_long_buy_without_exchange_short() -> None:
+    """Long-first: primary LONG1 BUY does not require an existing short leg."""
     conn = MockConnector()
     conn._short_qty = 0.0
     eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
-    r = eng.execute(_signal(side="BUY", leg="LONG1", tp=None, signal_id="buy_no_short_1"))
+    r = eng.execute(_signal(side="BUY", leg="LONG1", tp=None, signal_id="buy_primary_long_1"))
+    assert r.ok, r.error
+    print("OK primary LONG1 BUY executes without exchange short")
+
+
+def test_long2_buy_blocked() -> None:
+    conn = MockConnector()
+    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    r = eng.execute(_signal(side="BUY", leg="LONG2", tp=None, signal_id="buy_long2_1"))
     assert not r.ok
-    assert r.error == "buy_blocked_no_exchange_short"
-    print("OK BUY blocked without exchange short")
+    assert r.error == "buy_blocked_not_primary_long"
+    print("OK LONG2 BUY blocked (recovery shorts only)")
 
 
 def test_buy_blocked_manual_leg() -> None:
@@ -240,7 +249,8 @@ if __name__ == "__main__":
     tests = [
         test_qualified_sell_executes,
         test_qualified_buy_executes,
-        test_buy_blocked_without_exchange_short,
+        test_primary_long_buy_without_exchange_short,
+        test_long2_buy_blocked,
         test_buy_blocked_manual_leg,
         test_tp_created,
         test_invalid_quantity_blocked,
