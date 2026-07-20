@@ -19,6 +19,15 @@ git --no-pager log -1 --oneline
 ENVF=/etc/bilshenz.env
 grep -q '^FORWARD_DRY_RUN=' "$ENVF" && sed -i 's/^FORWARD_DRY_RUN=.*/FORWARD_DRY_RUN=0/' "$ENVF" || echo 'FORWARD_DRY_RUN=0' >> "$ENVF"
 grep -q '^SCANNER_EXEC=' "$ENVF" && sed -i 's/^SCANNER_EXEC=.*/SCANNER_EXEC=1/' "$ENVF" || echo 'SCANNER_EXEC=1' >> "$ENVF"
+for kv in 'SCANNER_MIN_LIVE_ENTRY_PCT=2.0' 'SCANNER_MAX_RETRACE_ENTRY_PCT=12.0'; do
+  key="${kv%%=*}"
+  val="${kv#*=}"
+  if grep -q "^${key}=" "$ENVF" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${val}|" "$ENVF"
+  else
+    echo "${key}=${val}" >> "$ENVF"
+  fi
+done
 
 systemctl restart bilshenz-binance-api
 systemctl restart bilshenz-desk-api

@@ -26,6 +26,10 @@ log = logging.getLogger("momentum_scanner")
 
 GAIN_THRESHOLD_PCT = float(os.environ.get("SCANNER_GAIN_PCT", "5.0"))
 RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_RETRACE_PCT", "0.7"))
+# Live 15m must still be hot at entry — blocks stale latched pumps (e.g. 15m already -16%).
+MIN_LIVE_ENTRY_PCT = float(os.environ.get("SCANNER_MIN_LIVE_ENTRY_PCT", "2.0"))
+# Do not short after the move is largely over (chasing a dump from peak).
+MAX_RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_MAX_RETRACE_ENTRY_PCT", "12.0"))
 SHORT_TP_PCT = float(os.environ.get("SCANNER_SHORT_TP_PCT", "2.5"))
 LONG1_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG1_PCT", "2.0"))
 LONG2_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG2_PCT", "4.0"))
@@ -444,6 +448,26 @@ class MomentumScanner:
             return coin.pct_1m
         return coin.pct_15m
 
+    def _live_entry_ok(self, coin: CoinStrategy) -> bool:
+        return self._entry_qualify_pct(coin) >= MIN_LIVE_ENTRY_PCT
+
+    def _retrace_entry_ok(self, coin: CoinStrategy) -> bool:
+        r = float(coin.retrace_pct or 0.0)
+        return RETRACE_ENTRY_PCT <= r <= MAX_RETRACE_ENTRY_PCT
+
+    def _entry_signal_ok(self, coin: CoinStrategy) -> bool:
+        latched = (coin.qualifying_pct or 0.0) >= GAIN_THRESHOLD_PCT
+        return latched and self._live_entry_ok(coin) and self._retrace_entry_ok(coin)
+
+    def _demote_stale_pending(self, coin: CoinStrategy) -> None:
+        """Drop pending queue rows whose pump died or dump already finished."""
+        if coin.status != STATUS_PENDING or coin.short:
+            return
+        if not self._live_entry_ok(coin) or float(coin.retrace_pct or 0.0) > MAX_RETRACE_ENTRY_PCT:
+            coin.status = STATUS_WATCHING
+            coin.qualifying_pct = 0.0
+            coin.entry_signal_key = None
+
     def _persist_risk_config(self) -> None:
         payload = {
             "partition_usd": self._partition_usd,
@@ -828,10 +852,15 @@ class MomentumScanner:
                 continue
             if coin.status != STATUS_PENDING:
                 continue
-            if coin.retrace_pct < RETRACE_ENTRY_PCT:
+            self._demote_stale_pending(coin)
+            if coin.status != STATUS_PENDING:
+                continue
+            if not self._retrace_entry_ok(coin):
                 continue
             gain = max(coin.qualifying_pct or 0.0, self._entry_qualify_pct(coin))
             if gain < GAIN_THRESHOLD_PCT:
+                continue
+            if not self._live_entry_ok(coin):
                 continue
             stale_ms = PENDING_QUEUE_MS if self._has_open_strategy() else PENDING_STALE_MS
             if stale_ms > 0 and coin.last_update_ms and now_ms - coin.last_update_ms > stale_ms:
@@ -884,6 +913,8 @@ class MomentumScanner:
             "long2_partition_pct": self._long2_pct,
             "long_pullback_pct": LONG_BOTH_PULLBACK_PCT,
             "long_tp_pct": LONG_TP_PCT,
+            "min_live_entry_pct": MIN_LIVE_ENTRY_PCT,
+            "max_retrace_entry_pct": MAX_RETRACE_ENTRY_PCT,
             "entry_timeframe": ENTRY_TIMEFRAME,
             "risk_locked": self._risk_locked,
             "last_exec_latency_ms": self._last_exec_latency_ms,
@@ -955,13 +986,11 @@ class MomentumScanner:
                 coin.highest_price = price
             if coin.highest_price and coin.highest_price > 0:
                 coin.retrace_pct = ((coin.highest_price - price) / coin.highest_price) * 100.0
-            still_qualified = (coin.qualifying_pct or 0.0) >= GAIN_THRESHOLD_PCT
-            # Keep Pending once 15m spike was latched — do not cancel when live 15m fades mid-retrace.
+            self._demote_stale_pending(coin)
             if coin.status == STATUS_PENDING and coin.retrace_pct < RETRACE_ENTRY_PCT:
                 coin.status = STATUS_WATCHING
             elif (
-                coin.retrace_pct >= RETRACE_ENTRY_PCT
-                and still_qualified
+                self._entry_signal_ok(coin)
                 and coin.status != STATUS_PENDING
             ):
                 coin.status = STATUS_PENDING
@@ -971,7 +1000,7 @@ class MomentumScanner:
                     coin.entry_signal_key = f"{sym}_{int(peak * 10000)}_{int((coin.qualifying_pct or 0) * 100)}"
                 self._emit_signal(coin, "pending")
                 self._execute_pending_short(coin)
-            elif coin.status == STATUS_PENDING and still_qualified:
+            elif coin.status == STATUS_PENDING and self._entry_signal_ok(coin):
                 self._execute_pending_short(coin)
 
         if coin.short or coin.long1 or coin.long2:
@@ -1190,6 +1219,8 @@ class MomentumScanner:
     def _execute_pending_short(self, coin: CoinStrategy) -> None:
         """Fire short to Binance immediately when 15m-qualified retrace triggers."""
         sym = coin.symbol
+        if not self._entry_signal_ok(coin):
+            return
         ok, _ = self._order_session_ok()
         if not ok or sym in self._in_flight or coin.short:
             return
@@ -1200,6 +1231,8 @@ class MomentumScanner:
 
     def _try_open_short(self, coin: CoinStrategy) -> None:
         sym = coin.symbol
+        if not self._entry_signal_ok(coin):
+            return
         if sym in self._in_flight:
             return
         if self._one_at_a_time:

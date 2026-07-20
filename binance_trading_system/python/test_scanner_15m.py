@@ -425,6 +425,34 @@ def test_pending_keeps_latched_15m_during_retrace() -> None:
         else:
             os.environ["SCANNER_EXEC"] = prev
 
+def test_stale_pending_demoted_when_live_15m_collapses() -> None:
+    prev = os.environ.get("SCANNER_EXEC")
+    os.environ["SCANNER_EXEC"] = "0"
+    try:
+        sc = MomentumScanner(FakeConnector(), lambda: True)
+        sym = "STALEUSDT"
+        base = 100.0
+        _seed_base(sc, sym, base)
+        spike = base * 1.055
+        sc.on_tick(sym, spike)
+        coin = sc._coins[sym]
+        retrace_price = spike * (1.0 - 0.008)
+        sc.on_tick(sym, retrace_price)
+        assert coin.status == STATUS_PENDING
+        # Simulate pump fully reversed — live 15m would collapse on real ticks.
+        coin.pct_15m = -8.0
+        coin.retrace_pct = 18.0
+        sc._demote_stale_pending(coin)
+        assert coin.status == STATUS_WATCHING
+        assert coin.qualifying_pct == 0.0
+        print("OK stale pending demoted when live 15m dead / retrace exhausted")
+    finally:
+        if prev is None:
+            os.environ.pop("SCANNER_EXEC", None)
+        else:
+            os.environ["SCANNER_EXEC"] = prev
+
+
 if __name__ == "__main__":
     try:
         test_multi_tf_gain_then_retrace_pending()
@@ -442,6 +470,7 @@ if __name__ == "__main__":
         test_gap_to_4pct_opens_long1_then_long2()
         test_settle_delay_blocks_long1()
         test_pending_keeps_latched_15m_during_retrace()
+        test_stale_pending_demoted_when_live_15m_collapses()
     except AssertionError as e:
         print("FAIL", e, file=sys.stderr)
         raise SystemExit(1)
