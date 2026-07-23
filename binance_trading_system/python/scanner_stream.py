@@ -22,7 +22,8 @@ TESTNET_WS = "wss://stream.binancefuture.com/ws"
 RECONNECT_MIN_SEC = 0.05
 RECONNECT_MAX_SEC = 5.0
 # Offload on_tick so asyncio can answer Binance WS keepalive pings (prevents 1011 timeouts).
-_TICK_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="scanner-tick")
+# Single worker + scanner RLock — prevents concurrent ticks from racing strategy state.
+_TICK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scanner-tick")
 
 
 def _parse_mini_ticker(msg: dict[str, Any]) -> tuple[str, float, int, float | None, float | None] | None:

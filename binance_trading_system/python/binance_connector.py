@@ -639,13 +639,17 @@ class BinanceConnector:
         return total
 
     def _position_side_param_for_leg(self, side: str, leg: str) -> dict[str, str]:
-        """Map scanner leg to hedge positionSide — keeps short + long legs separate."""
+        """Map order to hedge positionSide by side — BUY→LONG, SELL→SHORT.
+
+        Recovery Short1/Short2 use leg LONG1/LONG2 with side SELL and MUST open SHORT,
+        not reduce the primary LONG.
+        """
         if not self.is_hedge_mode():
             return {}
-        leg_u = (leg or "").upper()
-        if leg_u == "SHORT":
+        side_u = (side or "").upper()
+        if side_u == "SELL":
             return {"positionSide": "SHORT"}
-        if leg_u in ("LONG1", "LONG2"):
+        if side_u == "BUY":
             return {"positionSide": "LONG"}
         return self._position_side_param(side)
 
@@ -1893,7 +1897,7 @@ class BinanceConnector:
         self.prepare_symbol_cached(sym, leverage, "ISOLATED")
         from leverage_policy import exchange_leverage
 
-        exchange_lev = exchange_leverage(leg)
+        exchange_lev = exchange_leverage(leg, side_u)
         tick = self.book_ticker(sym)
         if not tick:
             return {"ok": False, "error": f"no tick for {sym}"}

@@ -473,6 +473,70 @@ def test_stale_pending_demoted_when_live_15m_collapses() -> None:
             os.environ["SCANNER_EXEC"] = prev
 
 
+def test_long_tp_with_shorts_flattens_full_pair() -> None:
+    """Closing primary long while Short1/Short2 open must not leave orphan shorts."""
+    with _no_smart_exit():
+        conn = FakeConnector()
+        sc = MomentumScanner(conn, lambda: True)
+        sym = "TESTUSDT"
+        entry = 100.0
+        sc.load_symbols([sym])
+        sc.on_tick(sym, entry)
+        coin = sc._coins[sym]
+        from momentum_scanner import (
+            LegPosition,
+            LONG_TP_PCT,
+            MAGIC_LONG1,
+            MAGIC_LONG2,
+            MAGIC_SHORT,
+            LONG1_LEVERAGE,
+            LONG2_LEVERAGE,
+            SHORT_LEVERAGE,
+            STATUS_CLOSED,
+            STATUS_LONG2,
+        )
+
+        tp = entry * (1.0 + LONG_TP_PCT / 100.0)
+        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, tp)
+        coin.short = LegPosition("SELL", entry * 0.98, 0.4, LONG1_LEVERAGE, MAGIC_SHORT, None)
+        coin.long2 = LegPosition("SELL", entry * 0.96, 0.4, LONG2_LEVERAGE, MAGIC_LONG2, None)
+        coin.status = STATUS_LONG2
+        sc.on_tick(sym, tp + 0.01)
+        assert coin.long1 is None and coin.short is None and coin.long2 is None
+        assert coin.status == STATUS_CLOSED
+    print("OK long TP with shorts flattens full pair")
+
+
+def test_failed_entry_keeps_sticky_submit() -> None:
+    """Failed order must not immediately clear submitted id (prevents retry storms)."""
+
+    class FailOnceConnector(FakeConnector):
+        def place_market_order(self, symbol, side, quantity, **kwargs) -> dict:
+            self.orders.append({"sym": symbol, "side": side, "qty": quantity})
+            return {"ok": False, "error": "timeout", "retryable": True}
+
+    conn = FailOnceConnector()
+    sc = MomentumScanner(conn, lambda: True)
+    sym = "STICKYUSDT"
+    sc.load_symbols([sym])
+    coin = sc._coins[sym]
+    coin.status = STATUS_PENDING
+    coin.price = 1.0
+    coin.best_pct = 6.0
+    coin.qualifying_pct = 6.0
+    coin.pct_15m = 6.0
+    coin.retrace_pct = 0.8
+    coin.highest_price = 1.02
+    coin.entry_signal_key = "STICKYUSDT_10200_600"
+    sc._try_open_long1_entry(coin)
+    assert coin.submitted_entry_signal_id, "submit id must stick after failure"
+    assert coin.entry_submit_ms > 0
+    n = len(conn.orders)
+    sc._try_open_long1_entry(coin)
+    assert len(conn.orders) == n, "sticky submit must block immediate re-send"
+    print("OK failed entry keeps sticky submit")
+
+
 if __name__ == "__main__":
     try:
         test_multi_tf_gain_then_retrace_pending()
@@ -492,6 +556,8 @@ if __name__ == "__main__":
         test_pending_entry_not_resent_on_every_tick()
         test_pending_keeps_latched_15m_during_retrace()
         test_stale_pending_demoted_when_live_15m_collapses()
+        test_long_tp_with_shorts_flattens_full_pair()
+        test_failed_entry_keeps_sticky_submit()
     except AssertionError as e:
         print("FAIL", e, file=sys.stderr)
         raise SystemExit(1)

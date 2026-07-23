@@ -268,8 +268,13 @@ class ExecutionEngine:
         if notional < min_n:
             return f"min_notional notional={notional:.4f} min={min_n}"
         max_open = int(self._max_open_trades())
-        if signal.leg not in ("LONG1", "LONG2") and max_open > 0 and self._open_trade_count() >= max_open:
-            return "max_open_trades"
+        if max_open > 0:
+            leg_u = (signal.leg or "").upper()
+            side_u = signal.side.upper()
+            # Same-symbol recovery shorts are exempt; primary long / standalone short count.
+            is_recovery_short = side_u == "SELL" and leg_u in ("LONG1", "LONG2")
+            if not is_recovery_short and self._open_trade_count() >= max_open:
+                return "max_open_trades"
         return None
 
     def _validate_short_first(self, signal: ExecutionSignal) -> str | None:

@@ -73,8 +73,19 @@ def test_hedge_tp_no_reduce_only() -> None:
     print("OK hedge TP uses positionSide only")
 
 
+def test_recovery_short_opens_position_side_short() -> None:
+    """Short1/Short2 are SELL + leg LONG1/LONG2 — must open SHORT, not reduce LONG."""
+    c = HedgeConnector()
+    for leg in ("LONG1", "LONG2"):
+        p = c._position_side_param_for_leg("SELL", leg)
+        assert p == {"positionSide": "SHORT"}, f"{leg} SELL must map to SHORT, got {p}"
+    assert c._position_side_param_for_leg("BUY", "LONG1") == {"positionSide": "LONG"}
+    print("OK recovery Short1/Short2 use positionSide=SHORT")
+
+
 if __name__ == "__main__":
     test_hedge_close_no_reduce_only()
     test_oneway_close_has_reduce_only()
     test_hedge_tp_no_reduce_only()
+    test_recovery_short_opens_position_side_short()
     print("test_close_orders: ALL OK")
