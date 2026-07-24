@@ -1549,7 +1549,7 @@ class BinanceConnector:
         if qty > pos_vol + 1e-12:
             qty = round_to_step(pos_vol, info["stepSize"])
         exit_side = "SELL" if pos_side == "BUY" else "BUY"
-        cid = f"{CLIENT_ID_PREFIX}_CL_{ps}_{int(_time.time())}"[:36]
+        cid = f"{CLIENT_ID_PREFIX}_CL_{ps}_{int(_time.time() * 1000)}"[:36]
         params = self._market_close_params(
             symbol=sym,
             side=exit_side,
@@ -1694,22 +1694,35 @@ class BinanceConnector:
         if not self.cfg.api_key:
             return {"ok": False, "error": "api_key_missing"}
 
-        self.cancel_all_orders(sym)
+        try:
+            self.cancel_all_orders(sym)
+        except Exception as e:
+            log.warning("close_position cancel orders %s: %s", sym, e)
+
         info = self.exchange_info()
         closed: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
         t0 = _time.perf_counter()
 
-        for p in positions:
+        def _close_one(p: dict[str, Any], *, attempt: int) -> None:
             pos_side = str(p.get("type", "")).upper()
             hedge_side = str(p.get("positionSide") or "").upper()
             pos_vol = float(p.get("volume", 0))
-            qty = round_to_step(float(volume) if volume is not None else pos_vol, info["stepSize"])
+            # Full-pair flatten always uses each leg's own size. A shared `volume`
+            # would wrongly size both LONG and SHORT to the same qty.
+            qty_src = pos_vol if volume is None or len(positions) > 1 else float(volume)
+            qty = round_to_step(qty_src, info["stepSize"])
             if qty < info["minQty"]:
                 qty = info["minQty"]
             if qty > pos_vol + 1e-12:
                 qty = round_to_step(pos_vol, info["stepSize"])
+            if qty <= 0:
+                errors.append({"position_side": hedge_side or pos_side, "error": "invalid_quantity"})
+                return
             exit_side = "SELL" if pos_side == "BUY" else "BUY"
-            cid = f"{CLIENT_ID_PREFIX}_CLS_{int(_time.time())}"[:36]
+            side_tag = hedge_side if hedge_side in ("LONG", "SHORT") else pos_side or "X"
+            # Unique per leg+attempt — duplicate newClientOrderId aborts the 2nd hedge leg.
+            cid = f"{CLIENT_ID_PREFIX}_CLS_{side_tag}_{int(_time.time() * 1000)}_{attempt}"[:36]
             params = self._market_close_params(
                 symbol=sym,
                 side=exit_side,
@@ -1721,7 +1734,9 @@ class BinanceConnector:
             try:
                 resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
             except RuntimeError as e:
-                return {"ok": False, "error": str(e), "closed": closed}
+                errors.append({"position_side": side_tag, "error": str(e)})
+                log.warning("close_position %s %s failed: %s", sym, side_tag, e)
+                return
             order_id = resp.get("orderId")
             entry = float(p.get("price_open") or 0)
             fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
@@ -1749,9 +1764,45 @@ class BinanceConnector:
                 }
             )
 
+        for i, p in enumerate(positions):
+            _close_one(p, attempt=i)
+
+        # Second pass: close any remaining hedge legs (first pass may have partially failed).
+        leftover = self.positions(sym, force=True)
+        if leftover:
+            log.warning("close_position %s retrying %s leftover leg(s)", sym, len(leftover))
+            try:
+                self.cancel_all_orders(sym)
+            except Exception:
+                pass
+            for j, p in enumerate(leftover):
+                _close_one(p, attempt=100 + j)
+
+        remaining = self.positions(sym, force=True)
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         self.invalidate_positions_cache()
-        return {"ok": True, "closed": closed, "latency_ms": latency_ms, "broker": "binance"}
+        ok = len(remaining) == 0 and len(closed) > 0
+        out: dict[str, Any] = {
+            "ok": ok,
+            "closed": closed,
+            "latency_ms": latency_ms,
+            "broker": "binance",
+        }
+        if errors:
+            out["errors"] = errors
+        if remaining:
+            out["error"] = "partial_close_remaining_legs"
+            out["remaining"] = [
+                {
+                    "position_side": p.get("positionSide"),
+                    "type": p.get("type"),
+                    "volume": p.get("volume"),
+                }
+                for p in remaining
+            ]
+        elif not closed:
+            out["error"] = (errors[0]["error"] if errors else "close_failed")
+        return out
 
     def close_all_positions(self) -> dict[str, Any]:
         """Market-close every open position across all symbols."""

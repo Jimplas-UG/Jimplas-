@@ -83,9 +83,50 @@ def test_recovery_short_opens_position_side_short() -> None:
     print("OK recovery Short1/Short2 use positionSide=SHORT")
 
 
+def test_pair_close_unique_client_ids() -> None:
+    """Both hedge legs must get distinct newClientOrderId (Binance rejects duplicates)."""
+    c = HedgeConnector()
+    c.cfg = SimpleNamespace(paper=False, api_key="k", api_secret="s", symbol="BTCUSDT")
+    seen: list[str] = []
+
+    def fake_positions(symbol=None, force=False):
+        if len(seen) >= 2:
+            return []
+        return [
+            {"type": "BUY", "positionSide": "LONG", "volume": 1.0, "price_open": 100.0, "symbol": "BTCUSDT"},
+            {"type": "SELL", "positionSide": "SHORT", "volume": 2.0, "price_open": 100.0, "symbol": "BTCUSDT"},
+        ]
+
+    def fake_request(method, path, params=None, signed=False, timeout=10.0):
+        cid = (params or {}).get("newClientOrderId")
+        assert cid, "missing client id"
+        assert cid not in seen, f"duplicate client id {cid}"
+        seen.append(cid)
+        return {"orderId": 1000 + len(seen), "avgPrice": "100"}
+
+    c.positions = fake_positions  # type: ignore[method-assign]
+    c.cancel_all_orders = lambda _s: None  # type: ignore[method-assign]
+    c.exchange_info = lambda: {"stepSize": 0.001, "minQty": 0.001, "tickSize": 0.01}  # type: ignore[method-assign]
+    c._request_keepalive = fake_request  # type: ignore[method-assign]
+    c.realized_pnl_for_order = lambda *_a, **_k: (0.0, 0.0)  # type: ignore[method-assign]
+    c.invalidate_positions_cache = lambda: None  # type: ignore[method-assign]
+    c._sanitize_fill_price = lambda *_a, **_k: 100.0  # type: ignore[method-assign]
+    c._estimate_close_pnl = lambda *_a, **_k: 0.0  # type: ignore[method-assign]
+    c._finalize_close_pnl = lambda *_a, **_k: 0.0  # type: ignore[method-assign]
+    c.is_hedge_mode = lambda: True  # type: ignore[method-assign]
+
+    r = c.close_position("BTCUSDT", None)
+    assert r.get("ok"), r
+    assert len(seen) >= 2
+    assert len(set(seen)) == len(seen)
+    assert any("LONG" in x for x in seen) and any("SHORT" in x for x in seen)
+    print("OK pair close unique client ids")
+
+
 if __name__ == "__main__":
     test_hedge_close_no_reduce_only()
     test_oneway_close_has_reduce_only()
     test_hedge_tp_no_reduce_only()
     test_recovery_short_opens_position_side_short()
+    test_pair_close_unique_client_ids()
     print("test_close_orders: ALL OK")

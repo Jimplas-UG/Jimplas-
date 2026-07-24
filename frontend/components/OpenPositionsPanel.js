@@ -97,11 +97,18 @@ export default function OpenPositionsPanel({
           closePair,
         });
         if (r.ok) {
-          const closed = r.closed?.[0];
-          const realized = Number(closed?.realized_pnl ?? closed?.profit ?? 0);
-          const msg = closed
-            ? `Closed ${label} ${fmtVol(closed.volume)} @ ${fmtPx(closed.fill_price)} · P&L ${fmtUsd(realized)}`
-            : `${label} closed`;
+          const closedLegs = Array.isArray(r.closed) ? r.closed : [];
+          const closed = closedLegs[0];
+          let msg;
+          if (closePair && closedLegs.length > 1) {
+            const pnl = closedLegs.reduce((s, x) => s + Number(x?.realized_pnl ?? x?.profit ?? 0), 0);
+            msg = `Closed pair ${symbol}: ${closedLegs.length} legs · P&L ${fmtUsd(pnl)}`;
+          } else if (closed) {
+            const realized = Number(closed?.realized_pnl ?? closed?.profit ?? 0);
+            msg = `Closed ${label} ${fmtVol(closed.volume)} @ ${fmtPx(closed.fill_price)} · P&L ${fmtUsd(realized)}`;
+          } else {
+            msg = `${label} closed`;
+          }
           onCloseMessage?.(msg);
           // Don't block the close button on UI refresh — run in background.
           if (onRefreshAfterClose) void onRefreshAfterClose();

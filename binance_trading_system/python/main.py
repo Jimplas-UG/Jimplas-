@@ -1070,6 +1070,15 @@ def api_close(body: CloseBody):
                 r = momentum_scanner.close_strategy(sym)
             else:
                 r = connector.close_position(sym, None)
+            # If scanner path left a hedge leg, force-flatten remaining exchange legs.
+            if r.get("ok"):
+                leftover = connector.positions(sym, force=True)
+                if leftover:
+                    log.warning("close_pair %s leftover after strategy close — forcing flatten", sym)
+                    r2 = connector.close_position(sym, None)
+                    if r2.get("closed"):
+                        merged = list(r.get("closed") or []) + list(r2.get("closed") or [])
+                        r = {**r2, "closed": merged, "ok": bool(r2.get("ok"))}
             if not r.get("ok"):
                 err = r.get("error") or "close_failed"
                 raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
