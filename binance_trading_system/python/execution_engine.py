@@ -278,12 +278,12 @@ class ExecutionEngine:
         return None
 
     def _validate_short_first(self, signal: ExecutionSignal) -> str | None:
-        """Long-first scanner: primary entry is LONG1 BUY; recovery shorts use LONG1/LONG2 SELL."""
+        """Long-first scanner: primary LONG1 BUY; desk MANUAL may BUY or SELL."""
         side = signal.side.upper()
         leg = (signal.leg or "").upper()
         if side != "BUY":
             return None
-        if leg == "LONG1":
+        if leg in ("LONG1", "MANUAL"):
             return None
         if leg == "LONG2":
             return "buy_blocked_not_primary_long"
@@ -302,9 +302,9 @@ class ExecutionEngine:
                 return f"hedge_mode_required:{err}"
         return None
 
-    def _available_margin(self) -> float:
+    def _available_margin(self, *, allow_stale_sec: float = 2.0) -> float:
         now = time.time()
-        if now - self._account_cache_ts < 2.0:
+        if now - self._account_cache_ts < allow_stale_sec:
             return self._account_cache[0]
         cfg = self._connector.cfg
         if cfg.paper or not cfg.api_key:
@@ -434,7 +434,8 @@ class ExecutionEngine:
         signal.leverage = apply_leverage_policy(signal.leg, signal.side, signal.leverage)
         exchange_lev = exchange_leverage(signal.leg, signal.side)
 
-        free = self._available_margin()
+        # Manual desk: tolerate slightly staler margin (avoid account REST on every tap).
+        free = self._available_margin(allow_stale_sec=8.0 if manual else 2.0)
         notional = float(signal.quantity) * signal.reference_price
         margin_need = notional / max(exchange_lev, 1) * 1.05
         if free < margin_need:
@@ -519,6 +520,7 @@ class ExecutionEngine:
                             "latency_ms": latency,
                             "signal_to_ack_ms": signal_to_ack,
                             "order_id": order_id,
+                            "manual": manual,
                         }
                     )
                     self._emit(
@@ -530,7 +532,7 @@ class ExecutionEngine:
                         latency_ms=latency,
                     )
                     log.info(
-                        "EXEC_OK coin=%s side=%s qty=%s fill=%s order_id=%s latency_ms=%s signal_to_ack_ms=%s retries=%s",
+                        "EXEC_OK coin=%s side=%s qty=%s fill=%s order_id=%s latency_ms=%s signal_to_ack_ms=%s retries=%s manual=%s",
                         sym,
                         side,
                         order_resp.get("quantity"),
@@ -539,46 +541,58 @@ class ExecutionEngine:
                         latency,
                         signal_to_ack,
                         attempt,
+                        manual,
                     )
 
-                    if signal.tp is not None:
-                        try:
-                            tp_price = float(signal.tp)
-                            ref = float(signal.reference_price or 0)
-                            fill_px = float(fill or 0)
-                            # Re-anchor TP to actual fill so slippage does not skew +/-2.5% rule.
-                            if fill_px > 0 and ref > 0:
-                                side_u = side.upper()
-                                leg_u = (signal.leg or "").upper()
-                                if side_u == "SELL" or leg_u == "SHORT":
-                                    if signal.tp < ref:
-                                        pct = (ref - float(signal.tp)) / ref
-                                        tp_price = fill_px * (1.0 - pct)
-                                elif side_u == "BUY" or leg_u.startswith("LONG"):
-                                    if signal.tp > ref:
-                                        pct = (float(signal.tp) - ref) / ref
-                                        tp_price = fill_px * (1.0 + pct)
-                            tp_resp = self._connector.place_tp_market(
-                                sym,
-                                side,
-                                tp_price,
-                                float(order_resp.get("quantity") or signal.quantity),
-                                client_id=f"{client_id}_TP",
-                            )
-                            if tp_resp.get("ok"):
-                                result.tp_order_id = tp_resp.get("order_id")
-                                self._emit(
-                                    signal,
-                                    "tp_placed",
-                                    order_id=tp_resp.get("order_id"),
-                                    client_order_id=f"{client_id}_TP",
+                    def _place_tp_and_lev() -> None:
+                        if signal.tp is not None:
+                            try:
+                                tp_price = float(signal.tp)
+                                ref = float(signal.reference_price or 0)
+                                fill_px = float(fill or 0)
+                                if fill_px > 0 and ref > 0:
+                                    side_u = side.upper()
+                                    leg_u = (signal.leg or "").upper()
+                                    if side_u == "SELL" or leg_u == "SHORT":
+                                        if signal.tp < ref:
+                                            pct = (ref - float(signal.tp)) / ref
+                                            tp_price = fill_px * (1.0 - pct)
+                                    elif side_u == "BUY" or leg_u.startswith("LONG"):
+                                        if signal.tp > ref:
+                                            pct = (float(signal.tp) - ref) / ref
+                                            tp_price = fill_px * (1.0 + pct)
+                                tp_resp = self._connector.place_tp_market(
+                                    sym,
+                                    side,
+                                    tp_price,
+                                    float(order_resp.get("quantity") or signal.quantity),
+                                    client_id=f"{client_id}_TP",
                                 )
-                        except Exception as e:
-                            log.warning("EXEC_TP_FAIL coin=%s err=%s", sym, e)
-                            self._emit(signal, "tp_failed", error=str(e))
+                                if tp_resp.get("ok"):
+                                    result.tp_order_id = tp_resp.get("order_id")
+                                    self._emit(
+                                        signal,
+                                        "tp_placed",
+                                        order_id=tp_resp.get("order_id"),
+                                        client_order_id=f"{client_id}_TP",
+                                    )
+                            except Exception as e:
+                                log.warning("EXEC_TP_FAIL coin=%s err=%s", sym, e)
+                                self._emit(signal, "tp_failed", error=str(e))
+                        if hasattr(self._connector, "ensure_exchange_leverage"):
+                            self._connector.ensure_exchange_leverage(sym, exchange_lev)
 
-                    if hasattr(self._connector, "ensure_exchange_leverage"):
-                        self._connector.ensure_exchange_leverage(sym, exchange_lev)
+                    # Manual: return fill ACK immediately — TP/leverage follow in background.
+                    if manual:
+                        import threading
+
+                        threading.Thread(
+                            target=_place_tp_and_lev,
+                            daemon=True,
+                            name=f"manual-tp-{sym}",
+                        ).start()
+                    else:
+                        _place_tp_and_lev()
 
                     return result
                 except Exception as e:

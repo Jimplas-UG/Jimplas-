@@ -22,14 +22,14 @@ def sizing_leverage(leg: str, side: str = "") -> int | None:
     """Leverage for notional / margin math — primary long 5x, recovery shorts 10x."""
     leg_u = (leg or "").upper()
     side_u = side.upper()
+    if leg_u == "MANUAL":
+        return SHORT_LEVERAGE
     if leg_u == "SHORT":
         return SHORT_LEVERAGE
     if leg_u == "LONG1":
         return SHORT_LEVERAGE if side_u == "BUY" else LONG1_LEVERAGE
     if leg_u == "LONG2":
         return LONG2_LEVERAGE
-    if leg_u == "MANUAL" and side_u == "SELL":
-        return SHORT_LEVERAGE
     return None
 
 

@@ -31,7 +31,7 @@ def test_required_per_leg() -> None:
     assert required_leverage("LONG1", "SELL") == 10
     assert required_leverage("LONG2", "SELL") == 10
     assert required_leverage("MANUAL", "SELL") == 5
-    assert required_leverage("MANUAL", "BUY") is None
+    assert required_leverage("MANUAL", "BUY") == 5
     print("OK required per leg")
 
 

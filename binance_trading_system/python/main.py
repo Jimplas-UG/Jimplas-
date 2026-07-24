@@ -350,7 +350,7 @@ class BridgeAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if path in _SENSITIVE_PATHS:
             key = _rate_limit_key(request)
-            limit = 8 if path == "/api/order" else 20
+            limit = 30 if path == "/api/order" else 20
             if not _rate_ok(key, limit, path=path):
                 return JSONResponse({"detail": "rate limit exceeded"}, status_code=429)
         return await call_next(request)
@@ -409,6 +409,8 @@ class OrderBody(BaseModel):
     sl: float | None = Field(None, ge=0)
     tp: float | None = Field(None, ge=0)
     magic: int = Field(77002002, ge=0)
+    # Optional — when set, skip bookTicker REST (app/WS already has price).
+    reference_price: float | None = Field(None, gt=0)
 
 
 class CloseBody(BaseModel):
@@ -868,30 +870,46 @@ def api_positions(symbol: str | None = None):
 
 @app.post("/api/order")
 def api_order(body: OrderBody):
+    """Fast manual desk order — BUY or SELL. Minimize REST before MARKET fill ACK."""
+    t_api = time.perf_counter()
     if os.environ.get("FORWARD_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
         raise HTTPException(status_code=403, detail={"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True})
     sym = body.symbol.upper()
+    side_u = body.side.upper()
+
+    # Prefer cached positions (1.5s) — avoids positionRisk REST on every tap when warm.
     ok_iso, iso_reason = pair_gate.can_open(
-        sym, momentum_scanner._global_active_symbol, lambda: connector.positions()
+        sym,
+        momentum_scanner._global_active_symbol,
+        lambda: connector.positions(),
     )
     if not ok_iso:
         raise HTTPException(status_code=400, detail={"ok": False, "error": iso_reason})
     if pair_gate.is_close_pending(sym):
         raise HTTPException(status_code=409, detail={"ok": False, "error": "close_pending"})
-    side_u = body.side.upper()
-    if side_u == "BUY":
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "ok": False,
-                "error": "buy_blocked_short_first_policy",
-                "detail": "All trades start with SHORT. Recovery longs are opened by the scanner only.",
-            },
-        )
-    tick = connector.book_ticker(sym)
-    if not tick:
-        raise HTTPException(status_code=400, detail={"ok": False, "error": f"no tick for {sym}"})
-    ref = tick["ask"] if side_u == "BUY" else tick["bid"]
+
+    # Reference price: client → WS tick → scanner last → REST bookTicker (slow path).
+    ref = float(body.reference_price or 0)
+    if ref <= 0:
+        try:
+            tick_stream.subscribe_symbol(sym)
+            ws_tick = tick_stream.get_tick(sym, max_age_sec=5.0)
+            if ws_tick:
+                ref = float(ws_tick["ask"] if side_u == "BUY" else ws_tick["bid"])
+        except Exception:
+            pass
+    if ref <= 0:
+        coin = momentum_scanner._coins.get(sym)
+        if coin and coin.price > 0:
+            ref = float(coin.price)
+    if ref <= 0:
+        tick = connector.book_ticker(sym)
+        if not tick:
+            raise HTTPException(status_code=400, detail={"ok": False, "error": f"no tick for {sym}"})
+        ref = tick["ask"] if side_u == "BUY" else tick["bid"]
+
+    now_ms = int(time.time() * 1000)
+    # Unique id every tap — old MANUAL_sym_side_magic blocked all re-orders as duplicates.
     signal = ExecutionSignal(
         symbol=sym,
         side=side_u,
@@ -902,8 +920,8 @@ def api_order(body: OrderBody):
         leg="MANUAL",
         sl=body.sl,
         tp=body.tp,
-        signal_id=f"MANUAL_{sym}_{side_u}_{body.magic}",
-        signal_ts_ms=int(time.time() * 1000),
+        signal_id=f"MANUAL_{sym}_{side_u}_{body.magic}_{now_ms}",
+        signal_ts_ms=now_ms,
         margin_type="ISOLATED",
     )
     r = momentum_scanner.engine.execute(signal, manual=True)
@@ -925,7 +943,16 @@ def api_order(body: OrderBody):
         latency_ms=r.latency_ms,
         source="manual",
     )
-    connector.invalidate_positions_cache()
+
+    def _bg_after_manual_order() -> None:
+        try:
+            connector.invalidate_positions_cache()
+            connector.positions(force=True)
+        except Exception:
+            pass
+
+    threading.Thread(target=_bg_after_manual_order, daemon=True, name="manual-pos-refresh").start()
+    api_ms = round((time.perf_counter() - t_api) * 1000, 1)
     return {
         "ok": True,
         "symbol": sym,
@@ -935,6 +962,7 @@ def api_order(body: OrderBody):
         "order_id": r.order_id,
         "client_order_id": r.client_order_id,
         "latency_ms": r.latency_ms,
+        "api_latency_ms": api_ms,
         "signal_to_ack_ms": r.signal_to_ack_ms,
         "broker": "binance",
     }

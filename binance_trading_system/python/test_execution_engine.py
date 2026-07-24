@@ -126,17 +126,33 @@ def test_long2_buy_blocked() -> None:
     print("OK LONG2 BUY blocked (recovery shorts only)")
 
 
-def test_buy_blocked_manual_leg() -> None:
+def test_manual_buy_allowed() -> None:
+    """Desk manual trading must allow BUY and SELL for speed/flexibility."""
     conn = MockConnector()
-    conn._short_qty = 10.0
     eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
     r = eng.execute(
         _signal(side="BUY", leg="MANUAL", tp=None, signal_id="buy_manual_1"),
         manual=True,
     )
-    assert not r.ok
-    assert r.error == "buy_blocked_short_first_policy"
-    print("OK manual BUY blocked")
+    assert r.ok, r.error
+    assert r.side == "BUY"
+    print("OK manual BUY allowed")
+
+
+def test_manual_orders_unique_client_ids() -> None:
+    conn = MockConnector()
+    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    r1 = eng.execute(
+        _signal(side="SELL", leg="MANUAL", tp=None, signal_id="MANUAL_X_SELL_1_100"),
+        manual=True,
+    )
+    r2 = eng.execute(
+        _signal(side="SELL", leg="MANUAL", tp=None, signal_id="MANUAL_X_SELL_1_101"),
+        manual=True,
+    )
+    assert r1.ok and r2.ok
+    assert r1.client_order_id != r2.client_order_id
+    print("OK manual orders get unique client ids")
 
 
 def test_tp_created() -> None:
@@ -264,7 +280,8 @@ if __name__ == "__main__":
         test_qualified_buy_executes,
         test_primary_long_buy_without_exchange_short,
         test_long2_buy_blocked,
-        test_buy_blocked_manual_leg,
+        test_manual_buy_allowed,
+        test_manual_orders_unique_client_ids,
         test_tp_created,
         test_invalid_quantity_blocked,
         test_precision_min_notional,
