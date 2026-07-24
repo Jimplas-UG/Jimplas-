@@ -45,12 +45,9 @@ _PUBLIC_PATHS = frozenset({"/health", "/ping", "/docs", "/openapi.json"})
 _PUBLIC_QUOTE_PREFIXES = ("/api/tick/", "/api/bars/", "/api/symbol/", "/api/scanner/", "/api/symbols")
 
 
-def _env_testnet_override() -> bool | None:
-    """When BINANCE_TESTNET is set in env, force that mode (cash = 0)."""
-    raw = os.environ.get("BINANCE_TESTNET")
-    if raw is None or str(raw).strip() == "":
-        return None
-    return _truthy(raw)
+def _env_testnet_default() -> bool:
+    """Startup preference from env; login/session may switch testnet <-> mainnet."""
+    return _truthy(os.environ.get("BINANCE_TESTNET", "0"))
 
 
 def _is_public_quote(path: str) -> bool:
@@ -184,6 +181,30 @@ user_data_stream = BinanceUserDataStream(
 )
 
 
+async def _restart_streams_for_mode(reason: str) -> None:
+    """Reconnect WS/REST feeds after testnet <-> mainnet switch."""
+    log.info(
+        "restarting market streams (%s) mode=%s",
+        reason,
+        "testnet" if connector.cfg.testnet else "mainnet",
+    )
+    try:
+        await user_data_stream.stop()
+    except Exception as e:
+        log.warning("user stream stop: %s", e)
+    try:
+        await tick_stream.stop()
+    except Exception as e:
+        log.warning("tick stream stop: %s", e)
+    try:
+        await scanner_stream.stop()
+    except Exception as e:
+        log.warning("scanner stream stop: %s", e)
+    await tick_stream.start()
+    await scanner_stream.start()
+    await user_data_stream.start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _app_loop
@@ -258,14 +279,13 @@ async def lifespan(app: FastAPI):
     async def restore_persisted_session() -> None:
         if connector._connected:
             return
-        force_tn = _env_testnet_override()
-        wanted_tn = force_tn if force_tn is not None else bool(connector.cfg.testnet)
+        boot_tn = bool(connector.cfg.testnet)
         if _truthy(os.environ.get("BINANCE_PAPER", "0")):
             connector.cfg.paper = True
             connector.configure(
                 os.environ.get("BINANCE_API_KEY", ""),
                 os.environ.get("BINANCE_API_SECRET", ""),
-                wanted_tn,
+                _env_testnet_default(),
             )
             if connector.status_snapshot().get("connected"):
                 log.info("Binance paper session restored from env")
@@ -274,32 +294,45 @@ async def lifespan(app: FastAPI):
         stored = await asyncio.to_thread(load_binance_session)
         if stored:
             stored_tn = bool(stored.get("testnet", False))
-            use_tn = wanted_tn if force_tn is not None else stored_tn
-            if force_tn is not None and stored_tn != use_tn:
-                log.warning(
-                    "persisted session testnet=%s ignored; env BINANCE_TESTNET forces %s",
-                    stored_tn,
-                    use_tn,
-                )
             try:
                 acct, err = await asyncio.to_thread(
                     _attempt_binance_login,
                     stored["api_key"],
                     stored["api_secret"],
-                    use_tn,
+                    stored_tn,
                 )
-                if acct is not None:
-                    if force_tn is not None and stored_tn != use_tn:
+                # Keys often work on only one network — try the other before giving up.
+                if acct is None and _is_key_env_mismatch(err or ""):
+                    alt_tn = not stored_tn
+                    acct, err = await asyncio.to_thread(
+                        _attempt_binance_login,
+                        stored["api_key"],
+                        stored["api_secret"],
+                        alt_tn,
+                    )
+                    if acct is not None:
+                        stored_tn = alt_tn
                         await asyncio.to_thread(
                             save_binance_session,
                             stored["api_key"],
                             stored["api_secret"],
-                            use_tn,
+                            stored_tn,
                         )
+                        log.info("persisted session auto-switched to %s", "testnet" if stored_tn else "mainnet")
+                if acct is not None:
                     log.info(
                         "Binance session restored from persisted credentials mode=%s",
-                        "testnet" if use_tn else "mainnet",
+                        "testnet" if stored_tn else "mainnet",
                     )
+                    if bool(connector.cfg.testnet) != boot_tn:
+                        await _restart_streams_for_mode("session_restore")
+                    else:
+                        # Listen key is account-bound — refresh user stream after login.
+                        try:
+                            await user_data_stream.stop()
+                            await user_data_stream.start()
+                        except Exception as e:
+                            log.warning("user stream refresh: %s", e)
                     _flush_scanner_snapshot()
                     return
                 log.warning("persisted Binance session invalid: %s", err)
@@ -310,16 +343,25 @@ async def lifespan(app: FastAPI):
         env_key = os.environ.get("BINANCE_API_KEY", "").strip()
         env_secret = os.environ.get("BINANCE_API_SECRET", "").strip()
         if env_key and env_secret:
+            prefer_tn = _env_testnet_default()
             try:
                 acct, err = await asyncio.to_thread(
-                    _attempt_binance_login, env_key, env_secret, wanted_tn
+                    _attempt_binance_login, env_key, env_secret, prefer_tn
                 )
+                if acct is None and _is_key_env_mismatch(err or ""):
+                    acct, err = await asyncio.to_thread(
+                        _attempt_binance_login, env_key, env_secret, not prefer_tn
+                    )
+                    if acct is not None:
+                        prefer_tn = not prefer_tn
                 if acct is not None:
-                    await asyncio.to_thread(save_binance_session, env_key, env_secret, wanted_tn)
+                    await asyncio.to_thread(save_binance_session, env_key, env_secret, prefer_tn)
                     log.info(
                         "Binance session restored from env credentials mode=%s",
-                        "testnet" if wanted_tn else "mainnet",
+                        "testnet" if prefer_tn else "mainnet",
                     )
+                    if bool(connector.cfg.testnet) != boot_tn:
+                        await _restart_streams_for_mode("env_restore")
                     _flush_scanner_snapshot()
                 elif err:
                     log.warning("env session restore failed: %s", err)
@@ -670,18 +712,17 @@ def _attempt_binance_login(api_key: str, api_secret: str, testnet: bool) -> tupl
 
 @app.post("/api/login")
 async def api_login(body: LoginBody):
-    """Fast login — time sync + account verify; alt env in one request when enabled."""
+    """Fast login — time sync + account verify; auto-detects testnet vs mainnet when enabled."""
     t0 = time.perf_counter()
-    force_tn = _env_testnet_override()
-    resolved_testnet = bool(force_tn) if force_tn is not None else bool(body.testnet)
+    prev_tn = bool(connector.cfg.testnet)
+    resolved_testnet = bool(body.testnet)
     auto_detected = False
-    allow_auto = bool(body.auto_detect_env) and force_tn is None
+    allow_auto = bool(body.auto_detect_env)
     log.info(
-        "login attempt key=%s… testnet=%s auto_detect=%s env_force=%s",
+        "login attempt key=%s… testnet=%s auto_detect=%s",
         (body.api_key or "")[:6],
         resolved_testnet,
         allow_auto,
-        force_tn,
     )
     acct, err = await asyncio.to_thread(
         _attempt_binance_login, body.api_key, body.api_secret, resolved_testnet
@@ -711,6 +752,15 @@ async def api_login(body: LoginBody):
         daemon=True,
     ).start()
 
+    if resolved_testnet != prev_tn:
+        await _restart_streams_for_mode("login")
+    else:
+        try:
+            await user_data_stream.stop()
+            await user_data_stream.start()
+        except Exception as e:
+            log.warning("user stream refresh on login: %s", e)
+
     def _post_login_seed() -> None:
         try:
             hot = [
@@ -727,11 +777,12 @@ async def api_login(body: LoginBody):
     _flush_scanner_snapshot()
     st = momentum_scanner.status()
     log.info(
-        "login success total_ms=%.0f can_execute=%s block=%s mode=%s",
+        "login success total_ms=%.0f can_execute=%s block=%s mode=%s auto=%s",
         (time.perf_counter() - t0) * 1000,
         st.get("can_execute"),
         st.get("exec_block"),
         "testnet" if resolved_testnet else "live",
+        auto_detected,
     )
     return {
         "ok": True,

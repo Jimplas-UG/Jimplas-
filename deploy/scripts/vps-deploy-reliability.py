@@ -28,7 +28,6 @@ for kv in \
   'SCANNER_EXIT_COST_PCT=0.8' \
   'SCANNER_LONG1_PARTITION_PCT=12.5' \
   'SCANNER_LONG2_PARTITION_PCT=12.5' \
-  'BINANCE_TESTNET=0' \
   'BINANCE_PAPER=0' \
   'FORWARD_DRY_RUN=0' \
   'SCANNER_EXEC=1'
@@ -41,13 +40,8 @@ do
     echo "${key}=${val}" >> "$ENVF"
   fi
 done
-# Hard cash-live assert
-grep -q '^BINANCE_TESTNET=0$' "$ENVF" || { echo 'FATAL: BINANCE_TESTNET must be 0 for cash'; exit 1; }
-grep -q '^FORWARD_DRY_RUN=0$' "$ENVF" || { echo 'FATAL: FORWARD_DRY_RUN must be 0 for cash'; exit 1; }
-
-# Drop stale testnet sessions so restore cannot override cash mainnet.
-rm -f /var/lib/bilshenz/binance-session.json
-echo cleared_stale_binance_session
+# Keep BINANCE_TESTNET as-is (0=mainnet prefer, 1=testnet prefer). Login/session may switch.
+grep -q '^FORWARD_DRY_RUN=0$' "$ENVF" || { echo 'FATAL: FORWARD_DRY_RUN must be 0'; exit 1; }
 
 # Unlock stale 40/40 risk lock so balanced short sizing takes effect.
 python3 - <<'PY'
@@ -83,15 +77,11 @@ python3 - <<'PY'
 import json, time, urllib.request
 h=json.load(open('/tmp/h.json'))
 sc=h.get('scanner_stream') or {}
-print('connected', h.get('connected'), 'mode', h.get('mode'), 'scanner_ws', sc.get('ws_connected'), 'ticks', sc.get('ticks_received'), 'can_execute', (h.get('scanner') or {}).get('can_execute'))
-if h.get('mode') == 'testnet':
-    raise SystemExit('FATAL: health mode=testnet with BINANCE_TESTNET=0 — cash blocked')
+print('connected', h.get('connected'), 'mode', h.get('mode'), 'scanner_ws', sc.get('ws_connected'), 'rest', sc.get('rest_active'), 'ticks', sc.get('ticks_received'), 'can_execute', (h.get('scanner') or {}).get('can_execute'))
 time.sleep(3)
 h2=json.loads(urllib.request.urlopen('http://127.0.0.1:8766/health', timeout=10).read())
-t2=(h2.get('scanner_stream') or {}).get('ticks_received') or 0
-print('ticks_after_3s', t2, 'mode', h2.get('mode'))
-if h2.get('mode') == 'testnet':
-    raise SystemExit('FATAL: still testnet after restart')
+ss2=h2.get('scanner_stream') or {}
+print('ticks_after_3s', ss2.get('ticks_received'), 'rest', ss2.get('rest_active'), 'mode', h2.get('mode'))
 PY
 
 # Desk WS auth remapping: token query should not 403
