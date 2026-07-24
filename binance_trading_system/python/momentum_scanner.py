@@ -23,6 +23,14 @@ from typing import Any, Callable
 from execution_engine import ExecutionEngine, ExecutionSignal
 from leverage_policy import LONG1_LEVERAGE, LONG2_LEVERAGE, SHORT_LEVERAGE
 from pair_isolation import pair_gate
+from strategy_guards import (
+    clamp_exit_cost_pct,
+    clamp_pullback_mfe_pct,
+    clamp_pullback_pct,
+    clamp_smart_exit_pct,
+    is_toxic_legacy_sizing,
+    sanitize_partitions,
+)
 
 log = logging.getLogger("momentum_scanner")
 
@@ -36,19 +44,24 @@ SHORT_TP_PCT = float(os.environ.get("SCANNER_SHORT_TP_PCT", "2.5"))
 LONG1_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG1_PCT", "2.0"))
 LONG2_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG2_PCT", "4.0"))
 LONG_TP_PCT = float(os.environ.get("SCANNER_LONG_TP_PCT", "2.5"))
-# Trail only after MFE — old 0.5% from entry peak was a hard -0.5% stop that killed recovery.
-LONG_BOTH_PULLBACK_PCT = float(os.environ.get("SCANNER_LONG_PULLBACK_PCT", "1.5"))
-LONG_PULLBACK_MIN_MFE_PCT = float(os.environ.get("SCANNER_LONG_PULLBACK_MFE_PCT", "1.5"))
+# Trail only after MFE — hard floor prevents env/UI regressing to 0.5% hard stop.
+LONG_BOTH_PULLBACK_PCT = clamp_pullback_pct(float(os.environ.get("SCANNER_LONG_PULLBACK_PCT", "1.5")))
+LONG_PULLBACK_MIN_MFE_PCT = clamp_pullback_mfe_pct(
+    float(os.environ.get("SCANNER_LONG_PULLBACK_MFE_PCT", "1.5"))
+)
 LONG_ENTRY_DELAY_MS = int(os.environ.get("SCANNER_LONG_DELAY_MS", "3000"))
-# Smart exit must clear ~long TP economics (~6% of partition on 50%×5×2.5%), not 0.4% noise.
-SMART_EXIT_NET_PCT = float(os.environ.get("SCANNER_SMART_EXIT_PCT", "6.0"))
-EXIT_COST_BUFFER_PCT = float(os.environ.get("SCANNER_EXIT_COST_PCT", "0.8"))
+# Smart exit floor — env 1.0 is forced up to 6.0; 0 disables.
+SMART_EXIT_NET_PCT = clamp_smart_exit_pct(float(os.environ.get("SCANNER_SMART_EXIT_PCT", "6.0")))
+EXIT_COST_BUFFER_PCT = clamp_exit_cost_pct(float(os.environ.get("SCANNER_EXIT_COST_PCT", "0.8")))
 # Leverage fixed in leverage_policy.py — primary Long 5x, Short1/Short2 10x sizing.
 DEFAULT_PARTITION_USD = float(os.environ.get("SCANNER_PARTITION_USD", os.environ.get("SCANNER_RISK_USDT", "100")))
 SHORT_PARTITION_PCT = float(os.environ.get("SCANNER_SHORT_PARTITION_PCT", "50"))
-# ~1:1 dollar notional vs long (50%×5 ≈ 12.5%×10 + 12.5%×10). Old 40/40 was 3.2:1 short-heavy.
+# ~1:1 dollar notional vs long; sanitize clamps toxic 40/40.
 LONG1_PARTITION_PCT = float(os.environ.get("SCANNER_LONG1_PARTITION_PCT", "12.5"))
 LONG2_PARTITION_PCT = float(os.environ.get("SCANNER_LONG2_PARTITION_PCT", "12.5"))
+SHORT_PARTITION_PCT, LONG1_PARTITION_PCT, LONG2_PARTITION_PCT, _ = sanitize_partitions(
+    SHORT_PARTITION_PCT, LONG1_PARTITION_PCT, LONG2_PARTITION_PCT
+)
 MAX_WATCHLIST = int(os.environ.get("SCANNER_MAX_WATCH", "80"))
 ONE_TRADE_AT_A_TIME = os.environ.get("SCANNER_ONE_TRADE", "1").strip().lower() not in ("0", "false", "off")
 SUBMIT_STALE_MS = int(os.environ.get("SCANNER_SUBMIT_STALE_MS", "90000"))
@@ -370,7 +383,16 @@ class MomentumScanner:
         return True
 
     def _exit_cost_buffer_usd(self) -> float:
-        return max(0.0, self._partition_usd * EXIT_COST_BUFFER_PCT / 100.0)
+        return max(0.0, self._partition_usd * clamp_exit_cost_pct(EXIT_COST_BUFFER_PCT) / 100.0)
+
+    def _effective_pullback_pct(self) -> float:
+        return clamp_pullback_pct(LONG_BOTH_PULLBACK_PCT)
+
+    def _effective_pullback_mfe_pct(self) -> float:
+        return clamp_pullback_mfe_pct(LONG_PULLBACK_MIN_MFE_PCT)
+
+    def _effective_smart_exit_pct(self) -> float:
+        return clamp_smart_exit_pct(SMART_EXIT_NET_PCT)
 
     def _long_pullback_allowed(self, coin: CoinStrategy, price: float) -> bool:
         """Trail long only after profitable MFE — never act as a hard stop below entry."""
@@ -384,10 +406,10 @@ class MomentumScanner:
         if price <= entry:
             return False
         mfe_pct = ((peak - entry) / entry) * 100.0
-        if mfe_pct < LONG_PULLBACK_MIN_MFE_PCT:
+        if mfe_pct < self._effective_pullback_mfe_pct():
             return False
         pullback_pct = ((peak - price) / peak) * 100.0
-        if pullback_pct < LONG_BOTH_PULLBACK_PCT:
+        if pullback_pct < self._effective_pullback_pct():
             return False
         # Keep long open while recovery shorts may still be needed / are open underwater.
         if coin.short or coin.long2:
@@ -758,7 +780,37 @@ class MomentumScanner:
             coin.short1_submit_ms = 0
             coin.short2_submit_ms = 0
 
+    def _apply_partition_guards(self, *, persist: bool = False) -> bool:
+        """Clamp live risk knobs so toxic sizing cannot stick (env/UI/JSON)."""
+        long_pct, s1, s2, changed = sanitize_partitions(
+            self._short_pct, self._long1_pct, self._long2_pct
+        )
+        if changed or is_toxic_legacy_sizing(self._short_pct, self._long1_pct, self._long2_pct):
+            log.warning(
+                "scanner risk sanitized long=%s%% short1=%s%% short2=%s%% (was %s/%s/%s)",
+                long_pct,
+                s1,
+                s2,
+                self._short_pct,
+                self._long1_pct,
+                self._long2_pct,
+            )
+            self._short_pct = long_pct
+            self._long1_pct = s1
+            self._long2_pct = s2
+            if persist:
+                self._persist_risk_config()
+            return True
+        self._short_pct = long_pct
+        self._long1_pct = s1
+        self._long2_pct = s2
+        return changed
+
     def _persist_risk_config(self) -> None:
+        # Never write toxic values to disk.
+        self._short_pct, self._long1_pct, self._long2_pct, _ = sanitize_partitions(
+            self._short_pct, self._long1_pct, self._long2_pct
+        )
         payload = {
             "partition_usd": self._partition_usd,
             "short_pct": self._short_pct,
@@ -780,6 +832,7 @@ class MomentumScanner:
     def _load_persisted_risk(self) -> None:
         try:
             if not os.path.isfile(RISK_CONFIG_PATH):
+                self._apply_partition_guards(persist=False)
                 return
             with open(RISK_CONFIG_PATH, encoding="utf-8") as fh:
                 raw = json.load(fh)
@@ -794,14 +847,22 @@ class MomentumScanner:
             self._risk_locked = bool(raw.get("locked"))
             if "exec_halted" in raw:
                 self._user_exec_halted = bool(raw.get("exec_halted"))
+            # Migrate toxic locked 40/40 off disk on every boot.
+            if self._apply_partition_guards(persist=True):
+                self._risk_locked = False
+                self._persist_risk_config()
             log.info(
-                "scanner risk loaded partition=$%s locked=%s exec_halted=%s",
+                "scanner risk loaded partition=$%s long=%s%% s1=%s%% s2=%s%% locked=%s exec_halted=%s",
                 self._partition_usd,
+                self._short_pct,
+                self._long1_pct,
+                self._long2_pct,
                 self._risk_locked,
                 self._user_exec_halted,
             )
         except Exception as e:
             log.warning("load risk config: %s", e)
+            self._apply_partition_guards(persist=False)
 
     def set_risk_config(
         self,
@@ -811,19 +872,28 @@ class MomentumScanner:
         long2_pct: float | None = None,
     ) -> dict[str, Any]:
         if self._risk_locked:
-            changed = (
-                (partition_usd is not None and float(partition_usd) != self._partition_usd)
-                or (short_pct is not None and float(short_pct) != self._short_pct)
-                or (long1_pct is not None and float(long1_pct) != self._long1_pct)
-                or (long2_pct is not None and float(long2_pct) != self._long2_pct)
-            )
-            if changed:
-                return {
-                    "ok": False,
-                    "error": "partition_locked",
-                    "partition_usd": self._partition_usd,
-                    "locked": True,
-                }
+            # Still migrate if locked toxic config somehow remains.
+            if is_toxic_legacy_sizing(self._short_pct, self._long1_pct, self._long2_pct):
+                self._apply_partition_guards(persist=True)
+                self._risk_locked = False
+                self._persist_risk_config()
+            else:
+                changed = (
+                    (partition_usd is not None and float(partition_usd) != self._partition_usd)
+                    or (short_pct is not None and float(short_pct) != self._short_pct)
+                    or (long1_pct is not None and float(long1_pct) != self._long1_pct)
+                    or (long2_pct is not None and float(long2_pct) != self._long2_pct)
+                )
+                if changed:
+                    return {
+                        "ok": False,
+                        "error": "partition_locked",
+                        "partition_usd": self._partition_usd,
+                        "short_pct": self._short_pct,
+                        "long1_pct": self._long1_pct,
+                        "long2_pct": self._long2_pct,
+                        "locked": True,
+                    }
         if partition_usd is not None and partition_usd > 0:
             self._partition_usd = float(partition_usd)
         if short_pct is not None:
@@ -832,6 +902,7 @@ class MomentumScanner:
             self._long1_pct = max(1.0, min(100.0, float(long1_pct)))
         if long2_pct is not None:
             self._long2_pct = max(1.0, min(100.0, float(long2_pct)))
+        self._apply_partition_guards(persist=False)
         if partition_usd is not None and partition_usd > 0:
             self._risk_locked = True
         self._persist_risk_config()
@@ -843,7 +914,14 @@ class MomentumScanner:
             self._long2_pct,
             self._risk_locked,
         )
-        return {"ok": True, "locked": self._risk_locked}
+        return {
+            "ok": True,
+            "locked": self._risk_locked,
+            "partition_usd": self._partition_usd,
+            "short_pct": self._short_pct,
+            "long1_pct": self._long1_pct,
+            "long2_pct": self._long2_pct,
+        }
 
     def close_strategy(self, symbol: str) -> dict[str, Any]:
         """Close full pair — short + all hedge longs on symbol."""
@@ -1809,8 +1887,10 @@ class MomentumScanner:
         coin.unrealized_pnl = long1_pnl + long2_pnl + short_pnl
         cost_buf = self._exit_cost_buffer_usd()
 
-        if SMART_EXIT_NET_PCT > 0 and self._partition_usd > 0:
-            smart_target = self._partition_usd * SMART_EXIT_NET_PCT / 100.0 + cost_buf
+        if self._effective_smart_exit_pct() > 0 and self._partition_usd > 0:
+            smart_target = (
+                self._partition_usd * self._effective_smart_exit_pct() / 100.0 + cost_buf
+            )
             if coin.unrealized_pnl >= smart_target:
                 log.info(
                     "scanner %s SMART_EXIT pnl=%.4f target=%.4f",
@@ -1867,7 +1947,7 @@ class MomentumScanner:
                 trough = coin.recovery_peak_price
                 if trough > 0:
                     bounce_pct = ((price - trough) / trough) * 100.0
-                    if bounce_pct >= LONG_BOTH_PULLBACK_PCT and self._short_pullback_allowed(coin):
+                    if bounce_pct >= self._effective_pullback_pct() and self._short_pullback_allowed(coin):
                         log.info(
                             "scanner %s SHORT1_PULLBACK %.2f%% (trough=%s price=%s)",
                             coin.symbol,
@@ -1887,7 +1967,7 @@ class MomentumScanner:
                 trough = coin.long2_peak_price
                 if trough > 0:
                     bounce_pct = ((price - trough) / trough) * 100.0
-                    if bounce_pct >= LONG_BOTH_PULLBACK_PCT and self._short_pullback_allowed(coin):
+                    if bounce_pct >= self._effective_pullback_pct() and self._short_pullback_allowed(coin):
                         log.info(
                             "scanner %s SHORT2_PULLBACK %.2f%% (trough=%s price=%s)",
                             coin.symbol,
