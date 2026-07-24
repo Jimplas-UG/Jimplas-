@@ -1487,6 +1487,8 @@ class BinanceConnector:
         symbol: str,
         position_side: str,
         volume: float | None = None,
+        *,
+        _dust_retry: bool = False,
     ) -> dict[str, Any]:
         """Market-close a single hedge leg (SHORT or LONG) without touching the other side."""
         import time as _time
@@ -1543,11 +1545,15 @@ class BinanceConnector:
         hedge_side = str(p.get("positionSide") or ps).upper()
         pos_vol = float(p.get("volume", 0))
         info = self.exchange_info()
-        qty = round_to_step(float(volume) if volume is not None else pos_vol, info["stepSize"])
+        # Full-leg exits (volume=None) always use live exchange size to avoid dust.
+        qty_src = pos_vol if volume is None else min(float(volume), pos_vol)
+        qty = round_to_step(qty_src, info["stepSize"])
         if qty < info["minQty"]:
             qty = info["minQty"]
         if qty > pos_vol + 1e-12:
             qty = round_to_step(pos_vol, info["stepSize"])
+        if qty <= 0:
+            return {"ok": False, "error": "invalid_quantity"}
         exit_side = "SELL" if pos_side == "BUY" else "BUY"
         cid = f"{CLIENT_ID_PREFIX}_CL_{ps}_{int(_time.time() * 1000)}"[:36]
         params = self._market_close_params(
@@ -1568,7 +1574,6 @@ class BinanceConnector:
         fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
         if fill <= 0:
             fill = float(p.get("price_open") or 0)
-        # Best-effort income lookup once — never sleep on the close ACK path.
         rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
         quote_qty = fill * qty
         if abs(rpnl) < 1e-12:
@@ -1576,7 +1581,6 @@ class BinanceConnector:
         else:
             rpnl = self._finalize_close_pnl(sym, pos_side, entry, fill, qty, rpnl, quote_qty)
         self.invalidate_positions_cache()
-        latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         leg_row = {
             "symbol": sym,
             "side": pos_side,
@@ -1589,6 +1593,34 @@ class BinanceConnector:
             "commission": commission,
             "order": order_id,
         }
+        # One dust retry only — never recurse forever on unsellable residuals.
+        if volume is None and not _dust_retry:
+            leftover = [
+                x
+                for x in self.positions(sym, force=True)
+                if str(x.get("positionSide") or "").upper() == ps
+                or (ps == "LONG" and str(x.get("type", "")).upper() == "BUY")
+                or (
+                    ps == "SHORT"
+                    and str(x.get("type", "")).upper() == "SELL"
+                    and str(x.get("positionSide") or "SHORT").upper() != "LONG"
+                )
+            ]
+            left_vol = float(leftover[0].get("volume") or 0) if leftover else 0.0
+            if left_vol > 1e-12:
+                log.warning("close_by_position_side %s %s leftover %.8f — retry once", sym, ps, left_vol)
+                retry = self.close_by_position_side(sym, ps, None, _dust_retry=True)
+                if retry.get("ok") and retry.get("closed"):
+                    closed = [leg_row] + list(retry.get("closed") or [])
+                    latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
+                    return {"ok": True, "closed": closed, **leg_row, "latency_ms": latency_ms, "broker": "binance"}
+                if not retry.get("ok") and retry.get("error") != f"no_{ps.lower()}_leg":
+                    return {
+                        "ok": False,
+                        "error": retry.get("error") or "leftover_dust",
+                        "closed": [leg_row],
+                    }
+        latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         return {"ok": True, "closed": [leg_row], **leg_row, "latency_ms": latency_ms, "broker": "binance"}
 
     def trade_pnl_calendar(self, days: int = 400) -> dict[str, Any]:

@@ -241,6 +241,52 @@ def test_long_dump_does_not_stop_at_half_pct() -> None:
     print("OK long dump does not hard-stop before short1")
 
 
+def test_naked_long_pullback_waits_for_recovery() -> None:
+    """Do not trail-scratch a naked long before Short1/Short2 can still arm."""
+    with _no_smart_exit():
+        conn = FakeConnector()
+        sc = MomentumScanner(conn, lambda: True)
+        sym = "TESTUSDT"
+        entry = 100.0
+        sc.load_symbols([sym])
+        sc.on_tick(sym, entry)
+        coin = sc._coins[sym]
+        from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, STATUS_LONG1
+
+        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
+        coin.long1_peak_price = entry * 1.02  # +2% MFE
+        coin.status = STATUS_LONG1
+        coin.long1_opened_ms = int(time.time() * 1000) - 60_000
+        # Pull back 1.6% from peak but still above entry — old logic scratched here.
+        sc.on_tick(sym, entry * 1.003)
+        assert coin.long1 is not None, "naked long must stay open for recovery window"
+        assert coin.short is None
+    print("OK naked long pullback waits for Short1 window")
+
+
+def test_short2_opens_after_short1_closed() -> None:
+    """Continued dump to -4% must still arm Short2 after Short1 already TP'd."""
+    with _no_smart_exit():
+        conn = FakeConnector()
+        sc = MomentumScanner(conn, lambda: True)
+        sym = "TESTUSDT"
+        entry = 100.0
+        sc.load_symbols([sym])
+        sc.on_tick(sym, entry)
+        coin = sc._coins[sym]
+        from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, STATUS_LONG1
+
+        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
+        coin.status = STATUS_LONG1
+        coin.long1_opened_ms = int(time.time() * 1000) - 120_000
+        coin.short = None
+        coin.short_was_closed = True
+        coin.long1_adverse_peak_pct = LONG2_ADVERSE_PCT + 0.1
+        sc.on_tick(sym, entry * (1.0 - LONG2_ADVERSE_PCT / 100.0 - 0.001))
+        assert coin.long2 is not None, "short2 should open at -4% even after short1 closed"
+    print("OK short2: opens after short1 already closed")
+
+
 def test_short2_opens_at_4pct_from_long() -> None:
     with _no_smart_exit():
         conn = FakeConnector()
@@ -334,6 +380,9 @@ def test_smart_exit_closes_full_pair() -> None:
     coin.long1 = LegPosition("BUY", entry, 3.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
     coin.long1_peak_price = entry
     coin.status = STATUS_LONG1
+    # Recovery cycle finished — smart exit may harvest; naked pre-Short1 must not.
+    coin.short_was_closed = True
+    coin.long2_was_closed = True
     sc.on_tick(sym, entry * 1.028)
     assert coin.long1 is None, "smart exit should flatten when net clears TP economics"
     print("OK smart exit: closes full pair at meaningful net target")
@@ -603,6 +652,8 @@ if __name__ == "__main__":
         test_short1_opens_and_keeps_hedge_on_bounce_while_underwater()
         test_short1_pullback_closes_when_pair_net_positive()
         test_long_dump_does_not_stop_at_half_pct()
+        test_naked_long_pullback_waits_for_recovery()
+        test_short2_opens_after_short1_closed()
         test_short2_opens_at_4pct_from_long()
         test_short1_blocked_without_long()
         test_pair_flattens_when_long1_removed()

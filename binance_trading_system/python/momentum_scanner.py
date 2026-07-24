@@ -362,18 +362,24 @@ class MomentumScanner:
         return True
 
     def _short2_entry_allowed(self, coin: CoinStrategy) -> bool:
-        """Short2 after Short1 when price is live ≥4% below primary long entry."""
-        if not coin.long1 or not coin.short:
-            return False
-        if coin.long2 is not None or coin.long2_was_closed:
+        """Short2 at live ≥4% below primary long entry.
+
+        Prefer Short1 still open. If Short1 already TP'd/trailed while long is still
+        underwater, still allow Short2 so a continued dump is not left naked.
+        """
+        if not coin.long1 or coin.long2 is not None or coin.long2_was_closed:
             return False
         if not self._exchange_has_long(coin.symbol):
             log.warning("scanner SHORT2 blocked %s: no exchange long", coin.symbol)
             return False
-        if not self._exchange_has_short(coin.symbol):
-            log.warning("scanner SHORT2 blocked %s: no exchange short1", coin.symbol)
-            return False
-        if not self._short1_settle_elapsed(coin):
+        if coin.short is not None:
+            if not self._exchange_has_short(coin.symbol):
+                log.warning("scanner SHORT2 blocked %s: no exchange short1", coin.symbol)
+                return False
+            if not self._short1_settle_elapsed(coin):
+                return False
+        elif not coin.short_was_closed:
+            # Short1 never armed — wait for -2% Short1 first (ordered recovery).
             return False
         live_adv = self._long_adverse_pct(coin, 1)
         if live_adv > coin.long1_adverse_peak_pct:
@@ -381,6 +387,19 @@ class MomentumScanner:
         if live_adv < LONG2_ADVERSE_PCT:
             return False
         return True
+
+    def _recovery_still_eligible(self, coin: CoinStrategy) -> bool:
+        """True while Long can still arm Short1 and/or Short2 on a dump."""
+        if not coin.long1 or coin.long1_was_closed:
+            return False
+        if coin.long2 is not None:
+            return False
+        # Short1 not yet taken, or Short2 still available after Short1 closed.
+        if coin.short is None and not coin.short_was_closed:
+            return True
+        if coin.long2 is None and not coin.long2_was_closed:
+            return True
+        return False
 
     def _exit_cost_buffer_usd(self) -> float:
         return max(0.0, self._partition_usd * clamp_exit_cost_pct(EXIT_COST_BUFFER_PCT) / 100.0)
@@ -405,13 +424,17 @@ class MomentumScanner:
         # Must still be in profit vs entry (otherwise this is a stop, not a trail).
         if price <= entry:
             return False
+        # Do not trail-scratch a naked long while Short1/Short2 can still arm.
+        # 1.5% MFE + 1.5% pullback ≈ breakeven before fees and kills the −2% recovery window.
+        if self._recovery_still_eligible(coin) and coin.short is None and coin.long2 is None:
+            return False
         mfe_pct = ((peak - entry) / entry) * 100.0
         if mfe_pct < self._effective_pullback_mfe_pct():
             return False
         pullback_pct = ((peak - price) / peak) * 100.0
         if pullback_pct < self._effective_pullback_pct():
             return False
-        # Keep long open while recovery shorts may still be needed / are open underwater.
+        # Keep long open while recovery shorts are open underwater.
         if coin.short or coin.long2:
             if coin.unrealized_pnl < self._exit_cost_buffer_usd():
                 return False
@@ -769,14 +792,19 @@ class MomentumScanner:
         """Drop pending queue rows whose pump died or dump already finished."""
         if coin.status != STATUS_PENDING or coin.long1:
             return
+        # Do not wipe sticky submit if exchange already has a long (ACK may be late).
+        if coin.submitted_entry_signal_id and self._exchange_has_long(coin.symbol):
+            return
         if not self._live_entry_ok(coin) or float(coin.retrace_pct or 0.0) > MAX_RETRACE_ENTRY_PCT:
             coin.status = STATUS_WATCHING
             coin.qualifying_pct = 0.0
             coin.entry_signal_key = ""
-            coin.submitted_entry_signal_id = ""
+            # Keep sticky submit ids briefly so a late fill can still recover.
+            if not coin.submitted_entry_signal_id:
+                coin.submitted_entry_signal_id = ""
+                coin.entry_submit_ms = 0
             coin.submitted_short1_signal_id = ""
             coin.submitted_short2_signal_id = ""
-            coin.entry_submit_ms = 0
             coin.short1_submit_ms = 0
             coin.short2_submit_ms = 0
 
@@ -1647,6 +1675,8 @@ class MomentumScanner:
 
     def _try_open_long1_entry(self, coin: CoinStrategy) -> None:
         sym = coin.symbol
+        if coin.long1:
+            return
         if not self._entry_signal_ok(coin):
             return
         if sym in self._in_flight:
@@ -1658,9 +1688,19 @@ class MomentumScanner:
         if pair_gate.is_close_pending(sym):
             return
         # Never stack scanner Long on top of an existing exchange long (manual or orphan).
-        if not coin.long1 and self._exchange_has_long(sym):
+        if self._exchange_has_long(sym):
             log.warning("scanner LONG1 blocked %s: exchange long already open", sym)
             self._last_exec_error = f"{sym}: exchange_long_already_open"
+            # Adopt orphan/manual long so we manage it instead of waiting to stack.
+            try:
+                qty = float(getattr(self._connector, "exchange_long_qty", lambda _s: 0)(sym) or 0)
+                leg = self._exchange_long_leg(sym) or {}
+                entry = float(leg.get("price_open") or coin.price or 0)
+                if qty > 1e-12 and entry > 0:
+                    tp = entry * (1.0 + LONG_TP_PCT / 100.0)
+                    self._recover_primary_long_entry(coin, sym, qty, entry, tp)
+            except Exception as e:
+                log.warning("scanner LONG1 adopt %s: %s", sym, e)
             return
         ok_iso, _ = pair_gate.can_open(sym, self._global_active_symbol, self._exchange_positions)
         if not ok_iso:
@@ -1702,8 +1742,16 @@ class MomentumScanner:
             self._last_exec_latency_ms = r.latency_ms or None
             if r.ok:
                 fill = float(r.fill_price or entry)
+                fill_qty = float(r.quantity or qty)
+                # Prefer live exchange qty so partial fills / rounding do not desync closes.
+                try:
+                    ex_qty = float(getattr(self._connector, "exchange_long_qty", lambda _s: 0)(sym) or 0)
+                    if ex_qty > fill_qty:
+                        fill_qty = ex_qty
+                except Exception:
+                    pass
                 tp = fill * (1.0 + LONG_TP_PCT / 100.0)
-                coin.long1 = LegPosition("BUY", fill, qty, SHORT_LEVERAGE, MAGIC_LONG1, tp)
+                coin.long1 = LegPosition("BUY", fill, fill_qty, SHORT_LEVERAGE, MAGIC_LONG1, tp)
                 coin.status = STATUS_LONG1
                 coin.long1_peak_price = fill
                 coin.long1_adverse_peak_pct = 0.0
@@ -1713,7 +1761,7 @@ class MomentumScanner:
                     self._connector.ensure_exchange_leverage(sym, SHORT_LEVERAGE)
                 self._last_exec_error = None
                 self._emit_signal(coin, "entered")
-                log.info("scanner LONG %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
+                log.info("scanner LONG %s qty=%s @ %s order=%s latency_ms=%s", sym, fill_qty, fill, r.order_id, r.latency_ms)
             elif r.stage in ("duplicate", "in_flight") or "duplicate" in str(r.error or "").lower():
                 if not self._recover_primary_long_entry(coin, sym, qty, entry, tp):
                     self._last_exec_error = None
@@ -1857,9 +1905,9 @@ class MomentumScanner:
             self._in_flight.discard(sym)
 
     def _try_open_recovery_short(self, coin: CoinStrategy) -> None:
-        if coin.short is None:
+        if coin.short is None and not coin.short_was_closed:
             self._try_open_short1(coin)
-        else:
+        elif coin.long2 is None:
             self._try_open_short2(coin)
 
     def _try_open_short(self, coin: CoinStrategy) -> None:
@@ -1901,7 +1949,12 @@ class MomentumScanner:
             smart_target = (
                 self._partition_usd * self._effective_smart_exit_pct() / 100.0 + cost_buf
             )
-            if coin.unrealized_pnl >= smart_target:
+            # Naked long still eligible for Short1 — let hard TP (+2.5%) handle winners;
+            # smart-exit was closing ~+2.7% moves before any −2% recovery dump.
+            if (
+                coin.unrealized_pnl >= smart_target
+                and not (self._recovery_still_eligible(coin) and coin.short is None and coin.long2 is None)
+            ):
                 log.info(
                     "scanner %s SMART_EXIT pnl=%.4f target=%.4f",
                     sym,
@@ -1919,7 +1972,7 @@ class MomentumScanner:
         if coin.long1 and coin.short is None and self._short1_entry_allowed(coin):
             self._try_open_short1(coin)
 
-        if coin.long1 and coin.short and coin.long2 is None and self._short2_entry_allowed(coin):
+        if coin.long1 and coin.long2 is None and self._short2_entry_allowed(coin):
             self._try_open_short2(coin)
 
         # Primary long: hard TP at +2.5%; trail only after profitable MFE (not a -0.5% stop).
@@ -2001,16 +2054,35 @@ class MomentumScanner:
             return
         pair_gate.begin_close(sym)
         try:
+            # Always flatten the full hedge side — memory qty can undershoot after
+            # partial fills / rounding and leave dust that later stacks another long.
             if hasattr(self._connector, "close_by_position_side"):
                 if leg.side == "BUY":
-                    r = self._connector.close_by_position_side(sym, "LONG", leg.qty)
+                    r = self._connector.close_by_position_side(sym, "LONG", None)
                 else:
-                    r = self._connector.close_by_position_side(sym, "SHORT", leg.qty)
+                    r = self._connector.close_by_position_side(sym, "SHORT", None)
             else:
-                r = self._connector.close_leg(sym, leg.magic, leg.qty)
+                r = self._connector.close_leg(sym, leg.magic, None)
             if not r.get("ok"):
                 log.warning("scanner close leg failed %s %s: %s", sym, leg_name, r.get("error") or r)
                 return
+            # Live only: verify side is flat before clearing scanner state (paper uses in-memory legs).
+            if not getattr(self._connector.cfg, "paper", False):
+                still_open = False
+                if leg.side == "BUY" and self._exchange_has_long(sym):
+                    still_open = True
+                if leg.side == "SELL" and self._exchange_has_short(sym):
+                    still_open = True
+                if still_open:
+                    log.warning("scanner close leg %s %s reported ok but side still open — forcing", sym, leg_name)
+                    try:
+                        if hasattr(self._connector, "close_position"):
+                            self._connector.close_position(sym, None)
+                        else:
+                            return
+                    except Exception as e:
+                        log.warning("scanner force flatten %s: %s", sym, e)
+                        return
             if leg_name == "long1":
                 coin.long1 = None
                 coin.long1_peak_price = None
