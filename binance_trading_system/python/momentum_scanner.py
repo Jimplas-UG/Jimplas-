@@ -3,9 +3,10 @@ Tick-by-tick multi-coin momentum scanner + retracement strategy.
 
 Monitors 1m / 3m / 5m / 15m rolling % on every price tick (max study window 15m).
 Entry: 15m move >= 5% gain, then >= 0.7% retrace from peak → Long (50% partition, 5x).
-Recovery: -2% adverse from Long → Short1 (40%, 10x); at -4% adverse from Long → Short2 (40%, 10x).
-Each recovery leg requires confirmed anchor long, settle delay, and tracked adverse peak (no guess).
-Each leg TP at 2.5%; optional 0.5% pullback exit remains as backup.
+Recovery: -2% adverse from Long → Short1 (~12.5%, 10x); at -4% → Short2 (~12.5%, 10x)
+so short notional ≈ long notional (not 3.2:1 short-heavy).
+Each recovery leg requires confirmed anchor long, settle delay, and live adverse (not peak-only).
+Each leg TP at 2.5%; trail pullback only after profitable MFE (never a -0.5% hard stop).
 """
 
 from __future__ import annotations
@@ -35,14 +36,19 @@ SHORT_TP_PCT = float(os.environ.get("SCANNER_SHORT_TP_PCT", "2.5"))
 LONG1_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG1_PCT", "2.0"))
 LONG2_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG2_PCT", "4.0"))
 LONG_TP_PCT = float(os.environ.get("SCANNER_LONG_TP_PCT", "2.5"))
-LONG_BOTH_PULLBACK_PCT = float(os.environ.get("SCANNER_LONG_PULLBACK_PCT", "0.5"))
+# Trail only after MFE — old 0.5% from entry peak was a hard -0.5% stop that killed recovery.
+LONG_BOTH_PULLBACK_PCT = float(os.environ.get("SCANNER_LONG_PULLBACK_PCT", "1.5"))
+LONG_PULLBACK_MIN_MFE_PCT = float(os.environ.get("SCANNER_LONG_PULLBACK_MFE_PCT", "1.5"))
 LONG_ENTRY_DELAY_MS = int(os.environ.get("SCANNER_LONG_DELAY_MS", "3000"))
-SMART_EXIT_NET_PCT = float(os.environ.get("SCANNER_SMART_EXIT_PCT", "1.0"))
+# Smart exit must clear ~long TP economics (~6% of partition on 50%×5×2.5%), not 0.4% noise.
+SMART_EXIT_NET_PCT = float(os.environ.get("SCANNER_SMART_EXIT_PCT", "6.0"))
+EXIT_COST_BUFFER_PCT = float(os.environ.get("SCANNER_EXIT_COST_PCT", "0.8"))
 # Leverage fixed in leverage_policy.py — primary Long 5x, Short1/Short2 10x sizing.
 DEFAULT_PARTITION_USD = float(os.environ.get("SCANNER_PARTITION_USD", os.environ.get("SCANNER_RISK_USDT", "100")))
 SHORT_PARTITION_PCT = float(os.environ.get("SCANNER_SHORT_PARTITION_PCT", "50"))
-LONG1_PARTITION_PCT = float(os.environ.get("SCANNER_LONG1_PARTITION_PCT", "40"))
-LONG2_PARTITION_PCT = float(os.environ.get("SCANNER_LONG2_PARTITION_PCT", "40"))
+# ~1:1 dollar notional vs long (50%×5 ≈ 12.5%×10 + 12.5%×10). Old 40/40 was 3.2:1 short-heavy.
+LONG1_PARTITION_PCT = float(os.environ.get("SCANNER_LONG1_PARTITION_PCT", "12.5"))
+LONG2_PARTITION_PCT = float(os.environ.get("SCANNER_LONG2_PARTITION_PCT", "12.5"))
 MAX_WATCHLIST = int(os.environ.get("SCANNER_MAX_WATCH", "80"))
 ONE_TRADE_AT_A_TIME = os.environ.get("SCANNER_ONE_TRADE", "1").strip().lower() not in ("0", "false", "off")
 SUBMIT_STALE_MS = int(os.environ.get("SCANNER_SUBMIT_STALE_MS", "90000"))
@@ -324,7 +330,7 @@ class MomentumScanner:
         return ((entry - coin.price) / entry) * 100.0
 
     def _short1_entry_allowed(self, coin: CoinStrategy) -> bool:
-        """Short1 after primary long + settle delay when price falls 2% from long entry."""
+        """Short1 after primary long + settle delay when price is live ≥2% below long entry."""
         if not coin.long1 or coin.long1_was_closed:
             return False
         if coin.short is not None or coin.short_was_closed:
@@ -334,12 +340,16 @@ class MomentumScanner:
             return False
         if not self._long1_settle_elapsed(coin):
             return False
-        if coin.long1_adverse_peak_pct < LONG1_ADVERSE_PCT:
+        live_adv = self._long_adverse_pct(coin, 1)
+        if live_adv > coin.long1_adverse_peak_pct:
+            coin.long1_adverse_peak_pct = live_adv
+        # Require live adverse — peak-only latched shorts into bounces and got scraped.
+        if live_adv < LONG1_ADVERSE_PCT:
             return False
         return True
 
     def _short2_entry_allowed(self, coin: CoinStrategy) -> bool:
-        """Short2 after Short1 when price falls 4% from primary long entry."""
+        """Short2 after Short1 when price is live ≥4% below primary long entry."""
         if not coin.long1 or not coin.short:
             return False
         if coin.long2 is not None or coin.long2_was_closed:
@@ -352,7 +362,42 @@ class MomentumScanner:
             return False
         if not self._short1_settle_elapsed(coin):
             return False
-        if coin.long1_adverse_peak_pct < LONG2_ADVERSE_PCT:
+        live_adv = self._long_adverse_pct(coin, 1)
+        if live_adv > coin.long1_adverse_peak_pct:
+            coin.long1_adverse_peak_pct = live_adv
+        if live_adv < LONG2_ADVERSE_PCT:
+            return False
+        return True
+
+    def _exit_cost_buffer_usd(self) -> float:
+        return max(0.0, self._partition_usd * EXIT_COST_BUFFER_PCT / 100.0)
+
+    def _long_pullback_allowed(self, coin: CoinStrategy, price: float) -> bool:
+        """Trail long only after profitable MFE — never act as a hard stop below entry."""
+        if not coin.long1 or coin.long1_peak_price is None:
+            return False
+        entry = float(coin.long1.entry or 0)
+        peak = float(coin.long1_peak_price or 0)
+        if entry <= 0 or peak <= 0 or price <= 0:
+            return False
+        # Must still be in profit vs entry (otherwise this is a stop, not a trail).
+        if price <= entry:
+            return False
+        mfe_pct = ((peak - entry) / entry) * 100.0
+        if mfe_pct < LONG_PULLBACK_MIN_MFE_PCT:
+            return False
+        pullback_pct = ((peak - price) / peak) * 100.0
+        if pullback_pct < LONG_BOTH_PULLBACK_PCT:
+            return False
+        # Keep long open while recovery shorts may still be needed / are open underwater.
+        if coin.short or coin.long2:
+            if coin.unrealized_pnl < self._exit_cost_buffer_usd():
+                return False
+        return True
+
+    def _short_pullback_allowed(self, coin: CoinStrategy) -> bool:
+        """Do not strip hedge while pair is still net-negative after costs."""
+        if coin.long1 and coin.unrealized_pnl < self._exit_cost_buffer_usd():
             return False
         return True
 
@@ -1762,9 +1807,10 @@ class MomentumScanner:
         long2_pnl = self._leg_pnl(coin.long2, price) if coin.long2 else 0.0
         short_pnl = self._leg_pnl(coin.short, price) if coin.short else 0.0
         coin.unrealized_pnl = long1_pnl + long2_pnl + short_pnl
+        cost_buf = self._exit_cost_buffer_usd()
 
         if SMART_EXIT_NET_PCT > 0 and self._partition_usd > 0:
-            smart_target = self._partition_usd * SMART_EXIT_NET_PCT / 100.0
+            smart_target = self._partition_usd * SMART_EXIT_NET_PCT / 100.0 + cost_buf
             if coin.unrealized_pnl >= smart_target:
                 log.info(
                     "scanner %s SMART_EXIT pnl=%.4f target=%.4f",
@@ -1786,45 +1832,42 @@ class MomentumScanner:
         if coin.long1 and coin.short and coin.long2 is None and self._short2_entry_allowed(coin):
             self._try_open_short2(coin)
 
-        # Primary long: TP at +2.5% or 0.5% retrace from its own peak.
-        # Closing long while shorts remain must flatten the full pair (no orphans).
+        # Primary long: hard TP at +2.5%; trail only after profitable MFE (not a -0.5% stop).
         if coin.long1:
+            if coin.long1_peak_price is None or price > coin.long1_peak_price:
+                coin.long1_peak_price = price
             long_exit_reason = ""
             if coin.long1.tp_price and price >= coin.long1.tp_price:
                 long_exit_reason = "LONG_TP"
-            elif coin.long1_peak_price is not None:
-                if price > coin.long1_peak_price:
-                    coin.long1_peak_price = price
-                peak = coin.long1_peak_price
-                if peak > 0:
-                    pullback_pct = ((peak - price) / peak) * 100.0
-                    if pullback_pct >= LONG_BOTH_PULLBACK_PCT:
-                        log.info(
-                            "scanner %s LONG_PULLBACK %.2f%% (peak=%s price=%s)",
-                            coin.symbol,
-                            pullback_pct,
-                            peak,
-                            price,
-                        )
-                        long_exit_reason = "LONG_PULLBACK"
+            elif self._long_pullback_allowed(coin, price):
+                peak = float(coin.long1_peak_price or price)
+                pullback_pct = ((peak - price) / peak) * 100.0 if peak > 0 else 0.0
+                log.info(
+                    "scanner %s LONG_PULLBACK %.2f%% (peak=%s price=%s entry=%s)",
+                    coin.symbol,
+                    pullback_pct,
+                    peak,
+                    price,
+                    coin.long1.entry,
+                )
+                long_exit_reason = "LONG_PULLBACK"
             if long_exit_reason:
                 if coin.short or coin.long2:
                     self._close_all(coin, f"{long_exit_reason}_FLATTEN")
                     return
                 self._close_leg(coin, "long1", reason=long_exit_reason)
 
-        # Short1: TP at -2.5% or 0.5% bounce from trough.
+        # Short1: TP closes short leg only (never force-lock long loss via pair flatten).
         if coin.short:
             if coin.short.tp_price and price <= coin.short.tp_price:
-                self._close_all(coin, "SHORT1_TP")
-                return
-            if coin.recovery_peak_price is not None:
+                self._close_leg(coin, "short", reason="SHORT1_TP")
+            elif coin.recovery_peak_price is not None:
                 if price < coin.recovery_peak_price:
                     coin.recovery_peak_price = price
                 trough = coin.recovery_peak_price
                 if trough > 0:
                     bounce_pct = ((price - trough) / trough) * 100.0
-                    if bounce_pct >= LONG_BOTH_PULLBACK_PCT:
+                    if bounce_pct >= LONG_BOTH_PULLBACK_PCT and self._short_pullback_allowed(coin):
                         log.info(
                             "scanner %s SHORT1_PULLBACK %.2f%% (trough=%s price=%s)",
                             coin.symbol,
@@ -1834,7 +1877,7 @@ class MomentumScanner:
                         )
                         self._close_leg(coin, "short", reason="SHORT1_PULLBACK")
 
-        # Short2: TP at -2.5% or 0.5% bounce from trough.
+        # Short2: TP at -2.5% or trail bounce only if hedge not still covering a net loss.
         if coin.long2 and coin.long2.side == "SELL":
             if coin.long2.tp_price and price <= coin.long2.tp_price:
                 self._close_leg(coin, "long2", reason="SHORT2_TP")
@@ -1844,7 +1887,7 @@ class MomentumScanner:
                 trough = coin.long2_peak_price
                 if trough > 0:
                     bounce_pct = ((price - trough) / trough) * 100.0
-                    if bounce_pct >= LONG_BOTH_PULLBACK_PCT:
+                    if bounce_pct >= LONG_BOTH_PULLBACK_PCT and self._short_pullback_allowed(coin):
                         log.info(
                             "scanner %s SHORT2_PULLBACK %.2f%% (trough=%s price=%s)",
                             coin.symbol,

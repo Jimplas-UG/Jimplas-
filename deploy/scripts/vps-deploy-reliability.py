@@ -19,7 +19,16 @@ git --no-pager log -1 --oneline
 ENVF=/etc/bilshenz.env
 grep -q '^FORWARD_DRY_RUN=' "$ENVF" && sed -i 's/^FORWARD_DRY_RUN=.*/FORWARD_DRY_RUN=0/' "$ENVF" || echo 'FORWARD_DRY_RUN=0' >> "$ENVF"
 grep -q '^SCANNER_EXEC=' "$ENVF" && sed -i 's/^SCANNER_EXEC=.*/SCANNER_EXEC=1/' "$ENVF" || echo 'SCANNER_EXEC=1' >> "$ENVF"
-for kv in 'SCANNER_MIN_LIVE_ENTRY_PCT=2.0' 'SCANNER_MAX_RETRACE_ENTRY_PCT=12.0'; do
+for kv in \
+  'SCANNER_MIN_LIVE_ENTRY_PCT=2.0' \
+  'SCANNER_MAX_RETRACE_ENTRY_PCT=12.0' \
+  'SCANNER_LONG_PULLBACK_PCT=1.5' \
+  'SCANNER_LONG_PULLBACK_MFE_PCT=1.5' \
+  'SCANNER_SMART_EXIT_PCT=6.0' \
+  'SCANNER_EXIT_COST_PCT=0.8' \
+  'SCANNER_LONG1_PARTITION_PCT=12.5' \
+  'SCANNER_LONG2_PARTITION_PCT=12.5'
+do
   key="${kv%%=*}"
   val="${kv#*=}"
   if grep -q "^${key}=" "$ENVF" 2>/dev/null; then
@@ -28,6 +37,29 @@ for kv in 'SCANNER_MIN_LIVE_ENTRY_PCT=2.0' 'SCANNER_MAX_RETRACE_ENTRY_PCT=12.0';
     echo "${key}=${val}" >> "$ENVF"
   fi
 done
+
+# Unlock stale 40/40 risk lock so balanced short sizing takes effect.
+python3 - <<'PY'
+import json, os
+path = "/var/lib/bilshenz/scanner-risk.json"
+try:
+    raw = {}
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh) or {}
+    raw["long1_pct"] = 12.5
+    raw["long2_pct"] = 12.5
+    raw["short_pct"] = float(raw.get("short_pct") or 50)
+    raw["locked"] = False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(raw, fh, indent=2)
+    os.replace(tmp, path)
+    print("risk_json_updated", raw)
+except Exception as e:
+    print("risk_json_skip", e)
+PY
 
 systemctl restart bilshenz-binance-api
 systemctl restart bilshenz-desk-api
