@@ -37,7 +37,7 @@ def _truthy(v: str | None) -> bool:
 class BinanceConfig:
     api_key: str = ""
     api_secret: str = ""
-    testnet: bool = True
+    testnet: bool = False
     symbol: str = ""
     leverage: int = 5
     margin_type: str = "ISOLATED"
@@ -2046,7 +2046,7 @@ def config_from_env() -> BinanceConfig:
     return BinanceConfig(
         api_key=os.environ.get("BINANCE_API_KEY", ""),
         api_secret=os.environ.get("BINANCE_API_SECRET", ""),
-        testnet=_truthy(os.environ.get("BINANCE_TESTNET", "1")),
+        testnet=_truthy(os.environ.get("BINANCE_TESTNET", "0")),
         symbol=os.environ.get("BINANCE_SYMBOL", "BTCUSDT").upper() or "BTCUSDT",
         leverage=int(os.environ.get("BINANCE_LEVERAGE", "5")),
         margin_type="ISOLATED",

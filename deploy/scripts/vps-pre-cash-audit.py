@@ -31,7 +31,9 @@ t0=time.time()
 h=get('http://127.0.0.1:8766/health')
 print('health_ms', round((time.time()-t0)*1000,1))
 sc=h.get('scanner') or {}; ss=h.get('scanner_stream') or {}
-print('connected', h.get('connected'), 'ws', ss.get('ws_connected'), 'ticks', ss.get('ticks_received'))
+print('connected', h.get('connected'), 'mode', h.get('mode'), 'ws', ss.get('ws_connected'), 'ticks', ss.get('ticks_received'))
+if h.get('mode') == 'testnet':
+  print('FATAL_MODE_TESTNET — cash blocked')
 print('can_execute', sc.get('can_execute'), 'block', sc.get('exec_block'), 'err', sc.get('last_exec_error'))
 print('active', sc.get('active_symbol'), 'pending', sc.get('best_pending'))
 print('risk', {k:sc.get(k) for k in ('partition_usd','short_partition_pct','long1_partition_pct','long2_partition_pct','long_pullback_pct','risk_locked','user_exec_halted','exec_enabled')})

@@ -45,6 +45,10 @@ done
 grep -q '^BINANCE_TESTNET=0$' "$ENVF" || { echo 'FATAL: BINANCE_TESTNET must be 0 for cash'; exit 1; }
 grep -q '^FORWARD_DRY_RUN=0$' "$ENVF" || { echo 'FATAL: FORWARD_DRY_RUN must be 0 for cash'; exit 1; }
 
+# Drop stale testnet sessions so restore cannot override cash mainnet.
+rm -f /var/lib/bilshenz/binance-session.json
+echo cleared_stale_binance_session
+
 # Unlock stale 40/40 risk lock so balanced short sizing takes effect.
 python3 - <<'PY'
 import json, os
@@ -76,10 +80,18 @@ systemctl is-active bilshenz-binance-api bilshenz-desk-api
 echo === health latency ===
 /usr/bin/time -f 'elapsed=%e' curl -sS --max-time 10 -o /tmp/h.json -w 'code=%{http_code}\n' http://127.0.0.1:8766/health || true
 python3 - <<'PY'
-import json
+import json, time, urllib.request
 h=json.load(open('/tmp/h.json'))
 sc=h.get('scanner_stream') or {}
-print('connected', h.get('connected'), 'scanner_ws', sc.get('ws_connected'), 'ticks', sc.get('ticks_received'), 'can_execute', (h.get('scanner') or {}).get('can_execute'))
+print('connected', h.get('connected'), 'mode', h.get('mode'), 'scanner_ws', sc.get('ws_connected'), 'ticks', sc.get('ticks_received'), 'can_execute', (h.get('scanner') or {}).get('can_execute'))
+if h.get('mode') == 'testnet':
+    raise SystemExit('FATAL: health mode=testnet with BINANCE_TESTNET=0 — cash blocked')
+time.sleep(3)
+h2=json.loads(urllib.request.urlopen('http://127.0.0.1:8766/health', timeout=10).read())
+t2=(h2.get('scanner_stream') or {}).get('ticks_received') or 0
+print('ticks_after_3s', t2, 'mode', h2.get('mode'))
+if h2.get('mode') == 'testnet':
+    raise SystemExit('FATAL: still testnet after restart')
 PY
 
 # Desk WS auth remapping: token query should not 403
