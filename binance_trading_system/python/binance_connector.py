@@ -420,7 +420,8 @@ class BinanceConnector:
             return {"ok": False, "error": "api_key_missing", "retryable": False}
 
         leg_u = (leg or "").upper()
-        if leg_u in ("SHORT", "LONG1", "LONG2"):
+        # Desk + scanner both need hedge mode (BUY→LONG / SELL→SHORT).
+        if not self.cfg.paper:
             ok_hedge, hedge_err = self.ensure_hedge_mode()
             if not ok_hedge:
                 return {
@@ -1298,6 +1299,22 @@ class BinanceConnector:
         except RuntimeError as e:
             log.warning("cancel_all: %s", e)
 
+    def query_order_by_client_id(self, symbol: str, client_order_id: str) -> dict[str, Any] | None:
+        """Look up order by clientOrderId — used after timeout to avoid double-tap."""
+        if self.cfg.paper or not self.cfg.api_key:
+            return None
+        try:
+            return self._request(
+                "GET",
+                "/fapi/v1/order",
+                {"symbol": symbol.upper(), "origClientOrderId": client_order_id[:36]},
+                signed=True,
+                timeout=5.0,
+            )
+        except Exception as e:
+            log.warning("query_order_by_client_id %s %s: %s", symbol, client_order_id, e)
+            return None
+
     def _liquidation_safe(self, side: str, entry: float, sl: float | None) -> tuple[bool, str]:
         if sl is None:
             return True, ""
@@ -1514,6 +1531,12 @@ class BinanceConnector:
             ]
         if not targets:
             return {"ok": False, "error": f"no_{ps.lower()}_leg"}
+
+        # Cancel resting TP/SL first — otherwise async TP can fire after flatten.
+        try:
+            self.cancel_all_orders(sym)
+        except Exception as e:
+            log.warning("close_by_position_side cancel orders %s: %s", sym, e)
 
         p = targets[0]
         pos_side = str(p.get("type", "")).upper()

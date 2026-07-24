@@ -27,7 +27,11 @@ for kv in \
   'SCANNER_SMART_EXIT_PCT=6.0' \
   'SCANNER_EXIT_COST_PCT=0.8' \
   'SCANNER_LONG1_PARTITION_PCT=12.5' \
-  'SCANNER_LONG2_PARTITION_PCT=12.5'
+  'SCANNER_LONG2_PARTITION_PCT=12.5' \
+  'BINANCE_TESTNET=0' \
+  'BINANCE_PAPER=0' \
+  'FORWARD_DRY_RUN=0' \
+  'SCANNER_EXEC=1'
 do
   key="${kv%%=*}"
   val="${kv#*=}"
@@ -37,6 +41,9 @@ do
     echo "${key}=${val}" >> "$ENVF"
   fi
 done
+# Hard cash-live assert
+grep -q '^BINANCE_TESTNET=0$' "$ENVF" || { echo 'FATAL: BINANCE_TESTNET must be 0 for cash'; exit 1; }
+grep -q '^FORWARD_DRY_RUN=0$' "$ENVF" || { echo 'FATAL: FORWARD_DRY_RUN must be 0 for cash'; exit 1; }
 
 # Unlock stale 40/40 risk lock so balanced short sizing takes effect.
 python3 - <<'PY'

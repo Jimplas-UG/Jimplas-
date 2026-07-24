@@ -106,7 +106,7 @@ def load_settings() -> AppSettings:
         bridge_token=os.environ.get("BRIDGE_TOKEN", "").strip(),
         log_dir=log_dir,
         paper=_truthy(os.environ.get("BINANCE_PAPER", "0")),
-        testnet=_truthy(os.environ.get("BINANCE_TESTNET", "1")),
+        testnet=_truthy(os.environ.get("BINANCE_TESTNET", "0")),
     )
 
 

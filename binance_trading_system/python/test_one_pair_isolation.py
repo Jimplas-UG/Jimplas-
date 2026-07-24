@@ -46,12 +46,34 @@ def test_exchange_position_blocks() -> None:
     assert "SOLUSDT" in reason
 
 
+def test_nested_close_refcount() -> None:
+    gate = PairIsolationGate()
+    gate.begin_close("BTCUSDT")
+    gate.begin_close("BTCUSDT")  # nested (api + leg)
+    gate.end_close("BTCUSDT")
+    assert gate.is_close_pending("BTCUSDT"), "inner end must not clear outer close"
+    gate.end_close("BTCUSDT")
+    assert not gate.is_close_pending("BTCUSDT")
+
+
+def test_close_all_blocks_opens() -> None:
+    gate = PairIsolationGate()
+    gate.begin_close_all(["BTCUSDT"])
+    ok, reason = gate.can_open("ETHUSDT", lambda: None, lambda: [])
+    assert not ok and reason == "close_all_pending"
+    gate.end_close_all(["BTCUSDT"])
+    ok, _ = gate.can_open("ETHUSDT", lambda: None, lambda: [])
+    assert ok
+
+
 def main() -> int:
     tests = [
         test_blocks_second_symbol,
         test_allows_same_symbol_legs,
         test_close_pending_blocks,
         test_exchange_position_blocks,
+        test_nested_close_refcount,
+        test_close_all_blocks_opens,
     ]
     failed = 0
     for t in tests:

@@ -302,12 +302,13 @@ class ExecutionEngine:
                 return f"hedge_mode_required:{err}"
         return None
 
-    def _available_margin(self, *, allow_stale_sec: float = 2.0) -> float:
+    def _available_margin(self, *, allow_stale_sec: float = 2.0) -> float | None:
+        """Return free margin, or None if unknown (never treat unknown as 0)."""
         now = time.time()
-        if now - self._account_cache_ts < allow_stale_sec:
+        if self._account_cache_ts > 0 and now - self._account_cache_ts < allow_stale_sec:
             return self._account_cache[0]
         cfg = self._connector.cfg
-        if cfg.paper or not cfg.api_key:
+        if getattr(cfg, "paper", False) or not cfg.api_key:
             return 1e9
         try:
             acct = self._connector._request("GET", "/fapi/v2/account", signed=True)
@@ -317,7 +318,9 @@ class ExecutionEngine:
             return free
         except Exception as e:
             log.warning("margin cache refresh: %s", e)
-            return self._account_cache[0]
+            if self._account_cache_ts > 0:
+                return self._account_cache[0]
+            return None
 
     def execute(self, signal: ExecutionSignal, *, manual: bool = False) -> ExecutionResult:
         t0 = time.perf_counter()
@@ -438,7 +441,8 @@ class ExecutionEngine:
         free = self._available_margin(allow_stale_sec=8.0 if manual else 2.0)
         notional = float(signal.quantity) * signal.reference_price
         margin_need = notional / max(exchange_lev, 1) * 1.05
-        if free < margin_need:
+        # Unknown margin (None) must NOT false-block — only block when we know free < need.
+        if free is not None and free < margin_need:
             result.error = f"insufficient_margin free={free:.2f}"
             result.stage = "risk_blocked"
             self._log_failure(signal, reason=result.error, retry_decision="retry_on_margin")
@@ -470,32 +474,62 @@ class ExecutionEngine:
                         code = order_resp.get("binance_code")
                         http = order_resp.get("http_code")
                         retryable = bool(order_resp.get("retryable"))
-                        result.error = err
-                        result.binance_code = code
-                        result.http_code = http
-                        if retryable and attempt < MAX_RETRIES:
-                            wait = RETRY_BACKOFF_MS[min(attempt, len(RETRY_BACKOFF_MS) - 1)] / 1000.0
-                            result.retry_decision = f"retry_{attempt + 1}_in_{wait}s"
-                            log.warning(
-                                "EXEC_RETRY coin=%s attempt=%s wait=%.3fs err=%s",
-                                sym,
-                                attempt + 1,
-                                wait,
-                                err,
+                        # Timeout / uncertain ACK — check if the same clientOrderId already filled.
+                        if retryable and hasattr(self._connector, "query_order_by_client_id"):
+                            existing = self._connector.query_order_by_client_id(sym, client_id)
+                            if existing and str(existing.get("status") or "").upper() in (
+                                "FILLED",
+                                "PARTIALLY_FILLED",
+                            ):
+                                order_resp = {
+                                    "ok": True,
+                                    "fill_price": float(existing.get("avgPrice") or signal.reference_price),
+                                    "quantity": float(existing.get("executedQty") or signal.quantity),
+                                    "order_id": existing.get("orderId"),
+                                }
+                                log.info(
+                                    "EXEC_RECOVERED coin=%s client_id=%s order=%s after %s",
+                                    sym,
+                                    client_id,
+                                    order_resp.get("order_id"),
+                                    err,
+                                )
+                            else:
+                                order_resp = {"ok": False, "error": err, "binance_code": code, "http_code": http, "retryable": retryable}
+                        if not order_resp.get("ok"):
+                            result.error = err
+                            result.binance_code = code
+                            result.http_code = http
+                            if retryable and attempt < MAX_RETRIES:
+                                wait = RETRY_BACKOFF_MS[min(attempt, len(RETRY_BACKOFF_MS) - 1)] / 1000.0
+                                result.retry_decision = f"retry_{attempt + 1}_in_{wait}s"
+                                log.warning(
+                                    "EXEC_RETRY coin=%s attempt=%s wait=%.3fs err=%s",
+                                    sym,
+                                    attempt + 1,
+                                    wait,
+                                    err,
+                                )
+                                time.sleep(wait)
+                                continue
+                            result.stage = "rejected"
+                            result.retry_decision = "no_retry"
+                            # Final uncertain timeout — do not tell UI to blindly re-fire.
+                            if "timeout" in err.lower() or "timed out" in err.lower():
+                                result.error = f"uncertain_fill:{err}"
+                                result.stage = "uncertain_fill"
+                            self._log_failure(
+                                signal,
+                                reason=result.error,
+                                http_code=http,
+                                binance_code=code,
+                                retry_decision=result.retry_decision,
                             )
-                            time.sleep(wait)
-                            continue
-                        result.stage = "rejected"
-                        result.retry_decision = "no_retry"
-                        self._log_failure(
-                            signal,
-                            reason=err,
-                            http_code=http,
-                            binance_code=code,
-                            retry_decision=result.retry_decision,
-                        )
-                        self._emit(signal, "rejected", client_order_id=client_id, error=err)
-                        return result
+                            self._emit(signal, result.stage, client_order_id=client_id, error=result.error)
+                            return result
+                        # recovered fill — fall through to success handling below
+                    if not order_resp.get("ok"):
+                        continue
 
                     fill = float(order_resp.get("fill_price") or signal.reference_price)
                     order_id = order_resp.get("order_id")
@@ -545,6 +579,16 @@ class ExecutionEngine:
                     )
 
                     def _place_tp_and_lev() -> None:
+                        # Never place TP after a close started / position already flat.
+                        if self._close_pending_check and self._close_pending_check(sym):
+                            log.info("EXEC_TP_SKIP coin=%s close_pending", sym)
+                            return
+                        try:
+                            if hasattr(self._connector, "has_open_position") and not self._connector.has_open_position(sym):
+                                log.info("EXEC_TP_SKIP coin=%s already_flat", sym)
+                                return
+                        except Exception:
+                            pass
                         if signal.tp is not None:
                             try:
                                 tp_price = float(signal.tp)
@@ -600,6 +644,32 @@ class ExecutionEngine:
                     err = str(e)
                     code = _parse_binance_code(err)
                     retryable = "timeout" in err.lower() or "timed out" in err.lower() or "URLError" in err
+                    if retryable and hasattr(self._connector, "query_order_by_client_id"):
+                        existing = self._connector.query_order_by_client_id(sym, client_id)
+                        if existing and str(existing.get("status") or "").upper() in (
+                            "FILLED",
+                            "PARTIALLY_FILLED",
+                        ):
+                            order_resp = {
+                                "ok": True,
+                                "fill_price": float(existing.get("avgPrice") or signal.reference_price),
+                                "quantity": float(existing.get("executedQty") or signal.quantity),
+                                "order_id": existing.get("orderId"),
+                            }
+                            # Re-enter success path by recursive-ish continue with fake ok —
+                            # simplest: mark filled and return via building result here.
+                            fill = float(order_resp["fill_price"])
+                            order_id = order_resp.get("order_id")
+                            latency = round((time.perf_counter() - t0) * 1000, 1)
+                            result.ok = True
+                            result.fill_price = fill
+                            result.order_id = order_id
+                            result.latency_ms = latency
+                            result.stage = "filled"
+                            result.retry_count = attempt
+                            self._filled_client_ids.add(client_id)
+                            log.info("EXEC_RECOVERED_EXC coin=%s order=%s", sym, order_id)
+                            return result
                     if retryable and attempt < MAX_RETRIES:
                         wait = RETRY_BACKOFF_MS[min(attempt, len(RETRY_BACKOFF_MS) - 1)] / 1000.0
                         time.sleep(wait)
@@ -607,12 +677,16 @@ class ExecutionEngine:
                     break
 
             err = str(last_err) if last_err else "order_failed"
+            if "timeout" in err.lower() or "timed out" in err.lower():
+                err = f"uncertain_fill:{err}"
+                result.stage = "uncertain_fill"
+            else:
+                result.stage = "failed"
             result.error = err
             result.binance_code = _parse_binance_code(err)
-            result.stage = "failed"
             result.latency_ms = round((time.perf_counter() - t0) * 1000, 1)
             self._log_failure(signal, reason=err, binance_code=result.binance_code)
-            self._emit(signal, "failed", client_order_id=client_id, error=err, latency_ms=result.latency_ms)
+            self._emit(signal, result.stage, client_order_id=client_id, error=err, latency_ms=result.latency_ms)
             return result
         finally:
             self._inflight_client_ids.discard(client_id)

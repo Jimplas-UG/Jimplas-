@@ -20,9 +20,11 @@ class PairIsolationGate:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._close_pending: set[str] = set()
+        # Ref-counted so nested begin/end (api_close → close_leg_manual) cannot clear early.
+        self._close_refcount: dict[str, int] = {}
         self._last_successful_order: dict[str, Any] = {}
         self._last_sync_ms: int = 0
+        self._global_close_all: bool = False
 
     def active_symbol(
         self,
@@ -50,7 +52,9 @@ class PairIsolationGate:
     ) -> tuple[bool, str]:
         sym = symbol.upper()
         with self._lock:
-            if sym in self._close_pending:
+            if self._global_close_all:
+                return False, "close_all_pending"
+            if self._close_refcount.get(sym, 0) > 0:
                 return False, "close_pending"
             active = self.active_symbol(scanner_fn, exchange_fn)
             if active and active != sym:
@@ -59,15 +63,42 @@ class PairIsolationGate:
 
     def is_close_pending(self, symbol: str) -> bool:
         with self._lock:
-            return symbol.upper() in self._close_pending
+            if self._global_close_all:
+                return True
+            return self._close_refcount.get(symbol.upper(), 0) > 0
 
     def begin_close(self, symbol: str) -> None:
+        sym = symbol.upper()
         with self._lock:
-            self._close_pending.add(symbol.upper())
+            self._close_refcount[sym] = self._close_refcount.get(sym, 0) + 1
 
     def end_close(self, symbol: str) -> None:
+        sym = symbol.upper()
         with self._lock:
-            self._close_pending.discard(symbol.upper())
+            n = self._close_refcount.get(sym, 0) - 1
+            if n <= 0:
+                self._close_refcount.pop(sym, None)
+            else:
+                self._close_refcount[sym] = n
+
+    def begin_close_all(self, symbols: list[str] | None = None) -> None:
+        with self._lock:
+            self._global_close_all = True
+            for s in symbols or []:
+                sym = str(s).upper()
+                if sym:
+                    self._close_refcount[sym] = self._close_refcount.get(sym, 0) + 1
+
+    def end_close_all(self, symbols: list[str] | None = None) -> None:
+        with self._lock:
+            self._global_close_all = False
+            for s in symbols or []:
+                sym = str(s).upper()
+                n = self._close_refcount.get(sym, 0) - 1
+                if n <= 0:
+                    self._close_refcount.pop(sym, None)
+                else:
+                    self._close_refcount[sym] = n
 
     def record_order(
         self,
@@ -101,10 +132,12 @@ class PairIsolationGate:
         exchange_fn = exchange_fn or (lambda: [])
         with self._lock:
             active = self.active_symbol(scanner_fn, exchange_fn)
+            pending = sorted(s for s, n in self._close_refcount.items() if n > 0)
             return {
                 "one_pair_mode": True,
                 "active_symbol": active,
-                "close_pending": sorted(self._close_pending),
+                "close_pending": pending,
+                "close_all_pending": self._global_close_all,
                 "last_successful_order": dict(self._last_successful_order) or None,
                 "last_sync_ms": self._last_sync_ms or None,
             }

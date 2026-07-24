@@ -376,7 +376,7 @@ _bars_cache: dict[tuple, tuple[float, list]] = {}
 class LoginBody(BaseModel):
     api_key: str = Field(..., min_length=1, max_length=128)
     api_secret: str = Field(..., min_length=1, max_length=128)
-    testnet: bool = True
+    testnet: bool = False
     auto_detect_env: bool = True
 
 
@@ -1042,9 +1042,21 @@ def api_close_all():
         raise HTTPException(status_code=403, detail={"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True})
     if not connector.cfg.api_key and not connector.cfg.paper:
         raise HTTPException(status_code=401, detail={"ok": False, "error": "not connected"})
-    r = connector.close_all_positions()
-    if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r)
+    try:
+        open_syms = [
+            str(p.get("symbol") or "").upper()
+            for p in (connector.positions(force=True) or [])
+            if float(p.get("volume") or 0) > 1e-12
+        ]
+    except Exception:
+        open_syms = []
+    pair_gate.begin_close_all(open_syms or ["*"])
+    try:
+        r = connector.close_all_positions()
+        if not r.get("ok"):
+            raise HTTPException(status_code=400, detail=r)
+    finally:
+        pair_gate.end_close_all(open_syms or ["*"])
 
     def _bg_after_close_all() -> None:
         try:

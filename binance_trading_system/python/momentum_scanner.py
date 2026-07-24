@@ -1207,12 +1207,17 @@ class MomentumScanner:
         self._trades_closed_today += 1
 
     def _global_active_symbol(self) -> str | None:
-        """Symbol with an open scanner strategy (short and/or recovery legs)."""
+        """Symbol with open scanner legs OR any live exchange position (blocks stacking)."""
         for coin in self._coins.values():
             if coin.short or coin.long1 or coin.long2:
                 return coin.symbol
             if coin.status in (STATUS_SHORT, STATUS_LONG1, STATUS_LONG2):
                 return coin.symbol
+        for p in self._exchange_positions():
+            sym = str(p.get("symbol") or "").upper()
+            vol = float(p.get("volume") or 0)
+            if sym and vol > 1e-12:
+                return sym
         return None
 
     def _has_open_strategy(self) -> bool:
@@ -1651,6 +1656,11 @@ class MomentumScanner:
             if active and active != sym:
                 return
         if pair_gate.is_close_pending(sym):
+            return
+        # Never stack scanner Long on top of an existing exchange long (manual or orphan).
+        if not coin.long1 and self._exchange_has_long(sym):
+            log.warning("scanner LONG1 blocked %s: exchange long already open", sym)
+            self._last_exec_error = f"{sym}: exchange_long_already_open"
             return
         ok_iso, _ = pair_gate.can_open(sym, self._global_active_symbol, self._exchange_positions)
         if not ok_iso:
