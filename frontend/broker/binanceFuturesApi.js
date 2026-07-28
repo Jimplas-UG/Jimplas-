@@ -41,8 +41,18 @@ export async function binanceFetch(baseUrl, path, options = {}, timeoutMs = 1500
   }
 }
 
-export async function fetchBinanceConnected(apiBaseUrl, timeoutMs = 12000) {
-  const session = await fetchBinanceSession(apiBaseUrl, timeoutMs);
+export async function fetchBinanceConnected(apiBaseUrl, timeoutMs = 5000) {
+  const b = base(apiBaseUrl);
+  try {
+    const res = await binanceFetch(b, '/api/ready', {}, timeoutMs);
+    if (res.ok) {
+      const j = await res.json().catch(() => ({}));
+      if (typeof j.connected === 'boolean') return j.connected;
+    }
+  } catch {
+    /* fall through to /api/status */
+  }
+  const session = await fetchBinanceSession(apiBaseUrl, timeoutMs, 0);
   return session.ok;
 }
 
@@ -525,11 +535,20 @@ export async function postBinanceOrderFromIntent(intent, opts) {
   if (side !== 'BUY' && side !== 'SELL') {
     return { ok: false, status: 0, bodySnippet: 'No BUY/SELL side' };
   }
-  const connected = await fetchBinanceConnected(b);
-  if (!connected) {
-    return { ok: false, status: 0, bodySnippet: 'Binance API not connected', connected: false };
+  let connected = true;
+  if (!opts.skipConnectedCheck) {
+    connected = await fetchBinanceConnected(b);
+    if (!connected) {
+      return { ok: false, status: 0, bodySnippet: 'Binance API not connected', connected: false };
+    }
   }
   const sym = opts.symbol ?? intent.symbol ?? DEFAULT_CHART_SYMBOL;
+  const ref =
+    Number(opts.referencePrice) > 0
+      ? Number(opts.referencePrice)
+      : Number(intent.entry) > 0
+        ? Number(intent.entry)
+        : undefined;
   const body = {
     symbol: sym,
     side,
@@ -537,6 +556,7 @@ export async function postBinanceOrderFromIntent(intent, opts) {
     sl: intent.sl,
     tp: intent.tp1,
   };
+  if (ref) body.reference_price = ref;
   try {
     const res = await binanceFetch(
       b,

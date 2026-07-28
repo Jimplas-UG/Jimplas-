@@ -71,6 +71,8 @@ export async function executeBrokerRoutes(opts: ExecuteBrokerRoutesOpts): Promis
         volume: opts.binanceVolume,
         symbol: opts.symbol,
         riskUsd: opts.riskUsd,
+        skipConnectedCheck: true,
+        referencePrice: intended > 0 ? intended : undefined,
       });
       const latencyMs = binance.latencyMs ?? Date.now() - t0;
       if (side === 'BUY' || side === 'SELL') {

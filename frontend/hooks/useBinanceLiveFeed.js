@@ -21,7 +21,7 @@ const PIP = DISPLAY_PIP_SIZE;
 /** Minimum M30 bars for engine gates on first paint (~1 day). */
 const STARTUP_BARS = 48;
 /** Deeper history loaded in background after UI is interactive. */
-const FULL_BARS = 600;
+const FULL_BARS = 240;
 const CACHE_KEY = '@bilshenz_v1/binanceFeedCache';
 const CACHE_TTL_MS = 20 * 60 * 1000;
 const STALE_CACHE_MS = 24 * 60 * 60 * 1000;
@@ -332,9 +332,9 @@ export function useBinanceLiveFeed({
     void refreshDeals();
     void refreshPositions();
 
-    const acctId = setInterval(refreshAccount, 4000);
-    const dealsId = setInterval(refreshDeals, 5000);
-    const posId = setInterval(refreshPositions, 2000);
+    const acctId = setInterval(refreshAccount, 8000);
+    const dealsId = setInterval(refreshDeals, 20000);
+    const posId = setInterval(refreshPositions, 5000);
 
     return () => {
       cancelled = true;

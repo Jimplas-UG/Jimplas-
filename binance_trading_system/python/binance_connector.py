@@ -343,6 +343,16 @@ class BinanceConnector:
             raise RuntimeError(f"Symbol {sym} not found on Binance Futures")
         return dict(cache[sym])
 
+    def is_symbol_prepared(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
+        """True when symbol/leverage was prepared recently (skip redundant REST)."""
+        from leverage_policy import ALLOWED_LEVERAGES, SHORT_LEVERAGE
+
+        requested = int(leverage or SHORT_LEVERAGE)
+        exchange_lev = requested if requested in ALLOWED_LEVERAGES else SHORT_LEVERAGE
+        key = (symbol.upper(), int(exchange_lev), "ISOLATED")
+        ts = self._prepared_cache.get(key)
+        return bool(ts and time.time() - ts < 3600)
+
     def prepare_symbol_cached(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> None:
         sym = symbol.upper()
         mt = "ISOLATED"
@@ -1197,9 +1207,15 @@ class BinanceConnector:
             return True
         if not self.cfg.api_key:
             return False
+        # Trust prepare_symbol_cached — avoid positionRisk GET on every order.
+        if self.is_symbol_prepared(sym, target):
+            self.cfg.leverage = target
+            self.cfg.symbol = sym
+            return True
         current = self.symbol_leverage(sym)
         if current == target:
             self.cfg.leverage = target
+            self._prepared_cache[(sym, target, "ISOLATED")] = time.time()
             return True
         try:
             self._request(
@@ -1211,6 +1227,7 @@ class BinanceConnector:
             self.cfg.leverage = target
             self.cfg.symbol = sym
             self._prepared_cache = {k: v for k, v in self._prepared_cache.items() if k[0] != sym}
+            self._prepared_cache[(sym, target, "ISOLATED")] = time.time()
             log.info("exchange leverage %s set %sx -> %sx", sym, current, target)
             return True
         except RuntimeError as e:

@@ -51,7 +51,12 @@ function PnlCell({ cell, C, compact }) {
   );
 }
 
-export default function TradeResultsCalendar({ binanceBaseUrl, brokerConnected, brokerDeals = [] }) {
+export default function TradeResultsCalendar({
+  binanceBaseUrl,
+  brokerConnected,
+  brokerDeals = [],
+  active = true,
+}) {
   const { colors: C } = useBilshenzTheme();
   const [view, setView] = useState('month');
   const [cursor, setCursor] = useState(() => new Date());
@@ -75,6 +80,7 @@ export default function TradeResultsCalendar({ binanceBaseUrl, brokerConnected, 
   }, []);
 
   useEffect(() => {
+    if (!active) return undefined;
     if (!brokerConnected || !binanceBaseUrl?.trim()) {
       applyLocalDays(brokerDeals);
       return undefined;
@@ -84,7 +90,7 @@ export default function TradeResultsCalendar({ binanceBaseUrl, brokerConnected, 
     setLoading(true);
     void (async () => {
       try {
-        const j = await fetchBinanceTradeCalendar(binanceBaseUrl, 400);
+        const j = await fetchBinanceTradeCalendar(binanceBaseUrl, 120);
         if (cancelled) return;
         if (j?.days?.length) {
           const clean = sanitizeCalendarDays(j.days);
@@ -108,7 +114,7 @@ export default function TradeResultsCalendar({ binanceBaseUrl, brokerConnected, 
     return () => {
       cancelled = true;
     };
-  }, [binanceBaseUrl, brokerConnected, dealsSignature, applyLocalDays]);
+  }, [active, binanceBaseUrl, brokerConnected, dealsSignature, applyLocalDays]);
 
   const dayMap = useMemo(() => indexDaysByDate(serverDays), [serverDays]);
   const y = cursor.getFullYear();

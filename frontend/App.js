@@ -52,7 +52,7 @@ function AppContent() {
   const desk = useDeskSession({
     enabled: deskEnabled,
     loadBars: tab === 'trade',
-    pollTicks: true,
+    pollTicks: tab === 'trade' || tab === 'risk',
   });
   const tickScanner = useTickScanner(baseUrl, {
     enabled: scannerEnabled,

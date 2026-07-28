@@ -44,6 +44,8 @@ export async function executeBrokerRoutes(opts) {
         quantity: opts.binanceQuantity ?? opts.quantity,
         volume: opts.binanceVolume ?? opts.volume,
         symbol: opts.symbol,
+        skipConnectedCheck: true,
+        referencePrice: intended > 0 ? intended : undefined,
       });
       const latencyMs = binance.latencyMs ?? Date.now() - t0;
       if (side === 'BUY' || side === 'SELL') {

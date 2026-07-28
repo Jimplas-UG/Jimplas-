@@ -22,6 +22,15 @@ function bridgeHeaders(extra: Record<string, string> = {}): Record<string, strin
 export async function fetchBinanceConnected(apiBaseUrl: string): Promise<boolean> {
   const b = base(apiBaseUrl);
   try {
+    const ready = await fetch(`${b}/api/ready`, { headers: bridgeHeaders() });
+    if (ready.ok) {
+      const j = (await ready.json()) as { connected?: boolean };
+      if (typeof j.connected === 'boolean') return j.connected;
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
     const res = await fetch(`${b}/api/status`, { headers: bridgeHeaders() });
     if (!res.ok) return false;
     const j = await res.json();
@@ -139,6 +148,8 @@ export async function postBinanceOrderFromIntent(
     symbol?: string;
     spec?: BinanceSymbolSpec | null;
     riskUsd?: number;
+    skipConnectedCheck?: boolean;
+    referencePrice?: number;
   },
 ): Promise<BinanceOrderResult> {
   const b = base(opts.baseUrl);
@@ -147,14 +158,16 @@ export async function postBinanceOrderFromIntent(
     return { ok: false, status: 0, bodySnippet: 'No BUY/SELL side' };
   }
 
-  const connected = await fetchBinanceConnected(b);
-  if (!connected) {
-    return {
-      ok: false,
-      status: 0,
-      bodySnippet: 'Binance API not connected — configure API keys in Profile',
-      connected: false,
-    };
+  if (!opts.skipConnectedCheck) {
+    const connected = await fetchBinanceConnected(b);
+    if (!connected) {
+      return {
+        ok: false,
+        status: 0,
+        bodySnippet: 'Binance API not connected — configure API keys in Profile',
+        connected: false,
+      };
+    }
   }
 
   const sym = opts.symbol ?? intent.symbol ?? 'XAUUSDT';
@@ -174,7 +187,10 @@ export async function postBinanceOrderFromIntent(
 
   const spec = opts.spec ?? (await fetchBinanceSymbolSpec(b, sym));
   const exchangeTick = spec?.tickSize ?? 0.01;
-  const entryPx = intent.entry ?? 0;
+  const entryPx =
+    opts.referencePrice && opts.referencePrice > 0
+      ? opts.referencePrice
+      : intent.entry ?? 0;
   const normalized = normalizeOrderPrices(entryPx, intent.sl ?? null, intent.tp1 ?? null, exchangeTick);
   // Drop non-positive / wrong-side levels so bridge validation never 422s on junk TP/SL.
   let sl = normalized.sl != null && normalized.sl > 0 ? normalized.sl : null;
@@ -197,6 +213,7 @@ export async function postBinanceOrderFromIntent(
   };
   if (sl != null) body.sl = sl;
   if (tp != null) body.tp = tp;
+  if (entryPx > 0) body.reference_price = entryPx;
 
   try {
     const res = await fetch(`${b}/api/order`, {

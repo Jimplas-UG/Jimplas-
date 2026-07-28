@@ -864,9 +864,29 @@ def api_validate_symbol(symbol: str):
         raise HTTPException(status_code=503, detail=str(e)[:200]) from e
 
 
+@app.get("/api/ready")
+def api_ready():
+    """Cheap connected probe — no Binance REST (desk connect checks / order preflight)."""
+    connected = bool(getattr(connector, "_connected", False) and connector.cfg.api_key)
+    return {
+        "ok": True,
+        "connected": connected,
+        "testnet": bool(connector.cfg.testnet),
+        "mode": "paper" if connector.cfg.paper else ("testnet" if connector.cfg.testnet else "live"),
+    }
+
+
 @app.get("/api/status")
 def api_status():
     snap = connector.status_snapshot(skip_ping=connector._connected, light=connector._connected)
+    # Keep exec margin cache warm from status polls so manual taps skip account REST.
+    try:
+        acct = snap.get("account") or {}
+        free = acct.get("margin_free")
+        if free is not None and hasattr(momentum_scanner, "engine") and momentum_scanner.engine:
+            momentum_scanner.engine.warm_margin_cache(float(free))
+    except Exception:
+        pass
     st = momentum_scanner.status()
     return {
         **snap,

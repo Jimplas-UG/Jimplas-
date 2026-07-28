@@ -302,6 +302,12 @@ class ExecutionEngine:
                 return f"hedge_mode_required:{err}"
         return None
 
+    def warm_margin_cache(self, free: float) -> None:
+        """Update free-margin cache from status/account polls (avoids REST on manual tap)."""
+        now = time.time()
+        self._account_cache = (float(free), 0.0, now)
+        self._account_cache_ts = now
+
     def _available_margin(self, *, allow_stale_sec: float = 2.0) -> float | None:
         """Return free margin, or None if unknown (never treat unknown as 0)."""
         now = time.time()
@@ -359,21 +365,23 @@ class ExecutionEngine:
             self._emit(signal, "validation_failed", error=result.error)
             return result
 
-        if self._close_pending_check and self._close_pending_check(sym):
-            result.error = "close_pending"
-            result.stage = "blocked_close_pending"
-            self._log_failure(signal, reason=result.error, retry_decision="no_retry_close")
-            self._emit(signal, "blocked", error=result.error)
-            return result
-
-        if self._isolation_check:
-            ok_iso, iso_reason = self._isolation_check(sym)
-            if not ok_iso:
-                result.error = iso_reason
-                result.stage = "blocked_isolation"
-                self._log_failure(signal, reason=iso_reason, retry_decision="no_retry_isolation")
-                self._emit(signal, "blocked", error=iso_reason)
+        # Manual desk path already gated in /api/order — skip duplicate isolation/close REST.
+        if not manual:
+            if self._close_pending_check and self._close_pending_check(sym):
+                result.error = "close_pending"
+                result.stage = "blocked_close_pending"
+                self._log_failure(signal, reason=result.error, retry_decision="no_retry_close")
+                self._emit(signal, "blocked", error=result.error)
                 return result
+
+            if self._isolation_check:
+                ok_iso, iso_reason = self._isolation_check(sym)
+                if not ok_iso:
+                    result.error = iso_reason
+                    result.stage = "blocked_isolation"
+                    self._log_failure(signal, reason=iso_reason, retry_decision="no_retry_isolation")
+                    self._emit(signal, "blocked", error=iso_reason)
+                    return result
 
         client_id = self._client_order_id(signal)
         result.client_order_id = client_id
@@ -438,7 +446,8 @@ class ExecutionEngine:
         exchange_lev = exchange_leverage(signal.leg, signal.side)
 
         # Manual desk: tolerate slightly staler margin (avoid account REST on every tap).
-        free = self._available_margin(allow_stale_sec=8.0 if manual else 2.0)
+        # Manual: trust status-warmed margin longer so taps never block on account REST.
+        free = self._available_margin(allow_stale_sec=30.0 if manual else 2.0)
         notional = float(signal.quantity) * signal.reference_price
         margin_need = notional / max(exchange_lev, 1) * 1.05
         # Unknown margin (None) must NOT false-block — only block when we know free < need.
@@ -454,7 +463,9 @@ class ExecutionEngine:
 
         try:
             self._connector.prepare_symbol_cached(sym, exchange_lev, "ISOLATED")
-            if hasattr(self._connector, "ensure_exchange_leverage"):
+            # Manual: prepare_symbol_cached already set leverage; skip sync positionRisk.
+            # Auto: ensure_exchange_leverage is a no-op when prepare cache is warm.
+            if not manual and hasattr(self._connector, "ensure_exchange_leverage"):
                 self._connector.ensure_exchange_leverage(sym, exchange_lev)
             last_err: Exception | None = None
             for attempt in range(MAX_RETRIES + 1):

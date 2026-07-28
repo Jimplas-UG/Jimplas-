@@ -18,6 +18,7 @@ export default function TradeScreen({ pad, desk, scanner, onOpenProfile, active 
   const { baseUrl, connected, brokerFeed, useBrokerSession, lastBrokerMsg, setLastBrokerMsg } = desk;
   const { diagnostics, loading: diagLoading, refresh: refreshDiag } = useDiagnostics(baseUrl, {
     enabled: active && connected,
+    intervalMs: 30000,
   });
 
   const account = useBrokerSession ? brokerFeed.account : null;
@@ -100,6 +101,7 @@ export default function TradeScreen({ pad, desk, scanner, onOpenProfile, active 
         binanceBaseUrl={baseUrl}
         brokerConnected={connected && useBrokerSession}
         brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : []}
+        active={active}
       />
     </ScrollView>
   );

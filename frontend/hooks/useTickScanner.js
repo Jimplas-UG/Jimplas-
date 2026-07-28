@@ -5,7 +5,7 @@ import { fetchScannerSnapshot, subscribeScannerStream } from '../broker/binanceS
 const CACHE_KEY = '@bilshenz_v1/scannerSnapshotCache';
 const CACHE_TTL_MS = 90_000;
 const WS_STALE_MS = 5000;
-const REST_POLL_MS = 3000;
+const REST_POLL_MS = 5000;
 
 function applyPayload(setters, payload) {
   if (!payload) return;
