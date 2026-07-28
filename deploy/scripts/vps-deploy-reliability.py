@@ -68,8 +68,9 @@ PY
 
 systemctl restart bilshenz-binance-api
 systemctl restart bilshenz-desk-api
+systemctl restart bilshenz-forward-bot || true
 sleep 5
-systemctl is-active bilshenz-binance-api bilshenz-desk-api
+systemctl is-active bilshenz-binance-api bilshenz-desk-api bilshenz-forward-bot || true
 
 echo === health latency ===
 /usr/bin/time -f 'elapsed=%e' curl -sS --max-time 10 -o /tmp/h.json -w 'code=%{http_code}\n' http://127.0.0.1:8766/health || true

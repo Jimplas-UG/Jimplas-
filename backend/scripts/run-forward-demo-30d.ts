@@ -118,6 +118,34 @@ async function fetchBrokerSymbols(): Promise<string[]> {
   return brokerSymbols;
 }
 
+/** True when scanner/bridge already owns the one allowed pair. */
+async function bridgeOnePairBusy(): Promise<string | null> {
+  try {
+    const hRes = await brokerFetch('/health');
+    if (hRes.ok) {
+      const h = (await hRes.json()) as {
+        scanner?: { active_symbol?: string | null };
+        pair_isolation?: { active_symbol?: string | null };
+      };
+      const active =
+        (h.scanner?.active_symbol || h.pair_isolation?.active_symbol || '').toString().toUpperCase();
+      if (active) return `one_pair_active:${active}`;
+    }
+  } catch {
+    /* fall through to positions */
+  }
+  try {
+    const pRes = await brokerFetch('/api/positions');
+    if (!pRes.ok) return null;
+    const p = (await pRes.json()) as { positions?: unknown[] };
+    const n = Array.isArray(p.positions) ? p.positions.length : 0;
+    if (n > 0) return `open_positions:${n}`;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 function nextSymbol(session: SessionState, symbols: string[]): string | null {
   if (!symbols.length) return null;
   const idx = (session.symbolCursor ?? 0) % symbols.length;
@@ -449,7 +477,20 @@ async function tickOnce(session: SessionState, symbol: string): Promise<void> {
         blockedBy: [gate.reason],
       });
     }
-    console.error(`[forward-demo] ${symbol} ${new Date(bar.t).toISOString()} blocked: ${gate.reason}`);
+    // Most symbols have no side on a given M30 — don't spam the service log.
+    if (gate.reason !== 'no BUY/SELL side') {
+      console.error(`[forward-demo] ${symbol} ${new Date(bar.t).toISOString()} blocked: ${gate.reason}`);
+    }
+    return;
+  }
+
+  // One-pair mode: never fight the scanner / an open hedge pair.
+  const busy = await bridgeOnePairBusy();
+  if (busy) {
+    logForwardMissed({ reason: busy, barTimeMs: bar.t });
+    console.error(`[forward-demo] ${symbol} skip: ${busy}`);
+    setLastBarForSymbol(session, symbol, bar.t);
+    saveSession(session);
     return;
   }
 

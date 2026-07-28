@@ -482,8 +482,9 @@ class OrderBody(BaseModel):
     symbol: str = Field(_DEFAULT_SYMBOL, max_length=20, pattern=r"^[A-Za-z0-9]+$")
     side: str = Field("BUY", pattern=r"^(BUY|SELL)$")
     volume: float = Field(0.001, ge=0.0001, le=50_000_000.0)
-    sl: float | None = Field(None, ge=0)
-    tp: float | None = Field(None, ge=0)
+    # Do not use ge=0 here — strategy bugs can send negative TP/SL; we sanitize below.
+    sl: float | None = None
+    tp: float | None = None
     magic: int = Field(77002002, ge=0)
     # Optional — when set, skip bookTicker REST (app/WS already has price).
     reference_price: float | None = Field(None, gt=0)
@@ -997,6 +998,20 @@ def api_order(body: OrderBody):
             raise HTTPException(status_code=400, detail={"ok": False, "error": f"no tick for {sym}"})
         ref = tick["ask"] if side_u == "BUY" else tick["bid"]
 
+    # Sanitize SL/TP: drop non-positive or wrong-side levels (forward bot sent tp=-1.35).
+    sl = float(body.sl) if body.sl is not None and float(body.sl) > 0 else None
+    tp = float(body.tp) if body.tp is not None and float(body.tp) > 0 else None
+    if sl is not None and ref > 0:
+        if side_u == "BUY" and sl >= ref:
+            sl = None
+        elif side_u == "SELL" and sl <= ref:
+            sl = None
+    if tp is not None and ref > 0:
+        if side_u == "BUY" and tp <= ref:
+            tp = None
+        elif side_u == "SELL" and tp >= ref:
+            tp = None
+
     now_ms = int(time.time() * 1000)
     # Unique id every tap — old MANUAL_sym_side_magic blocked all re-orders as duplicates.
     signal = ExecutionSignal(
@@ -1007,8 +1022,8 @@ def api_order(body: OrderBody):
         leverage=SHORT_LEVERAGE,
         magic=int(body.magic),
         leg="MANUAL",
-        sl=body.sl,
-        tp=body.tp,
+        sl=sl,
+        tp=tp,
         signal_id=f"MANUAL_{sym}_{side_u}_{body.magic}_{now_ms}",
         signal_ts_ms=now_ms,
         margin_type="ISOLATED",

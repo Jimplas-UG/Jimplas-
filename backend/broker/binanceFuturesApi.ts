@@ -176,14 +176,27 @@ export async function postBinanceOrderFromIntent(
   const exchangeTick = spec?.tickSize ?? 0.01;
   const entryPx = intent.entry ?? 0;
   const normalized = normalizeOrderPrices(entryPx, intent.sl ?? null, intent.tp1 ?? null, exchangeTick);
+  // Drop non-positive / wrong-side levels so bridge validation never 422s on junk TP/SL.
+  let sl = normalized.sl != null && normalized.sl > 0 ? normalized.sl : null;
+  let tp = normalized.tp != null && normalized.tp > 0 ? normalized.tp : null;
+  if (entryPx > 0) {
+    if (sl != null) {
+      if (side === 'BUY' && sl >= entryPx) sl = null;
+      if (side === 'SELL' && sl <= entryPx) sl = null;
+    }
+    if (tp != null) {
+      if (side === 'BUY' && tp <= entryPx) tp = null;
+      if (side === 'SELL' && tp >= entryPx) tp = null;
+    }
+  }
 
-  const body = {
+  const body: Record<string, unknown> = {
     symbol: sym,
     side,
     volume: qty,
-    sl: normalized.sl,
-    tp: normalized.tp,
   };
+  if (sl != null) body.sl = sl;
+  if (tp != null) body.tp = tp;
 
   try {
     const res = await fetch(`${b}/api/order`, {
