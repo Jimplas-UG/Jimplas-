@@ -140,6 +140,15 @@ def test_close_leg_magic_maps_short2_to_short() -> None:
     print("OK close_leg magic maps Short1/Short2 to SHORT")
 
 
+def test_percent_price_error_detect() -> None:
+    from binance_connector import _is_percent_price_error
+
+    assert _is_percent_price_error("PERCENT_PRICE filter limit (code=-4131, http=400)")
+    assert _is_percent_price_error("code=-4131")
+    assert not _is_percent_price_error("insufficient margin")
+    print("OK percent price error detect")
+
+
 if __name__ == "__main__":
     test_hedge_close_no_reduce_only()
     test_oneway_close_has_reduce_only()
@@ -147,4 +156,5 @@ if __name__ == "__main__":
     test_recovery_short_opens_position_side_short()
     test_pair_close_unique_client_ids()
     test_close_leg_magic_maps_short2_to_short()
+    test_percent_price_error_detect()
     print("test_close_orders: ALL OK")

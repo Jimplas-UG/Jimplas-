@@ -293,7 +293,18 @@ async def lifespan(app: FastAPI):
             return
         stored = await asyncio.to_thread(load_binance_session)
         if stored:
+            prefer_tn = _env_testnet_default()
+            force_mainnet = os.environ.get("BINANCE_FORCE_MAINNET", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            ) or (os.environ.get("BINANCE_TESTNET", "0").strip() == "0" and not prefer_tn)
             stored_tn = bool(stored.get("testnet", False))
+            # Hard lock: env says mainnet → never restore/persist a testnet session.
+            if force_mainnet and stored_tn:
+                log.warning("ignoring persisted testnet session — BINANCE_TESTNET=0 forces mainnet")
+                stored_tn = False
             try:
                 acct, err = await asyncio.to_thread(
                     _attempt_binance_login,
@@ -301,8 +312,9 @@ async def lifespan(app: FastAPI):
                     stored["api_secret"],
                     stored_tn,
                 )
-                # Keys often work on only one network — try the other before giving up.
-                if acct is None and _is_key_env_mismatch(err or ""):
+                # Keys often work on only one network — try the other before giving up,
+                # unless mainnet is hard-forced.
+                if acct is None and _is_key_env_mismatch(err or "") and not force_mainnet:
                     alt_tn = not stored_tn
                     acct, err = await asyncio.to_thread(
                         _attempt_binance_login,
@@ -320,6 +332,14 @@ async def lifespan(app: FastAPI):
                         )
                         log.info("persisted session auto-switched to %s", "testnet" if stored_tn else "mainnet")
                 if acct is not None:
+                    # Persist corrected mainnet flag if we overrode testnet.
+                    if force_mainnet:
+                        await asyncio.to_thread(
+                            save_binance_session,
+                            stored["api_key"],
+                            stored["api_secret"],
+                            False,
+                        )
                     log.info(
                         "Binance session restored from persisted credentials mode=%s",
                         "testnet" if stored_tn else "mainnet",
@@ -1184,12 +1204,31 @@ def api_close_all():
     except Exception:
         open_syms = []
     pair_gate.begin_close_all(open_syms or ["*"])
+    flat = False
+    r: dict[str, Any] = {"ok": False, "closed": [], "broker": "binance"}
     try:
         r = connector.close_all_positions()
-        if not r.get("ok"):
+        flat = bool(r.get("ok")) and not r.get("remaining")
+        if not flat:
+            # One more settle + retry before giving up.
+            time.sleep(1.0)
+            r2 = connector.close_all_positions()
+            if r2.get("closed"):
+                r["closed"] = list(r.get("closed") or []) + list(r2.get("closed") or [])
+            r["ok"] = bool(r2.get("ok")) and not r2.get("remaining")
+            r["errors"] = r2.get("errors") or r.get("errors")
+            r["remaining"] = r2.get("remaining")
+            flat = bool(r.get("ok"))
+        if not flat:
+            # Keep gate pending so scanner cannot open while leftovers exist.
             raise HTTPException(status_code=400, detail=r)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"ok": False, "error": str(e)}) from e
     finally:
-        pair_gate.end_close_all(open_syms or ["*"])
+        if flat:
+            pair_gate.end_close_all(open_syms or ["*"])
 
     # Sync scanner reset BEFORE bg work — prevents instant re-entry on the flattened symbol.
     try:

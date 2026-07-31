@@ -1393,7 +1393,14 @@ class MomentumScanner:
         candidates = self._pending_candidates()
         if not candidates:
             return
-        self._try_open_long1_entry(candidates[0])
+        # Try best first; fall through if blocked/failed without opening.
+        for coin in candidates[:5]:
+            before = bool(coin.long1)
+            self._try_open_long1_entry(coin)
+            if coin.long1 or (not before and self._exchange_has_long(coin.symbol)):
+                return
+            if self._one_at_a_time and self._has_open_strategy():
+                return
 
     def status(self) -> dict[str, Any]:
         active_sym = self._global_active_symbol()
@@ -1529,14 +1536,16 @@ class MomentumScanner:
                     peak = coin.highest_price or price
                     coin.entry_signal_key = f"{sym}_{int(peak * 10000)}_{int((coin.qualifying_pct or 0) * 100)}"
                 self._emit_signal(coin, "pending")
-                self._execute_pending_long1(coin)
+                # Ranked queue only — never fire first-to-pending from this tick.
             elif coin.status == STATUS_PENDING and self._entry_signal_ok(coin):
-                self._execute_pending_long1(coin)
+                pass  # wait for _maybe_execute_best_pending
 
         if coin.short or coin.long1 or coin.long2:
             self._manage_positions(coin)
 
         if self._one_at_a_time and self._order_session_ok()[0] and not self._has_open_strategy():
+            self._maybe_execute_best_pending()
+        elif not self._one_at_a_time and self._order_session_ok()[0]:
             self._maybe_execute_best_pending()
 
         self._maybe_broadcast()
@@ -2262,13 +2271,30 @@ class MomentumScanner:
         finally:
             pair_gate.end_close(sym)
 
-    def _close_succeeded(self, close_result: dict[str, Any]) -> bool:
-        if close_result.get("ok"):
-            return True
+    def _close_succeeded(self, close_result: dict[str, Any], symbol: str | None = None) -> bool:
+        """Only treat flatten as success when exchange is actually flat (or already_flat)."""
         if close_result.get("note") == "already_flat":
             return True
-        closed = close_result.get("closed")
-        return isinstance(closed, list) and len(closed) > 0
+        if not close_result.get("ok"):
+            return False
+        if close_result.get("error") == "partial_close_remaining_legs":
+            return False
+        if close_result.get("remaining"):
+            return False
+        sym = (symbol or "").upper()
+        if sym and not getattr(self._connector.cfg, "paper", False):
+            try:
+                left = [
+                    p
+                    for p in (self._connector.positions(sym, force=True) or [])
+                    if float(p.get("volume") or 0) > 1e-12
+                ]
+                if left:
+                    return False
+            except Exception as e:
+                log.warning("close success verify %s: %s", sym, e)
+                return False
+        return True
 
     def _close_all(self, coin: CoinStrategy, reason: str) -> dict[str, Any]:
         sym = coin.symbol
@@ -2307,7 +2333,7 @@ class MomentumScanner:
                     close_result = self._connector.close_position(sym, None)
                 else:
                     close_result = {"ok": True, "closed": [], "broker": "binance", "note": "already_flat"}
-            if self._close_succeeded(close_result):
+            if self._close_succeeded(close_result, sym):
                 self._reset_coin_state(coin)
                 self._arm_entry_cooldown(sym, reason or "scanner_close")
                 self._connector.invalidate_positions_cache()
@@ -2325,12 +2351,17 @@ class MomentumScanner:
                 if self._one_at_a_time:
                     self._maybe_execute_best_pending()
             else:
+                # Keep scanner state — live legs still open (e.g. -4131 partial).
+                self._last_exec_error = f"{sym}: {close_result.get('error') or 'close_incomplete'}"
                 log.warning(
-                    "scanner close failed %s reason=%s err=%s — scanner state retained",
+                    "scanner close incomplete %s reason=%s error=%s remaining=%s — state preserved",
                     sym,
                     reason,
-                    close_result.get("error") or close_result,
+                    close_result.get("error"),
+                    close_result.get("remaining"),
                 )
+                close_result["ok"] = False
+                close_result["error"] = close_result.get("error") or "close_incomplete"
             return close_result
         finally:
             pair_gate.end_close(sym)

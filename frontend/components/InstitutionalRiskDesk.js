@@ -119,7 +119,7 @@ export default function InstitutionalRiskDesk({
       <View style={st.hero}>
         <Text style={[st.heroTitle, { color: C.text }]}>Risk settings</Text>
         <Text style={[st.heroSub, { color: C.dim }]}>
-          15m momentum entry — long 50%, recovery shorts 40% each · Isolated margin only
+          15m momentum entry — long 50%, recovery shorts 12.5% each · Isolated margin only
         </Text>
       </View>
 
@@ -201,7 +201,7 @@ export default function InstitutionalRiskDesk({
         />
         {config.partitionLocked ? (
           <Text style={[st.ruleNote, { color: C.amber }]}>
-            Partition ${config.partitionUsd} subscribed and locked (50% long · 40% short 1 · 40% short 2).
+            Partition ${config.partitionUsd} subscribed and locked (50% long · 12.5% short 1 · 12.5% short 2).
           </Text>
         ) : null}
         <Text style={[st.ruleNote, { color: C.dim }]}>

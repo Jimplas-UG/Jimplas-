@@ -62,6 +62,11 @@ def round_to_tick(price: float, tick: float) -> float:
     return round_to_step(price, tick)
 
 
+def _is_percent_price_error(err: str | Exception) -> bool:
+    msg = str(err or "")
+    return "PERCENT_PRICE" in msg or "-4131" in msg or "percent_price" in msg.lower()
+
+
 class BinanceConnector:
     """Signed REST client for Binance USD-M Futures."""
 
@@ -1207,11 +1212,32 @@ class BinanceConnector:
             return True
         if not self.cfg.api_key:
             return False
-        # Trust prepare_symbol_cached — avoid positionRisk GET on every order.
+        # Trust prepare_symbol_cached only briefly — re-verify so failed POSTs cannot stick.
         if self.is_symbol_prepared(sym, target):
-            self.cfg.leverage = target
-            self.cfg.symbol = sym
-            return True
+            key = (sym, target, "ISOLATED")
+            ts = float(self._prepared_cache.get(key) or 0.0)
+            age = time.time() - ts
+            if age < 60.0:
+                self.cfg.leverage = target
+                self.cfg.symbol = sym
+                return True
+            try:
+                current = self.symbol_leverage(sym)
+                if current == target:
+                    self.cfg.leverage = target
+                    self.cfg.symbol = sym
+                    self._prepared_cache[key] = time.time()
+                    return True
+                log.warning(
+                    "prepared cache stale %s: exchange=%sx wanted=%sx — re-set",
+                    sym,
+                    current,
+                    target,
+                )
+                self._prepared_cache.pop(key, None)
+            except Exception as e:
+                log.warning("leverage verify %s: %s", sym, e)
+                self._prepared_cache.pop(key, None)
         current = self.symbol_leverage(sym)
         if current == target:
             self.cfg.leverage = target
@@ -1499,6 +1525,101 @@ class BinanceConnector:
         except RuntimeError:
             return False
 
+    def _limit_ioc_close_leg(
+        self,
+        *,
+        symbol: str,
+        exit_side: str,
+        quantity: float,
+        hedge_side: str,
+        entry_price: float = 0.0,
+    ) -> dict[str, Any]:
+        """
+        Escape hatch when MARKET hits PERCENT_PRICE (-4131).
+        Walk aggressive LIMIT IOC prices until fill or band exhausted.
+        """
+        import time as _time
+
+        sym = symbol.upper()
+        info = self.exchange_info() if hasattr(self, "exchange_info") else self.symbol_spec(sym)
+        # Prefer symbol-specific filters when available.
+        try:
+            spec = self.symbol_spec(sym)
+        except Exception:
+            spec = info if isinstance(info, dict) else {}
+        step = float(spec.get("stepSize") or info.get("stepSize") or 0.001)
+        tick = float(spec.get("tickSize") or 0.0001)
+        qty = round_to_step(float(quantity), step)
+        if qty <= 0:
+            return {"ok": False, "error": "invalid_quantity"}
+        tick_row = self.book_ticker(sym) or {}
+        bid = float(tick_row.get("bid") or 0)
+        ask = float(tick_row.get("ask") or 0)
+        if exit_side.upper() == "SELL":
+            mark = bid or ask
+            mults = (0.999, 0.995, 0.99, 0.98, 0.97, 0.95, 0.93, 0.90)
+        else:
+            mark = ask or bid
+            mults = (1.001, 1.005, 1.01, 1.02, 1.03, 1.05, 1.07, 1.10)
+        if mark <= 0:
+            return {"ok": False, "error": "no_tick_for_limit_close"}
+        last_err = "limit_ioc_no_fill"
+        for mult in mults:
+            px = round_to_tick(mark * mult, tick)
+            if px <= 0:
+                continue
+            cid = f"{CLIENT_ID_PREFIX}_LI_{hedge_side}_{int(_time.time() * 1000)}"[:36]
+            params: dict[str, Any] = {
+                "symbol": sym,
+                "side": exit_side.upper(),
+                "type": "LIMIT",
+                "timeInForce": "IOC",
+                "quantity": qty,
+                "price": px,
+                "newClientOrderId": cid,
+            }
+            if hedge_side in ("LONG", "SHORT"):
+                params["positionSide"] = hedge_side
+            else:
+                params["reduceOnly"] = "true"
+            try:
+                resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=10.0)
+            except Exception as e:
+                last_err = str(e)
+                log.warning("limit_ioc_close %s %s px=%s: %s", sym, hedge_side, px, e)
+                if not _is_percent_price_error(e):
+                    # Non-band errors: keep trying milder prices once; otherwise continue walk.
+                    continue
+                continue
+            filled = float(resp.get("executedQty") or 0)
+            status = str(resp.get("status") or "").upper()
+            if filled <= 0 and status not in ("FILLED", "PARTIALLY_FILLED"):
+                last_err = f"ioc_unfilled status={status}"
+                continue
+            fill = float(resp.get("avgPrice") or px)
+            order_id = resp.get("orderId")
+            rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
+            if abs(rpnl) < 1e-12 and entry_price > 0:
+                pos_side = "BUY" if hedge_side == "LONG" else "SELL"
+                rpnl = self._estimate_close_pnl(pos_side, entry_price, fill, filled or qty)
+            self.invalidate_positions_cache()
+            return {
+                "ok": True,
+                "symbol": sym,
+                "side": "BUY" if hedge_side == "LONG" else "SELL",
+                "exit_side": exit_side.upper(),
+                "position_side": hedge_side,
+                "volume": filled or qty,
+                "fill_price": fill,
+                "entry_price": entry_price,
+                "profit": rpnl,
+                "realized_pnl": rpnl,
+                "commission": commission,
+                "order": order_id,
+                "close_method": "limit_ioc",
+            }
+        return {"ok": False, "error": last_err, "close_method": "limit_ioc"}
+
     def close_by_position_side(
         self,
         symbol: str,
@@ -1563,10 +1684,18 @@ class BinanceConnector:
         pos_vol = float(p.get("volume", 0))
         info = self.exchange_info()
         # Full-leg exits (volume=None) always use live exchange size to avoid dust.
+        # Partial exits must NEVER bump below-min qty up to minQty — that can wipe a sibling short.
         qty_src = pos_vol if volume is None else min(float(volume), pos_vol)
         qty = round_to_step(qty_src, info["stepSize"])
-        if qty < info["minQty"]:
-            qty = info["minQty"]
+        if volume is None:
+            if qty < info["minQty"]:
+                qty = info["minQty"]
+        elif qty + 1e-12 < float(info["minQty"]):
+            return {
+                "ok": False,
+                "error": f"qty_below_min_with_sibling_safe_cap qty={qty} min={info['minQty']}",
+                "retryable": False,
+            }
         if qty > pos_vol + 1e-12:
             qty = round_to_step(pos_vol, info["stepSize"])
         if qty <= 0:
@@ -1585,6 +1714,19 @@ class BinanceConnector:
         try:
             resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
         except RuntimeError as e:
+            if _is_percent_price_error(e):
+                log.warning("close_by_position_side %s %s MARKET -4131 — LIMIT IOC fallback", sym, ps)
+                lim = self._limit_ioc_close_leg(
+                    symbol=sym,
+                    exit_side=exit_side,
+                    quantity=qty,
+                    hedge_side=hedge_side if hedge_side in ("LONG", "SHORT") else ps,
+                    entry_price=float(p.get("price_open") or 0),
+                )
+                if lim.get("ok"):
+                    lim["latency_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
+                    return lim
+                return {"ok": False, "error": lim.get("error") or str(e), "close_method": "limit_ioc"}
             return {"ok": False, "error": str(e)}
         order_id = resp.get("orderId")
         entry = float(p.get("price_open") or 0)
@@ -1783,6 +1925,20 @@ class BinanceConnector:
             try:
                 resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
             except RuntimeError as e:
+                if _is_percent_price_error(e):
+                    log.warning("close_position %s %s MARKET -4131 — LIMIT IOC fallback", sym, side_tag)
+                    lim = self._limit_ioc_close_leg(
+                        symbol=sym,
+                        exit_side=exit_side,
+                        quantity=qty,
+                        hedge_side=hedge_side if hedge_side in ("LONG", "SHORT") else side_tag,
+                        entry_price=float(p.get("price_open") or 0),
+                    )
+                    if lim.get("ok"):
+                        closed.append(lim)
+                        return
+                    errors.append({"position_side": side_tag, "error": lim.get("error") or str(e)})
+                    return
                 errors.append({"position_side": side_tag, "error": str(e)})
                 log.warning("close_position %s %s failed: %s", sym, side_tag, e)
                 return
@@ -1854,34 +2010,53 @@ class BinanceConnector:
         return out
 
     def close_all_positions(self) -> dict[str, Any]:
-        """Market-close every open position across all symbols."""
+        """Market-close every open position across all symbols (LIMIT IOC escalate on -4131)."""
         if _truthy(os.environ.get("FORWARD_DRY_RUN")):
             return {"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True}
         if self.cfg.paper:
             from paper_simulator import paper_store
 
             return paper_store.close_all_positions()
-        positions = self.positions(force=True)
-        if not positions:
-            return {"ok": True, "closed": [], "symbols": [], "note": "already_flat"}
-        symbols = sorted({str(p.get("symbol") or "").upper() for p in positions if p.get("symbol")})
         all_closed: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
         total_latency = 0.0
-        for sym in symbols:
-            r = self.close_position(sym, None)
-            if r.get("ok"):
-                all_closed.extend(r.get("closed") or [])
-                total_latency += float(r.get("latency_ms") or 0)
-            else:
-                errors.append({"symbol": sym, "error": str(r.get("error") or "close_failed")})
+        symbols: list[str] = []
+        # Multi-pass: MARKET(+IOC) per symbol, then retry leftovers after brief settle.
+        for attempt in range(3):
+            positions = self.positions(force=True)
+            if not positions:
+                break
+            symbols = sorted({str(p.get("symbol") or "").upper() for p in positions if p.get("symbol")})
+            for sym in symbols:
+                r = self.close_position(sym, None)
+                if r.get("ok"):
+                    all_closed.extend(r.get("closed") or [])
+                    total_latency += float(r.get("latency_ms") or 0)
+                else:
+                    err = str(r.get("error") or "close_failed")
+                    # Keep last error per symbol; continue retries.
+                    errors = [e for e in errors if e.get("symbol") != sym]
+                    errors.append({"symbol": sym, "error": err})
+            leftover = self.positions(force=True)
+            if not leftover:
+                errors = []
+                break
+            if attempt < 2:
+                time.sleep(1.2)
         self.invalidate_positions_cache()
+        remaining = self.positions(force=True)
         return {
-            "ok": len(errors) == 0,
+            "ok": len(remaining) == 0,
             "closed": all_closed,
             "symbols": symbols,
             "latency_ms": round(total_latency, 1),
             "errors": errors or None,
+            "remaining": [
+                {"symbol": p.get("symbol"), "position_side": p.get("positionSide"), "volume": p.get("volume")}
+                for p in remaining
+            ]
+            if remaining
+            else None,
             "broker": "binance",
         }
 
