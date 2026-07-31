@@ -362,8 +362,11 @@ async def lifespan(app: FastAPI):
                             log.warning("user stream refresh: %s", e)
                     _flush_scanner_snapshot()
                     return
-                log.warning("persisted Binance session invalid: %s", err)
-                await asyncio.to_thread(clear_binance_session)
+                log.warning(
+                    "persisted Binance session invalid on preferred network: %s — keeping file for retry/fallback",
+                    err,
+                )
+                # Do NOT clear_binance_session here — keys may only work on the other network.
             except Exception as e:
                 log.warning("persisted session restore failed: %s", e)
         # Fall back to env keys when no persisted session
