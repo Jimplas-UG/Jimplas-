@@ -299,11 +299,14 @@ async def lifespan(app: FastAPI):
                 "true",
                 "yes",
                 "on",
-            ) or (os.environ.get("BINANCE_TESTNET", "0").strip() == "0" and not prefer_tn)
+            )
             stored_tn = bool(stored.get("testnet", False))
-            # Hard lock: env says mainnet → never restore/persist a testnet session.
-            if force_mainnet and stored_tn:
-                log.warning("ignoring persisted testnet session — BINANCE_TESTNET=0 forces mainnet")
+            # Prefer env network first; only hard-block testnet when FORCE_MAINNET=1.
+            if not prefer_tn and stored_tn and not force_mainnet:
+                log.warning("persisted session was testnet while BINANCE_TESTNET=0 — trying mainnet first")
+                stored_tn = False
+            elif force_mainnet and stored_tn:
+                log.warning("BINANCE_FORCE_MAINNET=1 — ignoring persisted testnet session")
                 stored_tn = False
             try:
                 acct, err = await asyncio.to_thread(
@@ -313,33 +316,37 @@ async def lifespan(app: FastAPI):
                     stored_tn,
                 )
                 # Keys often work on only one network — try the other before giving up,
-                # unless mainnet is hard-forced.
-                if acct is None and _is_key_env_mismatch(err or "") and not force_mainnet:
+                # unless FORCE_MAINNET forbids testnet.
+                if acct is None and _is_key_env_mismatch(err or ""):
                     alt_tn = not stored_tn
-                    acct, err = await asyncio.to_thread(
-                        _attempt_binance_login,
+                    if force_mainnet and alt_tn:
+                        log.error("mainnet keys required (BINANCE_FORCE_MAINNET=1) — not falling back to testnet")
+                    else:
+                        acct, err = await asyncio.to_thread(
+                            _attempt_binance_login,
+                            stored["api_key"],
+                            stored["api_secret"],
+                            alt_tn,
+                        )
+                        if acct is not None:
+                            stored_tn = alt_tn
+                            await asyncio.to_thread(
+                                save_binance_session,
+                                stored["api_key"],
+                                stored["api_secret"],
+                                stored_tn,
+                            )
+                            log.warning(
+                                "persisted session auto-switched to %s (keys only valid there)",
+                                "testnet" if stored_tn else "mainnet",
+                            )
+                if acct is not None:
+                    await asyncio.to_thread(
+                        save_binance_session,
                         stored["api_key"],
                         stored["api_secret"],
-                        alt_tn,
+                        stored_tn,
                     )
-                    if acct is not None:
-                        stored_tn = alt_tn
-                        await asyncio.to_thread(
-                            save_binance_session,
-                            stored["api_key"],
-                            stored["api_secret"],
-                            stored_tn,
-                        )
-                        log.info("persisted session auto-switched to %s", "testnet" if stored_tn else "mainnet")
-                if acct is not None:
-                    # Persist corrected mainnet flag if we overrode testnet.
-                    if force_mainnet:
-                        await asyncio.to_thread(
-                            save_binance_session,
-                            stored["api_key"],
-                            stored["api_secret"],
-                            False,
-                        )
                     log.info(
                         "Binance session restored from persisted credentials mode=%s",
                         "testnet" if stored_tn else "mainnet",
