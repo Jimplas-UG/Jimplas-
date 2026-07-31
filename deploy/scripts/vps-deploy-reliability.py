@@ -22,12 +22,14 @@ grep -q '^SCANNER_EXEC=' "$ENVF" && sed -i 's/^SCANNER_EXEC=.*/SCANNER_EXEC=1/' 
 for kv in \
   'SCANNER_MIN_LIVE_ENTRY_PCT=2.0' \
   'SCANNER_MAX_RETRACE_ENTRY_PCT=12.0' \
-  'SCANNER_LONG_PULLBACK_PCT=1.5' \
-  'SCANNER_LONG_PULLBACK_MFE_PCT=1.5' \
+  'SCANNER_LONG_PULLBACK_PCT=0.5' \
+  'SCANNER_SHORT_PULLBACK_PCT=1.5' \
+  'SCANNER_SHORT_PULLBACK_MFE_PCT=1.5' \
   'SCANNER_SMART_EXIT_PCT=6.0' \
   'SCANNER_EXIT_COST_PCT=0.8' \
-  'SCANNER_LONG1_PARTITION_PCT=12.5' \
-  'SCANNER_LONG2_PARTITION_PCT=12.5' \
+  'SCANNER_SHORT_PARTITION_PCT=50' \
+  'SCANNER_LONG1_PARTITION_PCT=40' \
+  'SCANNER_LONG2_PARTITION_PCT=40' \
   'BINANCE_PAPER=0' \
   'FORWARD_DRY_RUN=0' \
   'SCANNER_EXEC=1'
@@ -43,7 +45,7 @@ done
 # Keep BINANCE_TESTNET as-is (0=mainnet prefer, 1=testnet prefer). Login/session may switch.
 grep -q '^FORWARD_DRY_RUN=0$' "$ENVF" || { echo 'FATAL: FORWARD_DRY_RUN must be 0'; exit 1; }
 
-# Unlock stale 40/40 risk lock so balanced short sizing takes effect.
+# Restore original short-first risk: Short 50% / Long1 40% / Long2 40%.
 python3 - <<'PY'
 import json, os
 path = "/var/lib/bilshenz/scanner-risk.json"
@@ -52,9 +54,9 @@ try:
     if os.path.isfile(path):
         with open(path, encoding="utf-8") as fh:
             raw = json.load(fh) or {}
-    raw["long1_pct"] = 12.5
-    raw["long2_pct"] = 12.5
-    raw["short_pct"] = float(raw.get("short_pct") or 50)
+    raw["long1_pct"] = 40.0
+    raw["long2_pct"] = 40.0
+    raw["short_pct"] = 50.0
     raw["locked"] = False
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"

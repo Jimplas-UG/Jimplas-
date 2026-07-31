@@ -25,6 +25,12 @@ for kv in \
   'TRADE_CALENDAR_TZ=Africa/Nairobi' \
   'SCANNER_MIN_LIVE_ENTRY_PCT=2.0' \
   'SCANNER_MAX_RETRACE_ENTRY_PCT=12.0' \
+  'SCANNER_LONG_PULLBACK_PCT=0.5' \
+  'SCANNER_SHORT_PULLBACK_PCT=1.5' \
+  'SCANNER_SHORT_PULLBACK_MFE_PCT=1.5' \
+  'SCANNER_SHORT_PARTITION_PCT=50' \
+  'SCANNER_LONG1_PARTITION_PCT=40' \
+  'SCANNER_LONG2_PARTITION_PCT=40' \
   'FORWARD_DRY_RUN=0' \
   'SCANNER_EXEC=1' \
   'SCANNER_ENABLED=1' \
@@ -41,6 +47,29 @@ for kv in \
     echo "${key}=${val}" >> "$ENVF"
   fi
 done
+
+# Restore original short-first risk sizing on disk.
+python3 - <<'PY'
+import json, os
+path = "/var/lib/bilshenz/scanner-risk.json"
+try:
+    raw = {}
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh) or {}
+    raw["short_pct"] = 50.0
+    raw["long1_pct"] = 40.0
+    raw["long2_pct"] = 40.0
+    raw["locked"] = False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(raw, fh, indent=2)
+    os.replace(tmp, path)
+    print("risk_json_updated", {k: raw.get(k) for k in ("short_pct","long1_pct","long2_pct","locked")})
+except Exception as e:
+    print("risk_json_skip", e)
+PY
 
 # Backend
 cd /opt/bilshenz/backend
