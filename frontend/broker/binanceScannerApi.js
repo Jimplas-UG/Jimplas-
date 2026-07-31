@@ -137,8 +137,8 @@ export async function postScannerRiskConfig(baseUrl, config) {
   const body = {
     partition_usd: Number(config.partitionUsd) || 100,
     short_pct: Number(config.shortPartitionPct) || 50,
-    long1_pct: Number(config.long1PartitionPct) || 40,
-    long2_pct: Number(config.long2PartitionPct) || 40,
+    long1_pct: Number(config.long1PartitionPct) || 12.5,
+    long2_pct: Number(config.long2PartitionPct) || 12.5,
   };
   try {
     const res = await binanceFetch(

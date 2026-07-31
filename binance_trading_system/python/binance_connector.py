@@ -2095,10 +2095,12 @@ class BinanceConnector:
             return {"ok": False, "error": "invalid_volume"}
 
         magic_i = int(magic)
-        if magic_i == 88001:
+        # MAGIC_SHORT=88001 Short1, MAGIC_LONG2=88003 Short2 → close SHORT.
+        # MAGIC_LONG1=88002 primary long → close LONG.
+        if magic_i in (88001, 88003):
             close_side = "BUY"
             hedge_side = "SHORT"
-        elif magic_i in (88002, 88003):
+        elif magic_i == 88002:
             close_side = "SELL"
             hedge_side = "LONG"
         else:

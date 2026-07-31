@@ -1059,6 +1059,20 @@ class MomentumScanner:
             self._close_all(coin, "ORPHAN_RECOVERY")
             return False
 
+        # Phantom Short2/Short1 in memory after shared SHORT was flattened.
+        if has_long1 and not has_short and (coin.long2 or coin.short):
+            if coin.short:
+                log.info("scanner %s clearing phantom Short1 — exchange SHORT flat", sym)
+                coin.short = None
+                coin.recovery_peak_price = None
+                coin.short_was_closed = True
+            if coin.long2:
+                log.info("scanner %s clearing phantom Short2 — exchange SHORT flat", sym)
+                coin.long2 = None
+                coin.long2_peak_price = None
+                coin.long2_was_closed = True
+            coin.status = STATUS_LONG1 if coin.long1 else STATUS_WATCHING
+
         if not coin.long1 and not coin.long2 and not coin.short:
             return False
 
@@ -2054,35 +2068,76 @@ class MomentumScanner:
             return
         pair_gate.begin_close(sym)
         try:
-            # Always flatten the full hedge side — memory qty can undershoot after
-            # partial fills / rounding and leave dust that later stacks another long.
+            # Primary long: flatten full LONG side (dust-safe).
+            # Recovery Short1/Short2 share exchange SHORT — close only this leg's qty
+            # when the sibling recovery leg is still open, or Short2 gets wiped.
+            sibling_short = None
+            if leg_name == "short":
+                sibling_short = coin.long2
+            elif leg_name == "long2":
+                sibling_short = coin.short
+            close_vol: float | None = None
+            if leg.side == "SELL" and sibling_short is not None:
+                close_vol = max(float(leg.qty or 0), 0.0)
+                if close_vol <= 0:
+                    log.warning("scanner close leg %s %s: missing qty with sibling short open", sym, leg_name)
+                    return
+
             if hasattr(self._connector, "close_by_position_side"):
                 if leg.side == "BUY":
                     r = self._connector.close_by_position_side(sym, "LONG", None)
                 else:
-                    r = self._connector.close_by_position_side(sym, "SHORT", None)
+                    r = self._connector.close_by_position_side(sym, "SHORT", close_vol)
             else:
-                r = self._connector.close_leg(sym, leg.magic, None)
+                r = self._connector.close_leg(sym, leg.magic, close_vol)
             if not r.get("ok"):
                 log.warning("scanner close leg failed %s %s: %s", sym, leg_name, r.get("error") or r)
                 return
-            # Live only: verify side is flat before clearing scanner state (paper uses in-memory legs).
+            # Live only: verify expected residual before clearing scanner state.
             if not getattr(self._connector.cfg, "paper", False):
-                still_open = False
                 if leg.side == "BUY" and self._exchange_has_long(sym):
-                    still_open = True
-                if leg.side == "SELL" and self._exchange_has_short(sym):
-                    still_open = True
-                if still_open:
-                    log.warning("scanner close leg %s %s reported ok but side still open — forcing", sym, leg_name)
+                    log.warning("scanner close leg %s %s reported ok but LONG still open — forcing", sym, leg_name)
                     try:
-                        if hasattr(self._connector, "close_position"):
+                        if hasattr(self._connector, "close_by_position_side"):
+                            self._connector.close_by_position_side(sym, "LONG", None)
+                        elif hasattr(self._connector, "close_position"):
                             self._connector.close_position(sym, None)
                         else:
                             return
                     except Exception as e:
-                        log.warning("scanner force flatten %s: %s", sym, e)
+                        log.warning("scanner force flatten long %s: %s", sym, e)
                         return
+                elif leg.side == "SELL":
+                    still_short = self._exchange_has_short(sym)
+                    if sibling_short is None and still_short:
+                        log.warning(
+                            "scanner close leg %s %s reported ok but SHORT still open — forcing short side",
+                            sym,
+                            leg_name,
+                        )
+                        try:
+                            if hasattr(self._connector, "close_by_position_side"):
+                                self._connector.close_by_position_side(sym, "SHORT", None)
+                            else:
+                                return
+                        except Exception as e:
+                            log.warning("scanner force flatten short %s: %s", sym, e)
+                            return
+                    elif sibling_short is not None and not still_short:
+                        # Partial close took the whole short — sibling is gone on exchange.
+                        log.warning(
+                            "scanner %s %s close flattened shared SHORT — clearing sibling recovery leg",
+                            sym,
+                            leg_name,
+                        )
+                        if leg_name == "short":
+                            coin.long2 = None
+                            coin.long2_peak_price = None
+                            coin.long2_was_closed = True
+                        else:
+                            coin.short = None
+                            coin.recovery_peak_price = None
+                            coin.short_was_closed = True
             if leg_name == "long1":
                 coin.long1 = None
                 coin.long1_peak_price = None
@@ -2102,6 +2157,18 @@ class MomentumScanner:
                 coin.recovery_peak_price = None
                 coin.short_was_closed = True
                 coin.status = STATUS_LONG2 if coin.long2 else (STATUS_LONG1 if coin.long1 else STATUS_CLOSED)
+            # Shared SHORT went flat — drop any phantom recovery sibling.
+            if leg.side == "SELL" and not getattr(self._connector.cfg, "paper", False):
+                if not self._exchange_has_short(sym):
+                    if coin.short:
+                        coin.short = None
+                        coin.recovery_peak_price = None
+                        coin.short_was_closed = True
+                    if coin.long2:
+                        coin.long2 = None
+                        coin.long2_peak_price = None
+                        coin.long2_was_closed = True
+                    coin.status = STATUS_LONG1 if coin.long1 else STATUS_CLOSED
             self._refresh_exchange_tps(coin)
             self._connector.invalidate_positions_cache()
             if reason:

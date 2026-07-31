@@ -27,7 +27,11 @@ export function sanitizeCalendarDays(days, maxDayAbs = 20000) {
     .filter(Boolean);
 }
 
-function PnlCell({ cell, C, compact }) {
+function PnlCell({ cell, C, compact, weekMode }) {
+  if (cell?.empty) {
+    return <View style={[st.cellSlot, compact && st.cellSlotYear, weekMode && st.cellSlotWeek]} />;
+  }
+
   const pnl = Number(cell.pnl ?? 0);
   const win = pnl > 0;
   const loss = pnl < 0;
@@ -35,18 +39,24 @@ function PnlCell({ cell, C, compact }) {
   const border = win ? 'rgba(0,230,118,0.45)' : loss ? 'rgba(255,61,87,0.45)' : C.border;
   const col = win ? C.green : loss ? C.red : C.dim;
   return (
-    <View style={[st.cell, compact && st.cellCompact, { backgroundColor: bg, borderColor: border }]}>
-      <Text style={[st.cellDay, { color: C.dim }]}>{cell.day ?? cell.label}</Text>
-      {cell.hasData ? (
-        <>
-          <Text style={[st.cellPnl, { color: col }]}>{fmtCalendarMoney(pnl)}</Text>
-          <Text style={[st.cellTrades, { color: C.dim }]}>
-            {cell.trades} {cell.trades === 1 ? 'close' : 'closes'}
-          </Text>
-        </>
-      ) : (
-        <Text style={[st.cellDash, { color: C.dim }]}>—</Text>
-      )}
+    <View style={[st.cellSlot, compact && st.cellSlotYear, weekMode && st.cellSlotWeek]}>
+      <View style={[st.cellInner, { backgroundColor: bg, borderColor: border }]}>
+        <Text style={[st.cellDay, { color: C.dim }]} numberOfLines={1}>
+          {cell.day ?? cell.label}
+        </Text>
+        {cell.hasData ? (
+          <>
+            <Text style={[st.cellPnl, { color: col }]} numberOfLines={1} adjustsFontSizeToFit>
+              {fmtCalendarMoney(pnl)}
+            </Text>
+            <Text style={[st.cellTrades, { color: C.dim }]} numberOfLines={1}>
+              {cell.trades} {cell.trades === 1 ? 'close' : 'closes'}
+            </Text>
+          </>
+        ) : (
+          <Text style={[st.cellDash, { color: C.dim }]}>—</Text>
+        )}
+      </View>
     </View>
   );
 }
@@ -160,8 +170,15 @@ export default function TradeResultsCalendar({
           ? yearMonths(y, dayMap)
           : serverDays.slice(-60).map((d) => {
               const parts = d.date.split('-');
-              return { ...d, day: Number(parts[2]), hasData: true };
+              return { ...d, day: Number(parts[2]), hasData: true, empty: false };
             });
+
+  const pnlLabel =
+    periodTotal > 0
+      ? `+$${periodTotal.toFixed(2)}`
+      : periodTotal < 0
+        ? `-$${Math.abs(periodTotal).toFixed(2)}`
+        : '$0.00';
 
   return (
     <View style={[st.wrap, { borderColor: C.border, backgroundColor: C.panel }]}>
@@ -189,10 +206,7 @@ export default function TradeResultsCalendar({
       <View style={st.summaryRow}>
         <View style={[st.summaryCard, { borderColor: C.border, backgroundColor: C.panel2 }]}>
           <Text style={[st.summaryLab, { color: C.dim }]}>Total P&L</Text>
-          <Text style={[st.summaryVal, { color: periodTotal >= 0 ? C.green : C.red }]}>
-            ${Math.abs(periodTotal).toFixed(2)}
-            {periodTotal < 0 ? ' loss' : ''}
-          </Text>
+          <Text style={[st.summaryVal, { color: periodTotal >= 0 ? C.green : C.red }]}>{pnlLabel}</Text>
         </View>
         <View style={[st.summaryCard, { borderColor: C.border, backgroundColor: C.panel2 }]}>
           <Text style={[st.summaryLab, { color: C.dim }]}>Period</Text>
@@ -222,13 +236,20 @@ export default function TradeResultsCalendar({
         </View>
       ) : null}
 
-      <View style={[st.grid, view === 'year' && st.gridYear]}>
+      <View
+        style={[
+          st.grid,
+          view === 'year' && st.gridYear,
+          view === 'week' && st.gridWeek,
+          view === 'all' && st.gridAll,
+        ]}>
         {cells.map((cell) => (
           <PnlCell
             key={cell.date ?? `${cell.month}-${cell.label}`}
             cell={cell}
             C={C}
             compact={view === 'year'}
+            weekMode={view === 'week'}
           />
         ))}
       </View>
@@ -271,23 +292,43 @@ const st = StyleSheet.create({
     paddingBottom: 8,
   },
   navTitle: { fontSize: 13, fontWeight: '700' },
-  dowRow: { flexDirection: 'row', paddingHorizontal: 10, marginBottom: 4 },
-  dow: { flex: 1, textAlign: 'center', fontSize: 9, fontWeight: '700' },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', padding: 8, gap: 6 },
-  gridYear: { gap: 8 },
-  cell: {
-    width: '12.5%',
-    minWidth: 42,
-    flexGrow: 1,
-    aspectRatio: 0.95,
-    borderRadius: 12,
+  dowRow: { flexDirection: 'row', paddingHorizontal: 6, marginBottom: 2 },
+  dow: { width: '14.2857%', textAlign: 'center', fontSize: 9, fontWeight: '700' },
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    paddingHorizontal: 6,
+    paddingBottom: 10,
+    paddingTop: 2,
+  },
+  gridYear: {},
+  gridWeek: {},
+  gridAll: {},
+  /** Exact 7-column slots — no minWidth/flexGrow so month-end days stay visible. */
+  cellSlot: {
+    width: '14.2857%',
+    aspectRatio: 0.92,
+    padding: 2,
+  },
+  cellSlotYear: {
+    width: '33.3333%',
+    aspectRatio: 1.35,
+    padding: 4,
+  },
+  cellSlotWeek: {
+    width: '14.2857%',
+    aspectRatio: 1.05,
+  },
+  cellInner: {
+    flex: 1,
+    borderRadius: 10,
     borderWidth: 1,
-    padding: 6,
+    paddingHorizontal: 3,
+    paddingVertical: 4,
     justifyContent: 'space-between',
   },
-  cellCompact: { width: '30%', minWidth: 90 },
-  cellDay: { fontSize: 10, fontWeight: '700' },
-  cellPnl: { fontSize: 11, fontWeight: '800', textAlign: 'center' },
-  cellTrades: { fontSize: 8, fontWeight: '600', textAlign: 'center' },
-  cellDash: { fontSize: 14, textAlign: 'center', marginTop: 8 },
+  cellDay: { fontSize: 9, fontWeight: '700' },
+  cellPnl: { fontSize: 9, fontWeight: '800', textAlign: 'center' },
+  cellTrades: { fontSize: 7, fontWeight: '600', textAlign: 'center' },
+  cellDash: { fontSize: 12, textAlign: 'center', marginTop: 6 },
 });

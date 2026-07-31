@@ -31,9 +31,26 @@ export function indexDaysByDate(days) {
   return map;
 }
 
+/**
+ * Full Sunday→Saturday month matrix with leading/trailing blanks so day 1
+ * aligns under the correct weekday and end-of-month days stay on-grid.
+ */
 export function monthGrid(year, monthIndex0, dayMap) {
+  const firstDow = new Date(year, monthIndex0, 1).getDay(); // 0=Sun
   const lastDay = new Date(year, monthIndex0 + 1, 0).getDate();
   const cells = [];
+
+  for (let i = 0; i < firstDow; i++) {
+    cells.push({
+      date: `pad-s-${year}-${monthIndex0}-${i}`,
+      day: '',
+      empty: true,
+      hasData: false,
+      pnl: 0,
+      trades: 0,
+    });
+  }
+
   for (let d = 1; d <= lastDay; d++) {
     const dt = new Date(year, monthIndex0, d);
     const key = `${year}-${pad2(monthIndex0 + 1)}-${pad2(d)}`;
@@ -42,11 +59,25 @@ export function monthGrid(year, monthIndex0, dayMap) {
       date: key,
       day: d,
       dow: dt.getDay(),
+      empty: false,
       pnl: Number(row?.pnl ?? 0),
       trades: Number(row?.trades ?? 0),
       hasData: !!row,
     });
   }
+
+  while (cells.length % 7 !== 0) {
+    const i = cells.length;
+    cells.push({
+      date: `pad-e-${year}-${monthIndex0}-${i}`,
+      day: '',
+      empty: true,
+      hasData: false,
+      pnl: 0,
+      trades: 0,
+    });
+  }
+
   return cells;
 }
 
@@ -64,6 +95,7 @@ export function weekCells(anchorDate, dayMap) {
       date: key,
       day: dt.getDate(),
       label: labels[i],
+      empty: false,
       pnl: Number(row?.pnl ?? 0),
       trades: Number(row?.trades ?? 0),
       hasData: !!row,
@@ -93,6 +125,7 @@ export function yearMonths(year, dayMap) {
       pnl,
       trades,
       hasData: days > 0,
+      empty: false,
     });
   }
   return months;
@@ -135,4 +168,3 @@ export function parseDayKeyUtc(dateStr) {
   if (!y || !m || !d) return null;
   return new Date(y, m - 1, d);
 }
-

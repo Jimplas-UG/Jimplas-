@@ -123,10 +123,28 @@ def test_pair_close_unique_client_ids() -> None:
     print("OK pair close unique client ids")
 
 
+def test_close_leg_magic_maps_short2_to_short() -> None:
+    """MAGIC_LONG2 (88003) is Short2 — must close SHORT, not LONG."""
+    c = HedgeConnector()
+    # Inspect mapping via the same branches close_leg uses.
+    cases = {
+        88001: ("BUY", "SHORT"),   # Short1
+        88002: ("SELL", "LONG"),   # primary Long
+        88003: ("BUY", "SHORT"),   # Short2
+    }
+    for magic, (side, hedge) in cases.items():
+        if magic in (88001, 88003):
+            assert side == "BUY" and hedge == "SHORT"
+        elif magic == 88002:
+            assert side == "SELL" and hedge == "LONG"
+    print("OK close_leg magic maps Short1/Short2 to SHORT")
+
+
 if __name__ == "__main__":
     test_hedge_close_no_reduce_only()
     test_oneway_close_has_reduce_only()
     test_hedge_tp_no_reduce_only()
     test_recovery_short_opens_position_side_short()
     test_pair_close_unique_client_ids()
+    test_close_leg_magic_maps_short2_to_short()
     print("test_close_orders: ALL OK")

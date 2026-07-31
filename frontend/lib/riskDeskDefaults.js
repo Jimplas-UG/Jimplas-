@@ -17,8 +17,8 @@ export const RISK_DESK_DEFAULTS = {
   partitionUsd: 100,
   partitionLocked: false,
   shortPartitionPct: 50,
-  long1PartitionPct: 40,
-  long2PartitionPct: 40,
+  long1PartitionPct: 12.5,
+  long2PartitionPct: 12.5,
   riskPerTradePct: 1,
   maxDailyLossPct: 3,
   maxWeeklyLossPct: 8,
@@ -72,12 +72,22 @@ export function normalizeRiskDeskConfig(raw) {
   const defaultLeverage = LEG_LEVERAGE_POLICY.short;
   const maxAllowedLeverage = LEG_LEVERAGE_POLICY.long1;
 
+  let shortPartitionPct = n('shortPartitionPct', 1, 100);
+  let long1PartitionPct = n('long1PartitionPct', 1, 100);
+  let long2PartitionPct = n('long2PartitionPct', 1, 100);
+  // One-time migrate toxic legacy 40/40 ×10x short-heavy sizing → balanced 12.5/12.5.
+  if (long1PartitionPct >= 35 && long2PartitionPct >= 35) {
+    long1PartitionPct = 12.5;
+    long2PartitionPct = 12.5;
+  }
+  if (shortPartitionPct < 1) shortPartitionPct = 50;
+
   return {
     partitionUsd,
     partitionLocked: !!raw?.partitionLocked,
-    shortPartitionPct: n('shortPartitionPct', 1, 100),
-    long1PartitionPct: n('long1PartitionPct', 1, 100),
-    long2PartitionPct: n('long2PartitionPct', 1, 100),
+    shortPartitionPct,
+    long1PartitionPct,
+    long2PartitionPct,
     riskPerTradePct: n('riskPerTradePct', 0.1, 5),
     maxDailyLossPct: n('maxDailyLossPct', 0.5, 25),
     maxWeeklyLossPct: n('maxWeeklyLossPct', 1, 40),
