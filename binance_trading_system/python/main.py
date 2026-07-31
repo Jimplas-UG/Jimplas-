@@ -657,8 +657,8 @@ class ScannerExecBody(BaseModel):
 class ScannerRiskBody(BaseModel):
     partition_usd: float = Field(100, gt=0, le=1_000_000)
     short_pct: float = Field(50, gt=0, le=100)
-    long1_pct: float = Field(12.5, gt=0, le=100)
-    long2_pct: float = Field(12.5, gt=0, le=100)
+    long1_pct: float = Field(40, gt=0, le=100)
+    long2_pct: float = Field(40, gt=0, le=100)
 
 
 @app.post("/api/scanner/close")

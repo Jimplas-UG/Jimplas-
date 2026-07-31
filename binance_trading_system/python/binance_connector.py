@@ -67,6 +67,21 @@ def _is_percent_price_error(err: str | Exception) -> bool:
     return "PERCENT_PRICE" in msg or "-4131" in msg or "percent_price" in msg.lower()
 
 
+def close_leg_sides(magic: int) -> tuple[str, str] | None:
+    """Order side + hedge positionSide needed to close a scanner leg by MAGIC.
+
+    MAGIC_SHORT=88001 is the primary short → BUY back the SHORT side.
+    MAGIC_LONG1=88002 / MAGIC_LONG2=88003 are recovery longs → SELL the LONG side.
+    Returns None for unknown magics so callers fall back to a full symbol close.
+    """
+    magic_i = int(magic)
+    if magic_i == 88001:
+        return "BUY", "SHORT"
+    if magic_i in (88002, 88003):
+        return "SELL", "LONG"
+    return None
+
+
 class BinanceConnector:
     """Signed REST client for Binance USD-M Futures."""
 
@@ -657,8 +672,8 @@ class BinanceConnector:
     def _position_side_param_for_leg(self, side: str, leg: str) -> dict[str, str]:
         """Map order to hedge positionSide by side — BUY→LONG, SELL→SHORT.
 
-        Recovery Short1/Short2 use leg LONG1/LONG2 with side SELL and MUST open SHORT,
-        not reduce the primary LONG.
+        Primary leg SHORT is side SELL and opens SHORT. Recovery hedges use leg
+        LONG1/LONG2 with side BUY and MUST open LONG, not reduce the primary SHORT.
         """
         if not self.is_hedge_mode():
             return {}
@@ -1200,7 +1215,7 @@ class BinanceConnector:
         return deals[:lim]
 
     def ensure_exchange_leverage(self, symbol: str, leverage: int | None = None) -> bool:
-        """Set symbol leverage on Binance (Long 5x / recovery shorts 10x)."""
+        """Set symbol leverage on Binance (primary Short 5x / recovery Longs 10x)."""
         from leverage_policy import ALLOWED_LEVERAGES, SHORT_LEVERAGE
 
         target = int(leverage if leverage is not None else SHORT_LEVERAGE)
@@ -2224,7 +2239,7 @@ class BinanceConnector:
             client_order_id=cid,
             reference_price=intended,
             leverage=leverage,
-            leg=leg or (f"LONG{magic}" if magic in (88002, 88003) else "SHORT"),
+            leg=leg or {88002: "LONG1", 88003: "LONG2"}.get(int(magic), "SHORT"),
         )
         if not order_resp.get("ok"):
             return {
@@ -2269,17 +2284,10 @@ class BinanceConnector:
         if qty <= 0:
             return {"ok": False, "error": "invalid_volume"}
 
-        magic_i = int(magic)
-        # MAGIC_SHORT=88001 Short1, MAGIC_LONG2=88003 Short2 → close SHORT.
-        # MAGIC_LONG1=88002 primary long → close LONG.
-        if magic_i in (88001, 88003):
-            close_side = "BUY"
-            hedge_side = "SHORT"
-        elif magic_i == 88002:
-            close_side = "SELL"
-            hedge_side = "LONG"
-        else:
+        sides = close_leg_sides(magic)
+        if sides is None:
             return self.close_position(sym, qty)
+        close_side, hedge_side = sides
 
         tick = self.book_ticker(sym)
         if not tick:

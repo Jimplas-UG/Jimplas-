@@ -97,33 +97,31 @@ def test_qualified_sell_executes() -> None:
     print("OK qualified SELL executes")
 
 
-def test_qualified_buy_executes() -> None:
+def test_recovery_long_buy_executes() -> None:
+    """Short-first: recovery LONG1/LONG2 hedges are BUY orders and must pass."""
     conn = MockConnector()
     conn._short_qty = 10.0
     eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
     r = eng.execute(_signal(side="BUY", leg="LONG1", tp=None))
-    assert r.ok
-    assert r.side == "BUY"
-    print("OK qualified BUY executes")
-
-
-def test_primary_long_buy_without_exchange_short() -> None:
-    """Long-first: primary LONG1 BUY does not require an existing short leg."""
-    conn = MockConnector()
-    conn._short_qty = 0.0
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
-    r = eng.execute(_signal(side="BUY", leg="LONG1", tp=None, signal_id="buy_primary_long_1"))
     assert r.ok, r.error
-    print("OK primary LONG1 BUY executes without exchange short")
+    assert r.side == "BUY"
+    r2 = eng.execute(_signal(side="BUY", leg="LONG2", tp=None, signal_id="buy_long2_1"))
+    assert r2.ok, r2.error
+    print("OK recovery LONG1/LONG2 BUY executes")
 
 
-def test_long2_buy_blocked() -> None:
+def test_standalone_buy_blocked_by_short_first() -> None:
+    """Any BUY that is not a recovery long or a desk manual order must be blocked."""
     conn = MockConnector()
     eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
-    r = eng.execute(_signal(side="BUY", leg="LONG2", tp=None, signal_id="buy_long2_1"))
-    assert not r.ok
-    assert r.error == "buy_blocked_not_primary_long"
-    print("OK LONG2 BUY blocked (recovery shorts only)")
+    for leg in ("SHORT", "", "ENTRY"):
+        r = eng.execute(
+            _signal(side="BUY", leg=leg, tp=None, signal_id=f"buy_blocked_{leg or 'none'}")
+        )
+        assert not r.ok, f"BUY with leg={leg!r} must be blocked"
+        assert r.error == "buy_blocked_short_first_policy"
+        assert r.stage == "blocked_short_first"
+    print("OK standalone BUY blocked by short-first policy")
 
 
 def test_manual_buy_allowed() -> None:
@@ -229,40 +227,30 @@ def test_forward_dry_run_blocks() -> None:
     print("OK FORWARD_DRY_RUN blocks execution")
 
 
-def test_long1_exchange_is_5x() -> None:
-    conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
-    r = eng.execute(_signal(side="BUY", leg="LONG1", leverage=5, tp=None, signal_id="lev_long1_1"))
-    assert r.ok, r.error
-    prep = [c for c in conn.calls if c.get("op") == "prepare"]
-    assert prep and prep[-1]["lev"] == 5
-    ensure = [c for c in conn.calls if c.get("op") == "ensure_lev"]
-    assert ensure and ensure[-1]["lev"] == 5
-    print("OK LONG exchange leverage is 5x")
-
-
-def test_recovery_short_exchange_is_10x() -> None:
-    conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
-    r = eng.execute(
-        _signal(side="SELL", leg="LONG1", leverage=10, tp=None, signal_id="lev_short1_1")
-    )
-    assert r.ok, r.error
-    prep = [c for c in conn.calls if c.get("op") == "prepare"]
-    assert prep and prep[-1]["lev"] == 10
-    ensure = [c for c in conn.calls if c.get("op") == "ensure_lev"]
-    assert ensure and any(c["lev"] == 10 for c in ensure)
-    print("OK recovery SHORT1 exchange leverage is 10x")
-
-
-def test_short_forces_5x_leverage() -> None:
+def test_primary_short_exchange_is_5x() -> None:
     conn = MockConnector()
     eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
     r = eng.execute(_signal(side="SELL", leg="SHORT", leverage=20, signal_id="lev_short_1"))
     assert r.ok, r.error
     prep = [c for c in conn.calls if c.get("op") == "prepare"]
-    assert prep and prep[-1]["lev"] == 5
-    print("OK manual SHORT forces 5x leverage")
+    assert prep and prep[-1]["lev"] == 5, "policy must force the primary short back to 5x"
+    ensure = [c for c in conn.calls if c.get("op") == "ensure_lev"]
+    assert ensure and ensure[-1]["lev"] == 5
+    print("OK primary SHORT exchange leverage is 5x")
+
+
+def test_recovery_long_exchange_is_10x() -> None:
+    conn = MockConnector()
+    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    for leg, sig in (("LONG1", "lev_long1_1"), ("LONG2", "lev_long2_1")):
+        conn.calls.clear()
+        r = eng.execute(_signal(side="BUY", leg=leg, leverage=5, tp=None, signal_id=sig))
+        assert r.ok, r.error
+        prep = [c for c in conn.calls if c.get("op") == "prepare"]
+        assert prep and prep[-1]["lev"] == 10, f"{leg} must be forced to 10x"
+        ensure = [c for c in conn.calls if c.get("op") == "ensure_lev"]
+        assert ensure and any(c["lev"] == 10 for c in ensure)
+    print("OK recovery LONG1/LONG2 exchange leverage is 10x")
 
 
 def test_latency_under_target_when_network_allows() -> None:
@@ -277,9 +265,8 @@ def test_latency_under_target_when_network_allows() -> None:
 if __name__ == "__main__":
     tests = [
         test_qualified_sell_executes,
-        test_qualified_buy_executes,
-        test_primary_long_buy_without_exchange_short,
-        test_long2_buy_blocked,
+        test_recovery_long_buy_executes,
+        test_standalone_buy_blocked_by_short_first,
         test_manual_buy_allowed,
         test_manual_orders_unique_client_ids,
         test_tp_created,
@@ -289,9 +276,8 @@ if __name__ == "__main__":
         test_duplicate_prevention,
         test_insufficient_margin,
         test_forward_dry_run_blocks,
-        test_long1_exchange_is_5x,
-        test_recovery_short_exchange_is_10x,
-        test_short_forces_5x_leverage,
+        test_primary_short_exchange_is_5x,
+        test_recovery_long_exchange_is_10x,
         test_latency_under_target_when_network_allows,
     ]
     for t in tests:

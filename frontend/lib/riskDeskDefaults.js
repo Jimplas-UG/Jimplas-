@@ -3,7 +3,7 @@ export const STORAGE_RISK_DESK = '@bilshenz_v1/riskDeskConfig';
 /** Fixed partition tiers — amount you subscribe / are ready to lose. */
 export const PARTITION_PRESETS_USD = [50, 100, 200, 500];
 
-/** Fixed institutional leverage per leg — not user-configurable. */
+/** Fixed institutional leverage per leg — primary short 5x, recovery longs 10x. */
 export const LEG_LEVERAGE_POLICY = { short: 5, long1: 10, long2: 10 };
 
 /** @deprecated — leverage is fixed per leg; kept for legacy config reads only. */
@@ -17,8 +17,8 @@ export const RISK_DESK_DEFAULTS = {
   partitionUsd: 100,
   partitionLocked: false,
   shortPartitionPct: 50,
-  long1PartitionPct: 12.5,
-  long2PartitionPct: 12.5,
+  long1PartitionPct: 40,
+  long2PartitionPct: 40,
   riskPerTradePct: 1,
   maxDailyLossPct: 3,
   maxWeeklyLossPct: 8,
@@ -75,12 +75,12 @@ export function normalizeRiskDeskConfig(raw) {
   let shortPartitionPct = n('shortPartitionPct', 1, 100);
   let long1PartitionPct = n('long1PartitionPct', 1, 100);
   let long2PartitionPct = n('long2PartitionPct', 1, 100);
-  // One-time migrate toxic legacy 40/40 ×10x short-heavy sizing → balanced 12.5/12.5.
-  if (long1PartitionPct >= 35 && long2PartitionPct >= 35) {
-    long1PartitionPct = 12.5;
-    long2PartitionPct = 12.5;
+  // Migrate the long-first 12.5/12.5 clamp back to the original recovery sizing.
+  if (long1PartitionPct === 12.5 && long2PartitionPct === 12.5) {
+    long1PartitionPct = RISK_DESK_DEFAULTS.long1PartitionPct;
+    long2PartitionPct = RISK_DESK_DEFAULTS.long2PartitionPct;
   }
-  if (shortPartitionPct < 1) shortPartitionPct = 50;
+  if (shortPartitionPct < 1) shortPartitionPct = RISK_DESK_DEFAULTS.shortPartitionPct;
 
   return {
     partitionUsd,

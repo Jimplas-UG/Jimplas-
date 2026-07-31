@@ -73,14 +73,14 @@ def test_hedge_tp_no_reduce_only() -> None:
     print("OK hedge TP uses positionSide only")
 
 
-def test_recovery_short_opens_position_side_short() -> None:
-    """Short1/Short2 are SELL + leg LONG1/LONG2 — must open SHORT, not reduce LONG."""
+def test_recovery_long_opens_position_side_long() -> None:
+    """Long1/Long2 are BUY recovery hedges — must open LONG, not reduce the primary SHORT."""
     c = HedgeConnector()
     for leg in ("LONG1", "LONG2"):
-        p = c._position_side_param_for_leg("SELL", leg)
-        assert p == {"positionSide": "SHORT"}, f"{leg} SELL must map to SHORT, got {p}"
-    assert c._position_side_param_for_leg("BUY", "LONG1") == {"positionSide": "LONG"}
-    print("OK recovery Short1/Short2 use positionSide=SHORT")
+        p = c._position_side_param_for_leg("BUY", leg)
+        assert p == {"positionSide": "LONG"}, f"{leg} BUY must map to LONG, got {p}"
+    assert c._position_side_param_for_leg("SELL", "SHORT") == {"positionSide": "SHORT"}
+    print("OK recovery Long1/Long2 use positionSide=LONG")
 
 
 def test_pair_close_unique_client_ids() -> None:
@@ -123,21 +123,15 @@ def test_pair_close_unique_client_ids() -> None:
     print("OK pair close unique client ids")
 
 
-def test_close_leg_magic_maps_short2_to_short() -> None:
-    """MAGIC_LONG2 (88003) is Short2 — must close SHORT, not LONG."""
-    c = HedgeConnector()
-    # Inspect mapping via the same branches close_leg uses.
-    cases = {
-        88001: ("BUY", "SHORT"),   # Short1
-        88002: ("SELL", "LONG"),   # primary Long
-        88003: ("BUY", "SHORT"),   # Short2
-    }
-    for magic, (side, hedge) in cases.items():
-        if magic in (88001, 88003):
-            assert side == "BUY" and hedge == "SHORT"
-        elif magic == 88002:
-            assert side == "SELL" and hedge == "LONG"
-    print("OK close_leg magic maps Short1/Short2 to SHORT")
+def test_close_leg_magic_maps_recovery_longs_to_long() -> None:
+    """MAGIC_LONG1/LONG2 (88002/88003) are recovery longs — must close LONG, not SHORT."""
+    from binance_connector import close_leg_sides
+
+    assert close_leg_sides(88001) == ("BUY", "SHORT"), "primary short closes the SHORT side"
+    assert close_leg_sides(88002) == ("SELL", "LONG"), "Long 1 closes the LONG side"
+    assert close_leg_sides(88003) == ("SELL", "LONG"), "Long 2 closes the LONG side"
+    assert close_leg_sides(12345) is None, "unknown magic falls back to a full close"
+    print("OK close_leg magic maps Long1/Long2 to LONG")
 
 
 def test_percent_price_error_detect() -> None:
@@ -153,8 +147,8 @@ if __name__ == "__main__":
     test_hedge_close_no_reduce_only()
     test_oneway_close_has_reduce_only()
     test_hedge_tp_no_reduce_only()
-    test_recovery_short_opens_position_side_short()
+    test_recovery_long_opens_position_side_long()
     test_pair_close_unique_client_ids()
-    test_close_leg_magic_maps_short2_to_short()
+    test_close_leg_magic_maps_recovery_longs_to_long()
     test_percent_price_error_detect()
     print("test_close_orders: ALL OK")

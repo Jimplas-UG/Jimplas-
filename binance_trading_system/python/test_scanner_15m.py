@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests: tick scanner — multi-TF entry + recovery leg order (Long then Short1/Short2)."""
+"""Unit tests: tick scanner — multi-TF entry + recovery leg order (Short then Long1/Long2)."""
 from __future__ import annotations
 
 import os
@@ -12,8 +12,9 @@ os.environ.setdefault("SCANNER_GAIN_PCT", "5.0")
 os.environ.setdefault("SCANNER_RETRACE_PCT", "0.7")
 os.environ.setdefault("SCANNER_LONG1_PCT", "2.0")
 os.environ.setdefault("SCANNER_LONG2_PCT", "4.0")
-os.environ.setdefault("SCANNER_LONG_PULLBACK_PCT", "1.5")
-os.environ.setdefault("SCANNER_LONG_PULLBACK_MFE_PCT", "1.5")
+os.environ.setdefault("SCANNER_LONG_PULLBACK_PCT", "0.5")
+os.environ.setdefault("SCANNER_SHORT_PULLBACK_PCT", "1.5")
+os.environ.setdefault("SCANNER_SHORT_PULLBACK_MFE_PCT", "1.5")
 os.environ.setdefault("SCANNER_SMART_EXIT_PCT", "6.0")
 os.environ.setdefault("SCANNER_LONG_DELAY_MS", "0")
 os.environ.setdefault("SCANNER_EXEC", "1")
@@ -22,8 +23,9 @@ from momentum_scanner import (  # noqa: E402
     GAIN_THRESHOLD_PCT,
     LONG1_ADVERSE_PCT,
     LONG2_ADVERSE_PCT,
-    LONG_BOTH_PULLBACK_PCT,
+    LONG_HEDGE_PULLBACK_PCT,
     RETRACE_ENTRY_PCT,
+    SHORT_TRAIL_PULLBACK_PCT,
     STATUS_LONG1,
     STATUS_LONG2,
     STATUS_PENDING,
@@ -116,7 +118,7 @@ def test_multi_tf_gain_then_retrace_pending() -> None:
             os.environ["SCANNER_EXEC"] = prev
 
 
-def test_long1_tp_at_2_5_pct() -> None:
+def test_short_tp_at_2_5_pct() -> None:
     conn = FakeConnector()
     sc = MomentumScanner(conn, lambda: True)
     sym = "TESTUSDT"
@@ -124,48 +126,47 @@ def test_long1_tp_at_2_5_pct() -> None:
     sc.load_symbols([sym])
     sc.on_tick(sym, entry)
     coin = sc._coins[sym]
-    from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, LONG_TP_PCT, STATUS_LONG1
+    from momentum_scanner import LegPosition, MAGIC_SHORT, SHORT_LEVERAGE, SHORT_TP_PCT
 
-    tp = entry * (1.0 + LONG_TP_PCT / 100.0)
-    coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, tp)
-    coin.long1_peak_price = entry
-    coin.status = STATUS_LONG1
+    tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
+    coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, tp)
+    coin.short_trough_price = entry
+    coin.status = STATUS_SHORT
 
-    sc.on_tick(sym, tp + 0.01)
-    assert coin.long1 is None, "long1 should close at +2.5% TP"
-    print("OK long1: TP at +2.5%")
+    sc.on_tick(sym, tp - 0.01)
+    assert coin.short is None, "short should close at -2.5% TP"
+    print("OK short: TP at -2.5%")
 
 
-def test_short2_tp_at_2_5_pct() -> None:
+def test_long2_tp_at_2_5_pct() -> None:
     conn = FakeConnector()
     sc = MomentumScanner(conn, lambda: True)
     sym = "TESTUSDT"
-    entry = 96.0
+    entry = 104.0
     sc.load_symbols([sym])
     sc.on_tick(sym, entry)
     coin = sc._coins[sym]
     from momentum_scanner import (
         LegPosition,
-        MAGIC_LONG1,
-        MAGIC_LONG2,
         LONG2_LEVERAGE,
+        LONG_TP_PCT,
+        MAGIC_LONG2,
+        MAGIC_SHORT,
         SHORT_LEVERAGE,
-        SHORT_TP_PCT,
-        STATUS_LONG2,
     )
 
-    tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
-    coin.long1 = LegPosition("BUY", 100.0, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-    coin.long2 = LegPosition("SELL", entry, 1.0, LONG2_LEVERAGE, MAGIC_LONG2, tp)
+    tp = entry * (1.0 + LONG_TP_PCT / 100.0)
+    coin.short = LegPosition("SELL", 100.0, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+    coin.long2 = LegPosition("BUY", entry, 1.0, LONG2_LEVERAGE, MAGIC_LONG2, tp)
     coin.long2_peak_price = entry
     coin.status = STATUS_LONG2
 
-    sc.on_tick(sym, tp - 0.01)
-    assert coin.long2 is None, "short2 should close at -2.5% TP"
-    print("OK short2: TP at -2.5%")
+    sc.on_tick(sym, tp + 0.01)
+    assert coin.long2 is None, "long2 should close at +2.5% TP"
+    print("OK long2: TP at +2.5%")
 
 
-def test_short1_opens_and_keeps_hedge_on_bounce_while_underwater() -> None:
+def test_long1_opens_at_2pct_and_closes_on_half_pct_retrace() -> None:
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -174,25 +175,96 @@ def test_short1_opens_and_keeps_hedge_on_bounce_while_underwater() -> None:
         sc.load_symbols([sym])
         sc.on_tick(sym, entry)
         coin = sc._coins[sym]
-        from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, STATUS_LONG1
+        from momentum_scanner import LegPosition, MAGIC_SHORT, SHORT_LEVERAGE
 
-        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-        coin.long1_peak_price = entry
-        coin.status = STATUS_LONG1
-        coin.long1_opened_ms = int(time.time() * 1000) - 60_000
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry
+        coin.status = STATUS_SHORT
+        coin.short_opened_ms = int(time.time() * 1000) - 60_000
 
-        sc.on_tick(sym, entry * (1.0 - LONG1_ADVERSE_PCT / 100.0 - 0.001))
-        assert coin.short is not None, "short1 should open at -2% from long"
-        coin.short.tp_price = None  # isolate pullback/hedge rule from short TP
+        peak = entry * (1.0 + LONG1_ADVERSE_PCT / 100.0 + 0.001)
+        sc.on_tick(sym, peak)
+        assert coin.long1 is not None, "long1 should open at +2% against the short"
+        coin.long1.tp_price = None  # isolate the peak-retrace rule from the long TP
 
-        trough = entry * 0.975  # still above a typical -2.5% short TP from ~98 entry
-        sc.on_tick(sym, trough)
-        sc.on_tick(sym, trough * (1.0 + (LONG_BOTH_PULLBACK_PCT + 0.04) / 100.0))
-        assert coin.short is not None, "short1 must stay open while pair is net-negative"
-    print("OK short1: opens at -2%, keeps hedge on bounce while underwater")
+        sc.on_tick(sym, peak * 1.004)  # new peak
+        sc.on_tick(sym, peak * 1.004 * (1.0 - (LONG_HEDGE_PULLBACK_PCT + 0.05) / 100.0))
+        assert coin.long1 is None, "long1 must close on a 0.5% retrace from its peak"
+        assert coin.short is not None, "closing long1 must not touch the primary short"
+    print("OK long1: opens at +2%, closes on 0.5% peak retrace")
 
 
-def test_short1_pullback_closes_when_pair_net_positive() -> None:
+def test_long2_closes_immediately_on_half_pct_retrace() -> None:
+    with _no_smart_exit():
+        conn = FakeConnector()
+        sc = MomentumScanner(conn, lambda: True)
+        sym = "TESTUSDT"
+        entry = 100.0
+        sc.load_symbols([sym])
+        sc.on_tick(sym, entry)
+        coin = sc._coins[sym]
+        from momentum_scanner import LegPosition, LONG2_LEVERAGE, MAGIC_LONG2, MAGIC_SHORT, SHORT_LEVERAGE
+
+        peak = entry * 1.05
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry
+        coin.long2 = LegPosition("BUY", entry * 1.04, 1.0, LONG2_LEVERAGE, MAGIC_LONG2, None)
+        coin.long2_peak_price = peak
+        coin.status = STATUS_LONG2
+        coin.long2_was_closed = False
+        sc.on_tick(sym, peak * (1.0 - (LONG_HEDGE_PULLBACK_PCT + 0.05) / 100.0))
+        assert coin.long2 is None, "long2 must close on a 0.5% retrace from its peak"
+        assert coin.short is not None
+    print("OK long2: closes immediately on 0.5% peak retrace")
+
+
+def test_short_survives_sub_1pct_adverse() -> None:
+    """Regression: the short must not be stopped out before Long1 can arm."""
+    with _no_smart_exit():
+        conn = FakeConnector()
+        sc = MomentumScanner(conn, lambda: True)
+        sym = "TESTUSDT"
+        entry = 100.0
+        sc.load_symbols([sym])
+        sc.on_tick(sym, entry)
+        coin = sc._coins[sym]
+        from momentum_scanner import LegPosition, MAGIC_SHORT, SHORT_LEVERAGE
+
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry
+        coin.status = STATUS_SHORT
+        coin.short_opened_ms = int(time.time() * 1000) - 60_000
+        sc.on_tick(sym, entry * 1.006)  # +0.6% against the short
+        assert coin.short is not None, "short must survive sub-1% adverse (recovery path)"
+        sc.on_tick(sym, entry * (1.0 + LONG1_ADVERSE_PCT / 100.0 + 0.001))
+        assert coin.long1 is not None, "long1 must arm at +2%"
+    print("OK short survives sub-1% adverse before long1")
+
+
+def test_naked_short_trail_waits_for_recovery() -> None:
+    """Do not trail-scratch a naked short before Long1/Long2 can still arm."""
+    with _no_smart_exit():
+        conn = FakeConnector()
+        sc = MomentumScanner(conn, lambda: True)
+        sym = "TESTUSDT"
+        entry = 100.0
+        sc.load_symbols([sym])
+        sc.on_tick(sym, entry)
+        coin = sc._coins[sym]
+        from momentum_scanner import LegPosition, MAGIC_SHORT, SHORT_LEVERAGE
+
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry * 0.98  # -2% MFE
+        coin.status = STATUS_SHORT
+        coin.short_opened_ms = int(time.time() * 1000) - 60_000
+        # Bounce 1.6% off the trough but still below entry — old logic scratched here.
+        sc.on_tick(sym, entry * 0.997)
+        assert coin.short is not None, "naked short must stay open for the recovery window"
+        assert coin.long1 is None
+    print("OK naked short trail waits for Long1 window")
+
+
+def test_short_trail_closes_after_recovery_cycle() -> None:
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -202,24 +274,23 @@ def test_short1_pullback_closes_when_pair_net_positive() -> None:
         sc.load_symbols([sym])
         sc.on_tick(sym, entry)
         coin = sc._coins[sym]
-        from momentum_scanner import LegPosition, MAGIC_LONG1, MAGIC_SHORT, LONG1_LEVERAGE, SHORT_LEVERAGE, STATUS_SHORT
+        from momentum_scanner import LegPosition, MAGIC_SHORT, SHORT_LEVERAGE
 
-        # Tiny long loss, large short profit → net positive after cost buffer.
-        coin.long1 = LegPosition("BUY", entry, 0.1, SHORT_LEVERAGE, MAGIC_LONG1, None)
-        coin.long1_peak_price = entry
-        coin.short = LegPosition("SELL", entry * 0.98, 2.0, LONG1_LEVERAGE, MAGIC_SHORT, None)
-        coin.recovery_peak_price = entry * 0.94
+        coin.short = LegPosition("SELL", entry, 2.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry * 0.94
         coin.status = STATUS_SHORT
-        coin.long1_opened_ms = int(time.time() * 1000) - 120_000
-        coin.short_opened_ms = int(time.time() * 1000) - 60_000
+        coin.short_opened_ms = int(time.time() * 1000) - 120_000
+        # Recovery cycle finished — the trail is free to harvest the short profit.
+        coin.long1_was_closed = True
+        coin.long2_was_closed = True
         trough = entry * 0.94
-        sc.on_tick(sym, trough * (1.0 + (LONG_BOTH_PULLBACK_PCT + 0.1) / 100.0))
-        assert coin.short is None, "short1 may trail off when pair net is positive"
-    print("OK short1: pullback closes only when pair net-positive")
+        sc.on_tick(sym, trough * (1.0 + (SHORT_TRAIL_PULLBACK_PCT + 0.1) / 100.0))
+        assert coin.short is None, "short may trail off once the recovery cycle is done"
+    print("OK short trail harvests after the recovery cycle")
 
 
-def test_long_dump_does_not_stop_at_half_pct() -> None:
-    """Regression: old 0.5% peak pullback stopped longs before Short1 could arm."""
+def test_long2_opens_after_long1_closed() -> None:
+    """Continued pump to +4% must still arm Long2 after Long1 already closed."""
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -228,101 +299,57 @@ def test_long_dump_does_not_stop_at_half_pct() -> None:
         sc.load_symbols([sym])
         sc.on_tick(sym, entry)
         coin = sc._coins[sym]
-        from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, STATUS_LONG1
+        from momentum_scanner import LegPosition, MAGIC_SHORT, SHORT_LEVERAGE
 
-        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-        coin.long1_peak_price = entry
-        coin.status = STATUS_LONG1
-        coin.long1_opened_ms = int(time.time() * 1000) - 60_000
-        sc.on_tick(sym, entry * 0.994)  # -0.6%
-        assert coin.long1 is not None, "long must survive sub-1% adverse (recovery path)"
-        sc.on_tick(sym, entry * (1.0 - LONG1_ADVERSE_PCT / 100.0 - 0.001))
-        assert coin.short is not None, "short1 must arm at -2%"
-    print("OK long dump does not hard-stop before short1")
-
-
-def test_naked_long_pullback_waits_for_recovery() -> None:
-    """Do not trail-scratch a naked long before Short1/Short2 can still arm."""
-    with _no_smart_exit():
-        conn = FakeConnector()
-        sc = MomentumScanner(conn, lambda: True)
-        sym = "TESTUSDT"
-        entry = 100.0
-        sc.load_symbols([sym])
-        sc.on_tick(sym, entry)
-        coin = sc._coins[sym]
-        from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, STATUS_LONG1
-
-        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-        coin.long1_peak_price = entry * 1.02  # +2% MFE
-        coin.status = STATUS_LONG1
-        coin.long1_opened_ms = int(time.time() * 1000) - 60_000
-        # Pull back 1.6% from peak but still above entry — old logic scratched here.
-        sc.on_tick(sym, entry * 1.003)
-        assert coin.long1 is not None, "naked long must stay open for recovery window"
-        assert coin.short is None
-    print("OK naked long pullback waits for Short1 window")
-
-
-def test_short2_opens_after_short1_closed() -> None:
-    """Continued dump to -4% must still arm Short2 after Short1 already TP'd."""
-    with _no_smart_exit():
-        conn = FakeConnector()
-        sc = MomentumScanner(conn, lambda: True)
-        sym = "TESTUSDT"
-        entry = 100.0
-        sc.load_symbols([sym])
-        sc.on_tick(sym, entry)
-        coin = sc._coins[sym]
-        from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, STATUS_LONG1
-
-        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-        coin.status = STATUS_LONG1
-        coin.long1_opened_ms = int(time.time() * 1000) - 120_000
-        coin.short = None
-        coin.short_was_closed = True
-        coin.long1_adverse_peak_pct = LONG2_ADVERSE_PCT + 0.1
-        sc.on_tick(sym, entry * (1.0 - LONG2_ADVERSE_PCT / 100.0 - 0.001))
-        assert coin.long2 is not None, "short2 should open at -4% even after short1 closed"
-    print("OK short2: opens after short1 already closed")
-
-
-def test_short2_opens_at_4pct_from_long() -> None:
-    with _no_smart_exit():
-        conn = FakeConnector()
-        sc = MomentumScanner(conn, lambda: True)
-        sym = "TESTUSDT"
-        entry = 100.0
-        sc.load_symbols([sym])
-        sc.on_tick(sym, entry)
-        coin = sc._coins[sym]
-        from momentum_scanner import LegPosition, MAGIC_LONG1, MAGIC_SHORT, LONG1_LEVERAGE, SHORT_LEVERAGE, STATUS_SHORT
-
-        s1_entry = entry * (1.0 - LONG1_ADVERSE_PCT / 100.0 - 0.001)
-        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-        coin.short = LegPosition("SELL", s1_entry, 1.0, LONG1_LEVERAGE, MAGIC_SHORT, None)
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry
         coin.status = STATUS_SHORT
-        coin.long1_opened_ms = int(time.time() * 1000) - 120_000
-        coin.short_opened_ms = int(time.time() * 1000) - 60_000
-        coin.long1_adverse_peak_pct = LONG2_ADVERSE_PCT + 0.1
+        coin.short_opened_ms = int(time.time() * 1000) - 120_000
+        coin.long1 = None
+        coin.long1_was_closed = True
+        sc.on_tick(sym, entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.001))
+        assert coin.long2 is not None, "long2 should open at +4% even after long1 closed"
+    print("OK long2: opens after long1 already closed")
 
-        sc.on_tick(sym, entry * (1.0 - LONG2_ADVERSE_PCT / 100.0 - 0.001))
-        assert coin.long2 is not None, "short2 should open at -4% from long entry"
-    print("OK short2: opens at -4% from long entry")
+
+def test_long2_opens_at_4pct_from_short() -> None:
+    with _no_smart_exit():
+        conn = FakeConnector()
+        sc = MomentumScanner(conn, lambda: True)
+        sym = "TESTUSDT"
+        entry = 100.0
+        sc.load_symbols([sym])
+        sc.on_tick(sym, entry)
+        coin = sc._coins[sym]
+        from momentum_scanner import LegPosition, LONG1_LEVERAGE, MAGIC_LONG1, MAGIC_SHORT, SHORT_LEVERAGE
+
+        l1_entry = entry * (1.0 + LONG1_ADVERSE_PCT / 100.0 + 0.001)
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry
+        coin.long1 = LegPosition("BUY", l1_entry, 1.0, LONG1_LEVERAGE, MAGIC_LONG1, None)
+        # Peak already above the Long2 trigger so the 0.5% trail does not fire first.
+        coin.long1_peak_price = entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.001)
+        coin.status = STATUS_LONG1
+        coin.short_opened_ms = int(time.time() * 1000) - 120_000
+        coin.long1_opened_ms = int(time.time() * 1000) - 60_000
+
+        sc.on_tick(sym, entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.001))
+        assert coin.long2 is not None, "long2 should open at +4% from the short entry"
+    print("OK long2: opens at +4% from short entry")
 
 
-def test_short1_blocked_without_long() -> None:
+def test_long1_blocked_without_short() -> None:
     sc = MomentumScanner(FakeConnector(), lambda: True)
     sym = "TESTUSDT"
     sc.load_symbols([sym])
     sc.on_tick(sym, 100.0)
     coin = sc._coins[sym]
-    sc.on_tick(sym, 97.0)
-    assert coin.short is None, "short1 must not open without an active long"
-    print("OK short1 blocked without long")
+    sc.on_tick(sym, 103.0)
+    assert coin.long1 is None, "long1 must not open without an active short"
+    print("OK long1 blocked without short")
 
 
-def test_pair_flattens_when_long1_removed() -> None:
+def test_pair_flattens_when_short_removed() -> None:
     conn = FakeConnector()
     sc = MomentumScanner(conn, lambda: True)
     sym = "TESTUSDT"
@@ -330,19 +357,26 @@ def test_pair_flattens_when_long1_removed() -> None:
     sc.load_symbols([sym])
     sc.on_tick(sym, entry)
     coin = sc._coins[sym]
-    from momentum_scanner import LegPosition, MAGIC_LONG1, MAGIC_LONG2, LONG2_LEVERAGE, SHORT_LEVERAGE, STATUS_CLOSED, STATUS_LONG2
+    from momentum_scanner import (
+        LegPosition,
+        LONG2_LEVERAGE,
+        MAGIC_LONG2,
+        MAGIC_SHORT,
+        SHORT_LEVERAGE,
+        STATUS_CLOSED,
+    )
 
-    coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-    coin.long2 = LegPosition("SELL", entry, 0.5, LONG2_LEVERAGE, MAGIC_LONG2, None)
+    coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+    coin.long2 = LegPosition("BUY", entry, 0.5, LONG2_LEVERAGE, MAGIC_LONG2, None)
     coin.status = STATUS_LONG2
-    coin.long1 = None
+    coin.short = None
     sc._manage_positions(coin)
-    assert coin.long2 is None, "short2 must close when long is gone"
+    assert coin.long2 is None, "long2 must close when the short is gone"
     assert coin.status == STATUS_CLOSED
-    print("OK pair flattens when long1 removed")
+    print("OK pair flattens when short removed")
 
 
-def test_short1_requires_live_adverse_not_peak_only() -> None:
+def test_long1_requires_live_adverse_not_peak_only() -> None:
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -351,18 +385,18 @@ def test_short1_requires_live_adverse_not_peak_only() -> None:
         sc.load_symbols([sym])
         sc.on_tick(sym, entry)
         coin = sc._coins[sym]
-        from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, STATUS_LONG1
+        from momentum_scanner import LegPosition, MAGIC_SHORT, SHORT_LEVERAGE
 
-        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-        coin.long1_peak_price = entry
-        coin.status = STATUS_LONG1
-        coin.long1_opened_ms = int(time.time() * 1000) - 60_000
-        coin.long1_adverse_peak_pct = LONG1_ADVERSE_PCT + 0.1
-        sc.on_tick(sym, entry * 0.985)  # only -1.5% live
-        assert coin.short is None, "short1 must not open on peak latch after bounce"
-        sc.on_tick(sym, entry * (1.0 - LONG1_ADVERSE_PCT / 100.0 - 0.001))
-        assert coin.short is not None, "short1 opens when live adverse >= 2%"
-    print("OK short1: requires live adverse, not peak-only")
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry
+        coin.status = STATUS_SHORT
+        coin.short_opened_ms = int(time.time() * 1000) - 60_000
+        coin.short_adverse_peak_pct = LONG1_ADVERSE_PCT + 0.1
+        sc.on_tick(sym, entry * 1.015)  # only +1.5% live
+        assert coin.long1 is None, "long1 must not open on a peak latch after a fade"
+        sc.on_tick(sym, entry * (1.0 + LONG1_ADVERSE_PCT / 100.0 + 0.001))
+        assert coin.long1 is not None, "long1 opens when live adverse >= 2%"
+    print("OK long1: requires live adverse, not peak-only")
 
 
 def test_smart_exit_closes_full_pair() -> None:
@@ -374,17 +408,17 @@ def test_smart_exit_closes_full_pair() -> None:
     sc.load_symbols([sym])
     sc.on_tick(sym, entry)
     coin = sc._coins[sym]
-    from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, STATUS_LONG1
+    from momentum_scanner import LegPosition, MAGIC_SHORT, SHORT_LEVERAGE
 
-    # qty sized so +2.8% clears 6% partition + cost buffer (~$6.8)
-    coin.long1 = LegPosition("BUY", entry, 3.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-    coin.long1_peak_price = entry
-    coin.status = STATUS_LONG1
-    # Recovery cycle finished — smart exit may harvest; naked pre-Short1 must not.
-    coin.short_was_closed = True
+    # qty sized so -2.8% clears 6% of partition + cost buffer (~$6.8)
+    coin.short = LegPosition("SELL", entry, 3.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+    coin.short_trough_price = entry
+    coin.status = STATUS_SHORT
+    # Recovery cycle finished — smart exit may harvest; a naked pre-Long1 short must not.
+    coin.long1_was_closed = True
     coin.long2_was_closed = True
-    sc.on_tick(sym, entry * 1.028)
-    assert coin.long1 is None, "smart exit should flatten when net clears TP economics"
+    sc.on_tick(sym, entry * 0.972)
+    assert coin.short is None, "smart exit should flatten when net clears TP economics"
     print("OK smart exit: closes full pair at meaningful net target")
 
 
@@ -400,10 +434,12 @@ def test_close_leg_failure_keeps_state() -> None:
     sc.load_symbols([sym])
     sc.on_tick(sym, entry)
     coin = sc._coins[sym]
-    from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, LONG_TP_PCT, STATUS_LONG1
+    from momentum_scanner import LegPosition, LONG1_LEVERAGE, LONG_TP_PCT, MAGIC_LONG1, MAGIC_SHORT, SHORT_LEVERAGE
 
     tp = entry * (1.0 + LONG_TP_PCT / 100.0)
-    coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, tp)
+    coin.short = LegPosition("SELL", 98.0, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+    coin.short_trough_price = 98.0
+    coin.long1 = LegPosition("BUY", entry, 1.0, LONG1_LEVERAGE, MAGIC_LONG1, tp)
     coin.long1_peak_price = entry
     coin.status = STATUS_LONG1
     sc.on_tick(sym, tp + 0.01)
@@ -411,7 +447,7 @@ def test_close_leg_failure_keeps_state() -> None:
     print("OK close leg failure preserves state")
 
 
-def test_short1_blocked_until_long_active() -> None:
+def test_long1_blocked_until_short_active() -> None:
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -420,14 +456,14 @@ def test_short1_blocked_until_long_active() -> None:
         sc.load_symbols([sym])
         sc.on_tick(sym, entry)
         coin = sc._coins[sym]
-        coin.long1_was_closed = True
-        coin.long1_adverse_peak_pct = LONG2_ADVERSE_PCT + 0.1
-        sc.on_tick(sym, entry * (1.0 - LONG2_ADVERSE_PCT / 100.0 - 0.001))
-        assert coin.short is None, "short1 must not open without an active long"
-    print("OK short1 blocked until long is open")
+        coin.short_was_closed = True
+        coin.short_adverse_peak_pct = LONG2_ADVERSE_PCT + 0.1
+        sc.on_tick(sym, entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.001))
+        assert coin.long1 is None, "long1 must not open without an active short"
+    print("OK long1 blocked until short is open")
 
 
-def test_short2_does_not_reenter_after_close() -> None:
+def test_long2_does_not_reenter_after_close() -> None:
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -436,24 +472,25 @@ def test_short2_does_not_reenter_after_close() -> None:
         sc.load_symbols([sym])
         sc.on_tick(sym, entry)
         coin = sc._coins[sym]
-        from momentum_scanner import LegPosition, MAGIC_LONG1, MAGIC_SHORT, LONG1_LEVERAGE, SHORT_LEVERAGE, STATUS_SHORT
+        from momentum_scanner import LegPosition, LONG1_LEVERAGE, MAGIC_LONG1, MAGIC_SHORT, SHORT_LEVERAGE
 
-        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-        coin.short = LegPosition("SELL", 98.0, 1.0, LONG1_LEVERAGE, MAGIC_SHORT, None)
-        coin.status = STATUS_SHORT
-        coin.long1_opened_ms = int(time.time() * 1000) - 120_000
-        coin.short_opened_ms = int(time.time() * 1000) - 60_000
-        coin.long1_adverse_peak_pct = LONG2_ADVERSE_PCT + 0.1
-        sc.on_tick(sym, entry * (1.0 - LONG2_ADVERSE_PCT / 100.0 - 0.001))
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry
+        coin.long1 = LegPosition("BUY", 102.0, 1.0, LONG1_LEVERAGE, MAGIC_LONG1, None)
+        coin.long1_peak_price = entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.001)
+        coin.status = STATUS_LONG1
+        coin.short_opened_ms = int(time.time() * 1000) - 120_000
+        coin.long1_opened_ms = int(time.time() * 1000) - 60_000
+        sc.on_tick(sym, entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.001))
         assert coin.long2 is not None
         coin.long2 = None
         coin.long2_was_closed = True
-        sc.on_tick(sym, entry * (1.0 - LONG2_ADVERSE_PCT / 100.0 - 0.01))
-        assert coin.long2 is None, "short2 must be one-shot for the pair lifetime"
-    print("OK short2: no re-entry after close")
+        sc.on_tick(sym, entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.01))
+        assert coin.long2 is None, "long2 must be one-shot for the pair lifetime"
+    print("OK long2: no re-entry after close")
 
 
-def test_gap_to_4pct_opens_short1_then_short2() -> None:
+def test_gap_to_4pct_opens_long1_then_long2() -> None:
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -462,19 +499,20 @@ def test_gap_to_4pct_opens_short1_then_short2() -> None:
         sc.load_symbols([sym])
         sc.on_tick(sym, entry)
         coin = sc._coins[sym]
-        from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, STATUS_LONG1
+        from momentum_scanner import LegPosition, MAGIC_SHORT, SHORT_LEVERAGE
 
-        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-        coin.status = STATUS_LONG1
-        coin.long1_opened_ms = int(time.time() * 1000) - 60_000
-        gap_price = entry * (1.0 - LONG2_ADVERSE_PCT / 100.0 - 0.001)
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry
+        coin.status = STATUS_SHORT
+        coin.short_opened_ms = int(time.time() * 1000) - 60_000
+        gap_price = entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.001)
         sc.on_tick(sym, gap_price)
-        assert coin.short is not None, "gap down must open short1"
-        assert coin.long2 is not None, "gap down must open short2 at 4% from long"
-    print("OK gap down: short1 then short2")
+        assert coin.long1 is not None, "gap up must open long1"
+        assert coin.long2 is not None, "gap up must open long2 at +4% from the short"
+    print("OK gap up: long1 then long2")
 
 
-def test_settle_delay_blocks_short1() -> None:
+def test_settle_delay_blocks_long1() -> None:
     with _no_smart_exit():
         with unittest.mock.patch.object(momentum_scanner_mod, "LONG_ENTRY_DELAY_MS", 3000):
             conn = FakeConnector()
@@ -484,17 +522,18 @@ def test_settle_delay_blocks_short1() -> None:
             sc.load_symbols([sym])
             sc.on_tick(sym, entry)
             coin = sc._coins[sym]
-            from momentum_scanner import LegPosition, MAGIC_LONG1, SHORT_LEVERAGE, STATUS_LONG1
+            from momentum_scanner import LegPosition, MAGIC_SHORT, SHORT_LEVERAGE
 
-            coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, None)
-            coin.status = STATUS_LONG1
-            coin.long1_opened_ms = int(time.time() * 1000)
-            sc.on_tick(sym, entry * (1.0 - LONG1_ADVERSE_PCT / 100.0 - 0.001))
-            assert coin.short is None, "short1 must wait for settle delay"
-            coin.long1_opened_ms = 0
-            sc.on_tick(sym, entry * (1.0 - LONG1_ADVERSE_PCT / 100.0 - 0.002))
-            assert coin.short is None, "short1 blocked when settle clock missing"
-    print("OK settle delay blocks short1")
+            coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+            coin.short_trough_price = entry
+            coin.status = STATUS_SHORT
+            coin.short_opened_ms = int(time.time() * 1000)
+            sc.on_tick(sym, entry * (1.0 + LONG1_ADVERSE_PCT / 100.0 + 0.001))
+            assert coin.long1 is None, "long1 must wait for the settle delay"
+            coin.short_opened_ms = 0
+            sc.on_tick(sym, entry * (1.0 + LONG1_ADVERSE_PCT / 100.0 + 0.002))
+            assert coin.long1 is None, "long1 blocked when the settle clock is missing"
+    print("OK settle delay blocks long1")
 
 
 def test_pending_keeps_latched_15m_during_retrace() -> None:
@@ -547,7 +586,7 @@ def test_pending_entry_not_resent_on_every_tick() -> None:
     coin.highest_price = 0.125
     coin.entry_signal_key = "ACEUSDT_1250_600"
     for _ in range(5):
-        sc._try_open_long1_entry(coin)
+        sc._try_open_short_entry(coin)
     assert conn.exec_calls == 1, f"expected one exchange order, got {conn.exec_calls}"
     assert coin.submitted_entry_signal_id, "entry signal should be marked submitted"
     print("OK pending entry fires once per signal")
@@ -580,8 +619,8 @@ def test_stale_pending_demoted_when_live_15m_collapses() -> None:
             os.environ["SCANNER_EXEC"] = prev
 
 
-def test_long_tp_with_shorts_flattens_full_pair() -> None:
-    """Closing primary long while Short1/Short2 open must not leave orphan shorts."""
+def test_short_tp_with_longs_flattens_full_pair() -> None:
+    """Closing the primary short while Long1/Long2 are open must not orphan the longs."""
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -592,26 +631,28 @@ def test_long_tp_with_shorts_flattens_full_pair() -> None:
         coin = sc._coins[sym]
         from momentum_scanner import (
             LegPosition,
-            LONG_TP_PCT,
+            LONG1_LEVERAGE,
+            LONG2_LEVERAGE,
             MAGIC_LONG1,
             MAGIC_LONG2,
             MAGIC_SHORT,
-            LONG1_LEVERAGE,
-            LONG2_LEVERAGE,
             SHORT_LEVERAGE,
+            SHORT_TP_PCT,
             STATUS_CLOSED,
-            STATUS_LONG2,
         )
 
-        tp = entry * (1.0 + LONG_TP_PCT / 100.0)
-        coin.long1 = LegPosition("BUY", entry, 1.0, SHORT_LEVERAGE, MAGIC_LONG1, tp)
-        coin.short = LegPosition("SELL", entry * 0.98, 0.4, LONG1_LEVERAGE, MAGIC_SHORT, None)
-        coin.long2 = LegPosition("SELL", entry * 0.96, 0.4, LONG2_LEVERAGE, MAGIC_LONG2, None)
+        tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, tp)
+        coin.short_trough_price = entry
+        coin.long1 = LegPosition("BUY", entry * 1.02, 0.4, LONG1_LEVERAGE, MAGIC_LONG1, None)
+        coin.long2 = LegPosition("BUY", entry * 1.04, 0.4, LONG2_LEVERAGE, MAGIC_LONG2, None)
+        coin.long1_peak_price = entry * 1.02
+        coin.long2_peak_price = entry * 1.04
         coin.status = STATUS_LONG2
-        sc.on_tick(sym, tp + 0.01)
-        assert coin.long1 is None and coin.short is None and coin.long2 is None
+        sc.on_tick(sym, tp - 0.01)
+        assert coin.short is None and coin.long1 is None and coin.long2 is None
         assert coin.status == STATUS_CLOSED
-    print("OK long TP with shorts flattens full pair")
+    print("OK short TP with longs flattens full pair")
 
 
 def test_failed_entry_keeps_sticky_submit() -> None:
@@ -635,40 +676,64 @@ def test_failed_entry_keeps_sticky_submit() -> None:
     coin.retrace_pct = 0.8
     coin.highest_price = 1.02
     coin.entry_signal_key = "STICKYUSDT_10200_600"
-    sc._try_open_long1_entry(coin)
+    sc._try_open_short_entry(coin)
     assert coin.submitted_entry_signal_id, "submit id must stick after failure"
     assert coin.entry_submit_ms > 0
     n = len(conn.orders)
-    sc._try_open_long1_entry(coin)
+    sc._try_open_short_entry(coin)
     assert len(conn.orders) == n, "sticky submit must block immediate re-send"
     print("OK failed entry keeps sticky submit")
+
+
+def test_primary_entry_is_sell_short_leg() -> None:
+    conn = FakeConnector()
+    sc = MomentumScanner(conn, lambda: True)
+    sym = "SIDEUSDT"
+    sc.load_symbols([sym])
+    coin = sc._coins[sym]
+    coin.status = STATUS_PENDING
+    coin.price = 2.0
+    coin.best_pct = 6.0
+    coin.qualifying_pct = 6.0
+    coin.pct_15m = 6.0
+    coin.retrace_pct = 0.8
+    coin.highest_price = 2.05
+    coin.entry_signal_key = "SIDEUSDT_20500_600"
+    sc._try_open_short_entry(coin)
+    assert coin.short is not None and coin.short.side == "SELL"
+    assert coin.status == STATUS_SHORT
+    assert conn.orders and conn.orders[0]["side"] == "SELL"
+    assert conn.orders[0].get("leg") == "SHORT"
+    print("OK primary entry is a SELL SHORT leg")
 
 
 if __name__ == "__main__":
     try:
         test_multi_tf_gain_then_retrace_pending()
-        test_long1_tp_at_2_5_pct()
-        test_short2_tp_at_2_5_pct()
-        test_short1_opens_and_keeps_hedge_on_bounce_while_underwater()
-        test_short1_pullback_closes_when_pair_net_positive()
-        test_long_dump_does_not_stop_at_half_pct()
-        test_naked_long_pullback_waits_for_recovery()
-        test_short2_opens_after_short1_closed()
-        test_short2_opens_at_4pct_from_long()
-        test_short1_blocked_without_long()
-        test_pair_flattens_when_long1_removed()
-        test_short1_requires_live_adverse_not_peak_only()
+        test_short_tp_at_2_5_pct()
+        test_long2_tp_at_2_5_pct()
+        test_long1_opens_at_2pct_and_closes_on_half_pct_retrace()
+        test_long2_closes_immediately_on_half_pct_retrace()
+        test_short_survives_sub_1pct_adverse()
+        test_naked_short_trail_waits_for_recovery()
+        test_short_trail_closes_after_recovery_cycle()
+        test_long2_opens_after_long1_closed()
+        test_long2_opens_at_4pct_from_short()
+        test_long1_blocked_without_short()
+        test_pair_flattens_when_short_removed()
+        test_long1_requires_live_adverse_not_peak_only()
         test_smart_exit_closes_full_pair()
         test_close_leg_failure_keeps_state()
-        test_short1_blocked_until_long_active()
-        test_short2_does_not_reenter_after_close()
-        test_gap_to_4pct_opens_short1_then_short2()
-        test_settle_delay_blocks_short1()
+        test_long1_blocked_until_short_active()
+        test_long2_does_not_reenter_after_close()
+        test_gap_to_4pct_opens_long1_then_long2()
+        test_settle_delay_blocks_long1()
         test_pending_entry_not_resent_on_every_tick()
         test_pending_keeps_latched_15m_during_retrace()
         test_stale_pending_demoted_when_live_15m_collapses()
-        test_long_tp_with_shorts_flattens_full_pair()
+        test_short_tp_with_longs_flattens_full_pair()
         test_failed_entry_keeps_sticky_submit()
+        test_primary_entry_is_sell_short_leg()
     except AssertionError as e:
         print("FAIL", e, file=sys.stderr)
         raise SystemExit(1)

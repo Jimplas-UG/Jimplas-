@@ -1,10 +1,14 @@
 """
 Hard strategy policy floors — cannot be bypassed by env, risk JSON, or app UI.
 
-These exist because live losses (-$600+) came from soft knobs drifting back to:
-- 0.5% peak pullback acting as a hard stop before Short1/Short2
+Short-first strategy: primary short 50% / 5x, recovery longs 40% + 40% / 10x.
+The floors here protect the pieces that previously drifted into losses:
+- the PRIMARY short trail collapsing to a 0.5% hard stop before recovery longs armed
 - smart exit at ~0.4% price (1% of partition)
-- Short1+Short2 40%/40% ×10x ≈ 3.2:1 short-heavy notional
+- recovery leg sizing scaled so far off policy that the hedge stopped working
+
+The recovery Long 1 / Long 2 peak retrace stays at 0.5% by design and is NOT clamped
+here — it is a take-profit trail on a hedge leg, not a stop on the primary leg.
 """
 
 from __future__ import annotations
@@ -17,11 +21,19 @@ MIN_PULLBACK_MFE_PCT = 1.5
 # 0 disables smart exit; any positive value is forced to at least this.
 MIN_SMART_EXIT_PCT_IF_ENABLED = 6.0
 MIN_EXIT_COST_BUFFER_PCT = 0.5
-MAX_SHORT_VS_LONG_NOTIONAL = 1.25
-MAX_RECOVERY_LEG_PCT = 15.0
+
+# Policy sizing: primary short 50%, each recovery long 40%.
+SAFE_PRIMARY_SHORT_PCT = 50.0
+SAFE_RECOVERY_LEG_PCT = 40.0
 MIN_RECOVERY_LEG_PCT = 5.0
-SAFE_RECOVERY_LEG_PCT = 12.5
-SAFE_LONG_PARTITION_PCT = 50.0
+MAX_RECOVERY_LEG_PCT = 50.0
+# 40+40 @10x vs 50 @5x = 3.2 — allow the original ratio with a little headroom only.
+MAX_RECOVERY_VS_PRIMARY_NOTIONAL = 3.3
+# Long-first era clamped both recovery legs to 12.5% — migrate that back to policy.
+LEGACY_CLAMPED_RECOVERY_PCT = 12.5
+
+# Backwards-compatible alias — kept so older config readers keep importing cleanly.
+SAFE_LONG_PARTITION_PCT = SAFE_PRIMARY_SHORT_PCT
 
 
 def clamp_pullback_pct(value: float) -> float:
@@ -43,58 +55,71 @@ def clamp_exit_cost_pct(value: float) -> float:
     return max(float(value or 0), MIN_EXIT_COST_BUFFER_PCT)
 
 
-def long_notional_mult(long_partition_pct: float) -> float:
-    return max(float(long_partition_pct), 1.0) / 100.0 * SHORT_LEVERAGE
+def primary_notional_mult(short_partition_pct: float) -> float:
+    """Dollar notional multiplier of the primary short leg."""
+    return max(float(short_partition_pct), 1.0) / 100.0 * SHORT_LEVERAGE
 
 
-def short_notional_mult(short1_pct: float, short2_pct: float) -> float:
-    return (max(float(short1_pct), 0.0) + max(float(short2_pct), 0.0)) / 100.0 * LONG1_LEVERAGE
+def recovery_notional_mult(long1_pct: float, long2_pct: float) -> float:
+    """Combined dollar notional multiplier of the recovery long legs."""
+    return (max(float(long1_pct), 0.0) + max(float(long2_pct), 0.0)) / 100.0 * LONG1_LEVERAGE
+
+
+def _is_legacy_clamped(long1_pct: float, long2_pct: float) -> bool:
+    """Detect the long-first 12.5/12.5 clamp that replaced the original 40/40."""
+    return (
+        abs(float(long1_pct) - LEGACY_CLAMPED_RECOVERY_PCT) < 1e-6
+        and abs(float(long2_pct) - LEGACY_CLAMPED_RECOVERY_PCT) < 1e-6
+    )
 
 
 def sanitize_partitions(
-    long_pct: float,
-    short1_pct: float,
-    short2_pct: float,
+    short_pct: float,
+    long1_pct: float,
+    long2_pct: float,
 ) -> tuple[float, float, float, bool]:
     """
-    Force ~balanced hedge sizing. Returns (long, short1, short2, changed).
-    Caps each recovery leg and total short notional vs long.
+    Keep short-first sizing inside policy. Returns (short, long1, long2, changed).
+    The original 50 / 40 / 40 passes through untouched.
     """
-    long_u = max(1.0, min(100.0, float(long_pct)))
-    s1 = max(MIN_RECOVERY_LEG_PCT, min(MAX_RECOVERY_LEG_PCT, float(short1_pct)))
-    s2 = max(MIN_RECOVERY_LEG_PCT, min(MAX_RECOVERY_LEG_PCT, float(short2_pct)))
+    short_u = max(1.0, min(100.0, float(short_pct)))
+    l1 = max(MIN_RECOVERY_LEG_PCT, min(MAX_RECOVERY_LEG_PCT, float(long1_pct)))
+    l2 = max(MIN_RECOVERY_LEG_PCT, min(MAX_RECOVERY_LEG_PCT, float(long2_pct)))
     changed = (
-        abs(s1 - float(short1_pct)) > 1e-9
-        or abs(s2 - float(short2_pct)) > 1e-9
-        or abs(long_u - float(long_pct)) > 1e-9
+        abs(l1 - float(long1_pct)) > 1e-9
+        or abs(l2 - float(long2_pct)) > 1e-9
+        or abs(short_u - float(short_pct)) > 1e-9
     )
 
-    long_n = long_notional_mult(long_u)
-    short_n = short_notional_mult(s1, s2)
-    max_short_n = long_n * MAX_SHORT_VS_LONG_NOTIONAL
-    if short_n > max_short_n + 1e-9 and short_n > 0:
-        scale = max_short_n / short_n
-        s1 = max(MIN_RECOVERY_LEG_PCT, min(MAX_RECOVERY_LEG_PCT, s1 * scale))
-        s2 = max(MIN_RECOVERY_LEG_PCT, min(MAX_RECOVERY_LEG_PCT, s2 * scale))
-        # If still over (min floors), snap to safe balanced defaults.
-        if short_notional_mult(s1, s2) > max_short_n + 1e-9:
-            s1 = SAFE_RECOVERY_LEG_PCT
-            s2 = SAFE_RECOVERY_LEG_PCT
-            long_u = SAFE_LONG_PARTITION_PCT
+    # Migrate the long-first clamp back to the original recovery sizing.
+    if _is_legacy_clamped(long1_pct, long2_pct):
+        l1 = SAFE_RECOVERY_LEG_PCT
+        l2 = SAFE_RECOVERY_LEG_PCT
+        if short_u < SAFE_PRIMARY_SHORT_PCT:
+            short_u = SAFE_PRIMARY_SHORT_PCT
         changed = True
 
-    # Explicit toxic legacy 40/40 → safe 12.5/12.5
-    if float(short1_pct) >= 35.0 and float(short2_pct) >= 35.0:
-        s1 = SAFE_RECOVERY_LEG_PCT
-        s2 = SAFE_RECOVERY_LEG_PCT
+    primary_n = primary_notional_mult(short_u)
+    recovery_n = recovery_notional_mult(l1, l2)
+    max_recovery_n = primary_n * MAX_RECOVERY_VS_PRIMARY_NOTIONAL
+    if recovery_n > max_recovery_n + 1e-9 and recovery_n > 0:
+        scale = max_recovery_n / recovery_n
+        l1 = max(MIN_RECOVERY_LEG_PCT, min(MAX_RECOVERY_LEG_PCT, l1 * scale))
+        l2 = max(MIN_RECOVERY_LEG_PCT, min(MAX_RECOVERY_LEG_PCT, l2 * scale))
+        # If still over (min floors), snap to policy defaults.
+        if recovery_notional_mult(l1, l2) > max_recovery_n + 1e-9:
+            l1 = SAFE_RECOVERY_LEG_PCT
+            l2 = SAFE_RECOVERY_LEG_PCT
+            short_u = SAFE_PRIMARY_SHORT_PCT
         changed = True
 
-    return long_u, round(s1, 4), round(s2, 4), changed
+    return short_u, round(l1, 4), round(l2, 4), changed
 
 
-def is_toxic_legacy_sizing(long_pct: float, short1_pct: float, short2_pct: float) -> bool:
-    if float(short1_pct) >= 35.0 and float(short2_pct) >= 35.0:
+def is_toxic_legacy_sizing(short_pct: float, long1_pct: float, long2_pct: float) -> bool:
+    """True when persisted sizing is off-policy and must be migrated on load."""
+    if _is_legacy_clamped(long1_pct, long2_pct):
         return True
-    long_n = long_notional_mult(long_pct)
-    short_n = short_notional_mult(short1_pct, short2_pct)
-    return long_n > 0 and short_n / long_n > MAX_SHORT_VS_LONG_NOTIONAL + 1e-9
+    primary_n = primary_notional_mult(short_pct)
+    recovery_n = recovery_notional_mult(long1_pct, long2_pct)
+    return primary_n > 0 and recovery_n / primary_n > MAX_RECOVERY_VS_PRIMARY_NOTIONAL + 1e-9

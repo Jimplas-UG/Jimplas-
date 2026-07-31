@@ -14,8 +14,8 @@ export function computeCapitalAllocation(config, totalBalance) {
   const tradingPartition = Math.min(partitionCap, bal);
   const protectedCapital = Math.max(0, bal - tradingPartition);
   const shortPct = Math.max(0, Number(config.shortPartitionPct) || 50);
-  const long1Pct = Math.max(0, Number(config.long1PartitionPct) || 12.5);
-  const long2Pct = Math.max(0, Number(config.long2PartitionPct) || 12.5);
+  const long1Pct = Math.max(0, Number(config.long1PartitionPct) || 40);
+  const long2Pct = Math.max(0, Number(config.long2PartitionPct) || 40);
   return {
     totalBalance: bal,
     protectedCapital,
