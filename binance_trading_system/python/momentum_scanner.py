@@ -38,6 +38,10 @@ GAIN_THRESHOLD_PCT = float(os.environ.get("SCANNER_GAIN_PCT", "5.0"))
 RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_RETRACE_PCT", "0.7"))
 # Live 15m must still be hot at entry — blocks stale latched pumps (e.g. 15m already -16%).
 MIN_LIVE_ENTRY_PCT = float(os.environ.get("SCANNER_MIN_LIVE_ENTRY_PCT", "2.0"))
+# Reject end-of-pump entries: live 15m must keep at least this fraction of latched peak gain.
+MIN_LIVE_VS_LATCH_FRAC = float(os.environ.get("SCANNER_MIN_LIVE_VS_LATCH", "0.45"))
+# After flatten, block same-symbol re-entry so a dead pump cannot instantly re-grab the slot.
+ENTRY_COOLDOWN_MS = int(os.environ.get("SCANNER_ENTRY_COOLDOWN_MS", "300000"))
 # Do not short after the move is largely over (chasing a dump from peak).
 MAX_RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_MAX_RETRACE_ENTRY_PCT", "12.0"))
 SHORT_TP_PCT = float(os.environ.get("SCANNER_SHORT_TP_PCT", "2.5"))
@@ -181,8 +185,10 @@ class MomentumScanner:
         self._symbols_usdt: set[str] = set()
         self._coins: dict[str, CoinStrategy] = {}
         self._in_flight: set[str] = set()
+        self._entry_cooldown_until_ms: dict[str, int] = {}
         self._lock = threading.RLock()
         self._last_broadcast = 0.0
+        self._last_queue_block_log_ms = 0
         self._enabled = os.environ.get("SCANNER_ENABLED", "1").strip().lower() not in ("0", "false", "off")
         self._one_at_a_time = ONE_TRADE_AT_A_TIME
         self._trades_closed_today = 0
@@ -784,9 +790,64 @@ class MomentumScanner:
         r = float(coin.retrace_pct or 0.0)
         return RETRACE_ENTRY_PCT <= r <= MAX_RETRACE_ENTRY_PCT
 
+    def _pump_still_alive(self, coin: CoinStrategy) -> bool:
+        """Block late entries where latched pump already died on the live 15m window."""
+        peak = float(coin.qualifying_pct or 0.0)
+        live = self._entry_qualify_pct(coin)
+        if peak < GAIN_THRESHOLD_PCT:
+            return False
+        floor = max(MIN_LIVE_ENTRY_PCT, peak * max(0.2, min(0.9, MIN_LIVE_VS_LATCH_FRAC)))
+        return live >= floor
+
     def _entry_signal_ok(self, coin: CoinStrategy) -> bool:
         latched = (coin.qualifying_pct or 0.0) >= GAIN_THRESHOLD_PCT
-        return latched and self._live_entry_ok(coin) and self._retrace_entry_ok(coin)
+        return (
+            latched
+            and self._live_entry_ok(coin)
+            and self._retrace_entry_ok(coin)
+            and self._pump_still_alive(coin)
+        )
+
+    def _in_entry_cooldown(self, symbol: str) -> bool:
+        until = int(self._entry_cooldown_until_ms.get(symbol.upper()) or 0)
+        return until > int(time.time() * 1000)
+
+    def _arm_entry_cooldown(self, symbol: str, reason: str = "") -> None:
+        if ENTRY_COOLDOWN_MS <= 0:
+            return
+        sym = symbol.upper()
+        until = int(time.time() * 1000) + ENTRY_COOLDOWN_MS
+        self._entry_cooldown_until_ms[sym] = until
+        log.info(
+            "scanner entry cooldown %s for %ss reason=%s",
+            sym,
+            ENTRY_COOLDOWN_MS // 1000,
+            reason or "flatten",
+        )
+
+    def reset_after_external_flatten(self, symbols: list[str] | None = None) -> dict[str, Any]:
+        """Sync reset after desk/API close-all — stop instant re-entry on the same dead pump."""
+        with self._lock:
+            target = {s.upper() for s in (symbols or []) if s}
+            reset: list[str] = []
+            for sym, coin in list(self._coins.items()):
+                if target and sym not in target:
+                    continue
+                if coin.long1 or coin.short or coin.long2 or coin.status in (
+                    STATUS_PENDING,
+                    STATUS_SHORT,
+                    STATUS_LONG1,
+                    STATUS_LONG2,
+                ):
+                    self._reset_coin_state(coin)
+                    self._arm_entry_cooldown(sym, "external_flatten")
+                    self._in_flight.discard(sym)
+                    reset.append(sym)
+            # Also cool down explicitly closed symbols even if scanner state was already empty.
+            for sym in target:
+                if sym not in reset:
+                    self._arm_entry_cooldown(sym, "external_flatten")
+            return {"ok": True, "reset": reset}
 
     def _demote_stale_pending(self, coin: CoinStrategy) -> None:
         """Drop pending queue rows whose pump died or dump already finished."""
@@ -794,6 +855,14 @@ class MomentumScanner:
             return
         # Do not wipe sticky submit if exchange already has a long (ACK may be late).
         if coin.submitted_entry_signal_id and self._exchange_has_long(coin.symbol):
+            return
+        # While another pair is open, keep queued qualifiers — only drop if dump already finished.
+        # Live < min is re-checked at fire time so we do not miss entries stuck behind one-trade.
+        if self._has_open_strategy():
+            if float(coin.retrace_pct or 0.0) > MAX_RETRACE_ENTRY_PCT:
+                coin.status = STATUS_WATCHING
+                coin.qualifying_pct = 0.0
+                coin.entry_signal_key = ""
             return
         if not self._live_entry_ok(coin) or float(coin.retrace_pct or 0.0) > MAX_RETRACE_ENTRY_PCT:
             coin.status = STATUS_WATCHING
@@ -1153,6 +1222,7 @@ class MomentumScanner:
         coin.short2_submit_ms = 0
         coin.unrealized_pnl = 0.0
         coin.retrace_pct = 0.0
+        self._in_flight.discard(coin.symbol)
 
     def _can_emit_tf_signal(self, tf: str) -> bool:
         window = SIGNAL_WINDOW_SEC.get(tf, 180)
@@ -1285,10 +1355,12 @@ class MomentumScanner:
                 continue
             if not self._retrace_entry_ok(coin):
                 continue
+            if self._in_entry_cooldown(coin.symbol):
+                continue
             gain = max(coin.qualifying_pct or 0.0, self._entry_qualify_pct(coin))
             if gain < GAIN_THRESHOLD_PCT:
                 continue
-            if not self._live_entry_ok(coin):
+            if not self._live_entry_ok(coin) or not self._pump_still_alive(coin):
                 continue
             stale_ms = PENDING_QUEUE_MS if self._has_open_strategy() else PENDING_STALE_MS
             if stale_ms > 0 and coin.last_update_ms and now_ms - coin.last_update_ms > stale_ms:
@@ -1306,6 +1378,17 @@ class MomentumScanner:
                 self._last_exec_error = reason
             return
         if self._one_at_a_time and self._has_open_strategy():
+            now_ms = int(time.time() * 1000)
+            if now_ms - self._last_queue_block_log_ms >= 15000:
+                self._last_queue_block_log_ms = now_ms
+                pending = self._pending_candidates()
+                if pending:
+                    log.info(
+                        "scanner queue waiting behind %s — best=%s pending=%s",
+                        self._global_active_symbol(),
+                        pending[0].symbol,
+                        [c.symbol for c in pending[:5]],
+                    )
             return
         candidates = self._pending_candidates()
         if not candidates:
@@ -1699,6 +1782,9 @@ class MomentumScanner:
             active = self._global_active_symbol()
             if active and active != sym:
                 return
+        if self._in_entry_cooldown(sym):
+            log.info("scanner LONG1 cooldown %s — skip re-entry", sym)
+            return
         if pair_gate.is_close_pending(sym):
             return
         # Never stack scanner Long on top of an existing exchange long (manual or orphan).
@@ -2223,6 +2309,7 @@ class MomentumScanner:
                     close_result = {"ok": True, "closed": [], "broker": "binance", "note": "already_flat"}
             if self._close_succeeded(close_result):
                 self._reset_coin_state(coin)
+                self._arm_entry_cooldown(sym, reason or "scanner_close")
                 self._connector.invalidate_positions_cache()
                 latency_ms = round((time.perf_counter() - t0) * 1000, 1)
                 close_result["latency_ms"] = float(close_result.get("latency_ms") or latency_ms)

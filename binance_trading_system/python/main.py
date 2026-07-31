@@ -1191,9 +1191,21 @@ def api_close_all():
     finally:
         pair_gate.end_close_all(open_syms or ["*"])
 
+    # Sync scanner reset BEFORE bg work — prevents instant re-entry on the flattened symbol.
+    try:
+        reset = momentum_scanner.reset_after_external_flatten(open_syms)
+        r = {**r, "scanner_reset": reset}
+    except Exception as e:
+        log.warning("close-all scanner reset: %s", e)
+
     def _bg_after_close_all() -> None:
         try:
             momentum_scanner.reconcile_from_exchange()
+            # Prefer next queued qualifier (not the just-closed dead pump).
+            try:
+                momentum_scanner._maybe_execute_best_pending()
+            except Exception:
+                pass
             connector.align_isolated_margin_open_symbols()
             connector.invalidate_positions_cache()
             _flush_scanner_snapshot()
