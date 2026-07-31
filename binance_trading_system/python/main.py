@@ -33,11 +33,32 @@ from leverage_policy import SHORT_LEVERAGE
 from app_config import ensure_valid_or_exit, load_settings
 from logging_setup import setup_logging
 from session_store import clear_binance_session, load_binance_session, save_binance_session
+from frozen_strategy import verify_frozen_contract_or_raise
 
 _settings = load_settings()
 setup_logging(_settings.log_dir, os.environ.get("LOG_LEVEL", "INFO"))
 log = logging.getLogger("binance_api")
 log.info("Bilshenz env=%s paper=%s testnet=%s", _settings.env, _settings.paper, _settings.testnet)
+
+try:
+    _frozen = verify_frozen_contract_or_raise()
+    log.info(
+        "frozen strategy contract OK id=%s primary=%s/%s recovery=%s/%s",
+        _frozen.get("strategy_id"),
+        _frozen["primary"]["leg"],
+        _frozen["primary"]["partition_pct"],
+        _frozen["recovery"]["leg1"],
+        _frozen["recovery"]["partition_pct"],
+    )
+except AssertionError as e:
+    # Refuse silent policy drift — halt new scanner execution until contract is restored.
+    log.critical("FROZEN STRATEGY CONTRACT BROKEN — scanner exec halted: %s", e)
+    os.environ["SCANNER_EXEC"] = "0"
+    _frozen = None
+except Exception as e:
+    log.critical("frozen strategy verify failed — scanner exec halted: %s", e)
+    os.environ["SCANNER_EXEC"] = "0"
+    _frozen = None
 
 BRIDGE_TOKEN = _settings.bridge_token or os.environ.get("BRIDGE_TOKEN", "").strip()
 _PUBLIC_PATHS = frozenset({"/health", "/ping", "/docs", "/openapi.json"})

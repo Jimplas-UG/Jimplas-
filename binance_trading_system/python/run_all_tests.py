@@ -12,6 +12,7 @@ TESTS = [
     "test_exec_session.py",
     "test_scanner_15m.py",
     "test_strategy_guards.py",
+    "test_frozen_strategy.py",
     "test_exec_integration.py",
     "test_one_pair_isolation.py",
     "test_close_orders.py",

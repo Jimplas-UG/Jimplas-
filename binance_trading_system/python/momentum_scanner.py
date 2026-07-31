@@ -1617,6 +1617,8 @@ class MomentumScanner:
             "risk_locked": self._risk_locked,
             "last_exec_latency_ms": self._last_exec_latency_ms,
             "execution_events": self._engine.events()[:12],
+            "strategy_id": "short_first_v1",
+            "strategy_name": "Short → Long 1 → Long 2",
         }
 
     def load_symbols(self, symbols: list[str]) -> None:
