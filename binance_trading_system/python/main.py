@@ -408,6 +408,14 @@ async def lifespan(app: FastAPI):
                 pos = connector.positions()
                 orders = connector.open_orders()
                 log.info("startup recovery: %s open positions, %s open orders", len(pos), len(orders))
+                # Adopt live positions the scanner has no memory of, otherwise an open
+                # SHORT stays on status Scanning and Long 1 / SHORT_TP never run again.
+                adopted = await asyncio.to_thread(
+                    momentum_scanner.adopt_open_strategies_from_exchange
+                )
+                log.info("startup adopt: %s", adopted)
+                await asyncio.to_thread(momentum_scanner.reconcile_from_exchange)
+                _flush_scanner_snapshot()
         except Exception as e:
             log.warning("scanner exec restore on startup skipped: %s", e)
 

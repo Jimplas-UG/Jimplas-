@@ -685,6 +685,19 @@ def test_failed_entry_keeps_sticky_submit() -> None:
     print("OK failed entry keeps sticky submit")
 
 
+def test_adopt_is_noop_in_paper_mode() -> None:
+    """Restart adoption is a live-exchange recovery — paper scanning must be untouched."""
+    conn = FakeConnector()
+    sc = MomentumScanner(conn, lambda: True)
+    sym = "TESTUSDT"
+    sc.load_symbols([sym])
+    out = sc.adopt_open_strategies_from_exchange()
+    assert out == {"adopted_shorts": 0, "adopted_longs": 0, "symbols": []}
+    sc.on_tick(sym, 100.0)
+    assert sc._coins[sym].short is None
+    print("OK adopt is a no-op in paper mode")
+
+
 def test_primary_entry_is_sell_short_leg() -> None:
     conn = FakeConnector()
     sc = MomentumScanner(conn, lambda: True)
@@ -733,6 +746,7 @@ if __name__ == "__main__":
         test_stale_pending_demoted_when_live_15m_collapses()
         test_short_tp_with_longs_flattens_full_pair()
         test_failed_entry_keeps_sticky_submit()
+        test_adopt_is_noop_in_paper_mode()
         test_primary_entry_is_sell_short_leg()
     except AssertionError as e:
         print("FAIL", e, file=sys.stderr)

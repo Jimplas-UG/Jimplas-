@@ -27,10 +27,23 @@ MAINNET = "https://fapi.binance.com"
 TESTNET = "https://testnet.binancefuture.com"
 CLIENT_ID_PREFIX = "BSV32"
 DEFAULT_MAGIC = 77002002
+# Fallback price band when exchangeInfo has no PERCENT_PRICE multipliers for the symbol.
+DEFAULT_PRICE_BAND_UP = 1.05
+DEFAULT_PRICE_BAND_DOWN = 0.95
+LIMIT_IOC_ATTEMPT_SLEEP_S = 0.06
+LIMIT_IOC_MAX_ATTEMPTS = 12
 
 
 def _truthy(v: str | None) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _float_or_none(v: Any) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
 
 
 @dataclass
@@ -65,6 +78,84 @@ def round_to_tick(price: float, tick: float) -> float:
 def _is_percent_price_error(err: str | Exception) -> bool:
     msg = str(err or "")
     return "PERCENT_PRICE" in msg or "-4131" in msg or "percent_price" in msg.lower()
+
+
+def _is_price_bound_error(err: str | Exception) -> bool:
+    """Binance -4016: LIMIT price outside the exchange price band for this side."""
+    msg = str(err or "").lower()
+    return (
+        "-4016" in msg
+        or "can't be higher" in msg
+        or "can't be lower" in msg
+        or "cannot be higher" in msg
+        or "cannot be lower" in msg
+    )
+
+
+def _clamp_band_price(px: float, *, band_min: float, band_max: float, tick: float) -> float:
+    """Round to tick and force the price inside [band_min, band_max]. 0 = unusable."""
+    if px <= 0 or band_max <= 0 or band_min > band_max:
+        return 0.0
+    px = min(max(px, band_min), band_max)
+    if tick > 0:
+        px = round_to_tick(px, tick)
+        if px < band_min:
+            px = round_to_tick(band_min + tick, tick)
+        if px > band_max:
+            px = round_to_tick(band_max, tick)
+    if px <= 0 or px < band_min - 1e-12 or px > band_max + 1e-12:
+        return 0.0
+    return px
+
+
+def build_limit_ioc_candidates(
+    *,
+    exit_side: str,
+    bid: float,
+    ask: float,
+    mark: float,
+    tick: float,
+    multiplier_up: float | None = None,
+    multiplier_down: float | None = None,
+    mark_centered: bool = False,
+) -> tuple[list[float], float, float]:
+    """
+    Aggressive-but-legal LIMIT IOC prices for a reduce-only close.
+
+    BUY (closing a SHORT) walks up from the ask but never above mark*multiplierUp;
+    SELL (closing a LONG) walks down from the bid but never below mark*multiplierDown.
+    Returns (candidates, band_min, band_max) with every candidate already tick-rounded
+    and clamped into the band.
+    """
+    side = (exit_side or "").upper()
+    up = float(multiplier_up or 0) or DEFAULT_PRICE_BAND_UP
+    down = float(multiplier_down or 0) or DEFAULT_PRICE_BAND_DOWN
+    ref = mark if mark > 0 else (ask if side == "BUY" else bid) or bid or ask
+    if ref <= 0:
+        return [], 0.0, 0.0
+    band_max = ref * up
+    band_min = ref * down
+    mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else ref
+    if side == "BUY":
+        base = ask or mid or ref
+        raw = [base, base * 1.001, base * 1.002, base * 1.005, mid, ref * 1.005, ref * 1.01,
+               ref * 1.02, ref * 1.03, band_max * 0.999, bid]
+        if mark_centered:
+            raw = [ref, ref * 1.001, ref * 1.002, ref * 1.005, ref * 1.01, ref * 1.02,
+                   ref * 1.03, band_max * 0.999, base, mid]
+    else:
+        base = bid or mid or ref
+        raw = [base, base * 0.999, base * 0.998, base * 0.995, mid, ref * 0.995, ref * 0.99,
+               ref * 0.98, ref * 0.97, band_min * 1.001, ask]
+        if mark_centered:
+            raw = [ref, ref * 0.999, ref * 0.998, ref * 0.995, ref * 0.99, ref * 0.98,
+                   ref * 0.97, band_min * 1.001, base, mid]
+    out: list[float] = []
+    for px in raw:
+        c = _clamp_band_price(px, band_min=band_min, band_max=band_max, tick=tick)
+        if c > 0 and c not in out:
+            out.append(c)
+    return out, band_min, band_max
 
 
 def close_leg_sides(magic: int) -> tuple[str, str] | None:
@@ -301,23 +392,7 @@ class BinanceConnector:
         sym = self.cfg.symbol.upper()
         for s in data.get("symbols", []):
             if s.get("symbol") == sym:
-                filters = {f["filterType"]: f for f in s.get("filters", [])}
-                lot = filters.get("LOT_SIZE", {})
-                price_f = filters.get("PRICE_FILTER", {})
-                min_notional_f = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL", {})
-                min_notional = float(min_notional_f.get("notional", min_notional_f.get("minNotional", "5")))
-                self._symbol_info = {
-                    "symbol": sym,
-                    "status": s.get("status"),
-                    "pricePrecision": s.get("pricePrecision", 2),
-                    "quantityPrecision": s.get("quantityPrecision", 3),
-                    "tickSize": float(price_f.get("tickSize", "0.01")),
-                    "stepSize": float(lot.get("stepSize", "0.001")),
-                    "minQty": float(lot.get("minQty", "0.001")),
-                    "maxQty": float(lot.get("maxQty", "1000")),
-                    "minNotional": min_notional,
-                    "contractType": s.get("contractType"),
-                }
+                self._symbol_info = self._parse_symbol_filters(s)
                 return self._symbol_info
         raise RuntimeError(f"Symbol {sym} not found on Binance Futures")
 
@@ -328,6 +403,10 @@ class BinanceConnector:
         price_f = filters.get("PRICE_FILTER", {})
         min_notional_f = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL", {})
         min_notional = float(min_notional_f.get("notional", min_notional_f.get("minNotional", "5")))
+        pct_f = filters.get("PERCENT_PRICE") or {}
+        pct_side_f = filters.get("PERCENT_PRICE_BY_SIDE") or {}
+        mult_up = _float_or_none(pct_f.get("multiplierUp") or pct_side_f.get("askMultiplierUp"))
+        mult_down = _float_or_none(pct_f.get("multiplierDown") or pct_side_f.get("bidMultiplierDown"))
         return {
             "symbol": sym,
             "status": s.get("status"),
@@ -338,6 +417,8 @@ class BinanceConnector:
             "minQty": float(lot.get("minQty", "0.001")),
             "maxQty": float(lot.get("maxQty", "1000")),
             "minNotional": min_notional,
+            "multiplierUp": mult_up,
+            "multiplierDown": mult_down,
             "contractType": s.get("contractType"),
         }
 
@@ -965,6 +1046,23 @@ class BinanceConnector:
     def tick(self, symbol: str | None = None) -> dict[str, Any] | None:
         return self.book_ticker(symbol)
 
+    def mark_price(self, symbol: str | None = None) -> float:
+        """Mark price for price-band math — 0 when unavailable."""
+        sym = (symbol or self.cfg.symbol).upper()
+        try:
+            data = self._request("GET", "/fapi/v1/premiumIndex", {"symbol": sym}, timeout=5.0)
+        except Exception as e:
+            log.debug("mark_price %s: %s", sym, e)
+            return 0.0
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        if not isinstance(data, dict):
+            return 0.0
+        try:
+            return max(0.0, float(data.get("markPrice") or 0))
+        except (TypeError, ValueError):
+            return 0.0
+
     def _klines_base_url(self) -> str:
         """Public klines — mainnet has full XAUUSDT history; testnet is too shallow for backtests."""
         if _truthy(os.environ.get("BINANCE_KLINES_TESTNET", "0")):
@@ -1540,6 +1638,53 @@ class BinanceConnector:
         except RuntimeError:
             return False
 
+    def _close_price_spec(self, symbol: str) -> dict[str, Any]:
+        """Tick / step / price-band multipliers for a close, tolerant of missing sources."""
+        sym = symbol.upper()
+        spec: dict[str, Any] = {}
+        try:
+            spec = dict(self.get_symbol_spec(sym) or {})
+        except Exception:
+            spec = {}
+        if not spec.get("tickSize"):
+            try:
+                info = self.exchange_info() or {}
+                if isinstance(info, dict):
+                    for k in ("tickSize", "stepSize", "minQty", "multiplierUp", "multiplierDown"):
+                        if info.get(k) and not spec.get(k):
+                            spec[k] = info[k]
+            except Exception:
+                pass
+        if not spec.get("tickSize"):
+            try:
+                legacy = self.symbol_spec(sym) or {}
+                spec.setdefault("tickSize", legacy.get("tick_size"))
+                spec.setdefault("stepSize", legacy.get("step_size"))
+            except Exception:
+                pass
+        return spec
+
+    def _band_retry_price(
+        self,
+        exit_side: str,
+        rejected_px: float,
+        *,
+        bid: float,
+        ask: float,
+        mark: float,
+        band_min: float,
+        band_max: float,
+        tick: float,
+    ) -> float:
+        """After -4016, the safest price still on the aggressive side of the band."""
+        if exit_side.upper() == "BUY":
+            options = [x for x in (ask, band_max * 0.999, mark, rejected_px - tick) if x > 0]
+            target = min(options) if options else 0.0
+        else:
+            options = [x for x in (bid, band_min * 1.001, mark, rejected_px + tick) if x > 0]
+            target = max(options) if options else 0.0
+        return _clamp_band_price(target, band_min=band_min, band_max=band_max, tick=tick)
+
     def _limit_ioc_close_leg(
         self,
         *,
@@ -1551,88 +1696,128 @@ class BinanceConnector:
     ) -> dict[str, Any]:
         """
         Escape hatch when MARKET hits PERCENT_PRICE (-4131).
-        Walk aggressive LIMIT IOC prices until fill or band exhausted.
+
+        Walks aggressive LIMIT IOC prices that are always clamped inside the exchange
+        price band (mark * multiplierUp/Down), so a BUY closing a SHORT can never be
+        rejected with -4016 for the whole walk. Two passes: book-anchored, then
+        mark-centered after refreshing book + mark.
         """
         import time as _time
 
         sym = symbol.upper()
-        info = self.exchange_info() if hasattr(self, "exchange_info") else self.symbol_spec(sym)
-        # Prefer symbol-specific filters when available.
-        try:
-            spec = self.symbol_spec(sym)
-        except Exception:
-            spec = info if isinstance(info, dict) else {}
-        step = float(spec.get("stepSize") or info.get("stepSize") or 0.001)
+        spec = self._close_price_spec(sym)
+        step = float(spec.get("stepSize") or 0.001)
         tick = float(spec.get("tickSize") or 0.0001)
+        mult_up = _float_or_none(spec.get("multiplierUp"))
+        mult_down = _float_or_none(spec.get("multiplierDown"))
         qty = round_to_step(float(quantity), step)
         if qty <= 0:
             return {"ok": False, "error": "invalid_quantity"}
-        tick_row = self.book_ticker(sym) or {}
-        bid = float(tick_row.get("bid") or 0)
-        ask = float(tick_row.get("ask") or 0)
-        if exit_side.upper() == "SELL":
-            mark = bid or ask
-            mults = (0.999, 0.995, 0.99, 0.98, 0.97, 0.95, 0.93, 0.90)
-        else:
-            mark = ask or bid
-            mults = (1.001, 1.005, 1.01, 1.02, 1.03, 1.05, 1.07, 1.10)
-        if mark <= 0:
-            return {"ok": False, "error": "no_tick_for_limit_close"}
+        side = exit_side.upper()
         last_err = "limit_ioc_no_fill"
-        for mult in mults:
-            px = round_to_tick(mark * mult, tick)
-            if px <= 0:
+        tried: set[float] = set()
+        sent = 0
+
+        for pass_idx in range(2):
+            if sent >= LIMIT_IOC_MAX_ATTEMPTS:
+                break
+            book = self.book_ticker(sym) or {}
+            bid = float(book.get("bid") or 0)
+            ask = float(book.get("ask") or 0)
+            mark = self.mark_price(sym)
+            candidates, band_min, band_max = build_limit_ioc_candidates(
+                exit_side=side,
+                bid=bid,
+                ask=ask,
+                mark=mark,
+                tick=tick,
+                multiplier_up=mult_up,
+                multiplier_down=mult_down,
+                mark_centered=pass_idx > 0,
+            )
+            if not candidates:
+                last_err = "no_tick_for_limit_close"
                 continue
-            cid = f"{CLIENT_ID_PREFIX}_LI_{hedge_side}_{int(_time.time() * 1000)}"[:36]
-            params: dict[str, Any] = {
-                "symbol": sym,
-                "side": exit_side.upper(),
-                "type": "LIMIT",
-                "timeInForce": "IOC",
-                "quantity": qty,
-                "price": px,
-                "newClientOrderId": cid,
-            }
-            if hedge_side in ("LONG", "SHORT"):
-                params["positionSide"] = hedge_side
-            else:
-                params["reduceOnly"] = "true"
-            try:
-                resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=10.0)
-            except Exception as e:
-                last_err = str(e)
-                log.warning("limit_ioc_close %s %s px=%s: %s", sym, hedge_side, px, e)
-                if not _is_percent_price_error(e):
-                    # Non-band errors: keep trying milder prices once; otherwise continue walk.
+            attempts = list(candidates)
+            i = 0
+            while i < len(attempts) and sent < LIMIT_IOC_MAX_ATTEMPTS:
+                px = attempts[i]
+                i += 1
+                if px <= 0 or px in tried:
                     continue
-                continue
-            filled = float(resp.get("executedQty") or 0)
-            status = str(resp.get("status") or "").upper()
-            if filled <= 0 and status not in ("FILLED", "PARTIALLY_FILLED"):
-                last_err = f"ioc_unfilled status={status}"
-                continue
-            fill = float(resp.get("avgPrice") or px)
-            order_id = resp.get("orderId")
-            rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
-            if abs(rpnl) < 1e-12 and entry_price > 0:
-                pos_side = "BUY" if hedge_side == "LONG" else "SELL"
-                rpnl = self._estimate_close_pnl(pos_side, entry_price, fill, filled or qty)
-            self.invalidate_positions_cache()
-            return {
-                "ok": True,
-                "symbol": sym,
-                "side": "BUY" if hedge_side == "LONG" else "SELL",
-                "exit_side": exit_side.upper(),
-                "position_side": hedge_side,
-                "volume": filled or qty,
-                "fill_price": fill,
-                "entry_price": entry_price,
-                "profit": rpnl,
-                "realized_pnl": rpnl,
-                "commission": commission,
-                "order": order_id,
-                "close_method": "limit_ioc",
-            }
+                tried.add(px)
+                sent += 1
+                cid = f"{CLIENT_ID_PREFIX}_LI_{hedge_side}_{int(_time.time() * 1000)}"[:36]
+                params: dict[str, Any] = {
+                    "symbol": sym,
+                    "side": side,
+                    "type": "LIMIT",
+                    "timeInForce": "IOC",
+                    "quantity": qty,
+                    "price": px,
+                    "newClientOrderId": cid,
+                }
+                if hedge_side in ("LONG", "SHORT"):
+                    params["positionSide"] = hedge_side
+                else:
+                    params["reduceOnly"] = "true"
+                try:
+                    resp = self._request_keepalive(
+                        "POST", "/fapi/v1/order", params, signed=True, timeout=10.0
+                    )
+                except Exception as e:
+                    last_err = str(e)
+                    log.warning("limit_ioc_close %s %s px=%s: %s", sym, hedge_side, px, e)
+                    if _is_price_bound_error(e):
+                        safe = self._band_retry_price(
+                            side,
+                            px,
+                            bid=bid,
+                            ask=ask,
+                            mark=mark,
+                            band_min=band_min,
+                            band_max=band_max,
+                            tick=tick,
+                        )
+                        # Drop every remaining candidate the exchange would reject the same way.
+                        if side == "BUY":
+                            attempts = [p for p in attempts[i:] if p <= safe + 1e-12]
+                        else:
+                            attempts = [p for p in attempts[i:] if p >= safe - 1e-12]
+                        if safe > 0 and safe not in tried:
+                            attempts.insert(0, safe)
+                        i = 0
+                    _time.sleep(LIMIT_IOC_ATTEMPT_SLEEP_S)
+                    continue
+                filled = float(resp.get("executedQty") or 0)
+                status = str(resp.get("status") or "").upper()
+                if filled <= 0 and status not in ("FILLED", "PARTIALLY_FILLED"):
+                    last_err = f"ioc_unfilled status={status}"
+                    _time.sleep(LIMIT_IOC_ATTEMPT_SLEEP_S)
+                    continue
+                fill = float(resp.get("avgPrice") or px)
+                order_id = resp.get("orderId")
+                rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
+                if abs(rpnl) < 1e-12 and entry_price > 0:
+                    pos_side = "BUY" if hedge_side == "LONG" else "SELL"
+                    rpnl = self._estimate_close_pnl(pos_side, entry_price, fill, filled or qty)
+                self.invalidate_positions_cache()
+                return {
+                    "ok": True,
+                    "symbol": sym,
+                    "side": "BUY" if hedge_side == "LONG" else "SELL",
+                    "exit_side": side,
+                    "position_side": hedge_side,
+                    "volume": filled or qty,
+                    "fill_price": fill,
+                    "entry_price": entry_price,
+                    "profit": rpnl,
+                    "realized_pnl": rpnl,
+                    "commission": commission,
+                    "order": order_id,
+                    "close_method": "limit_ioc",
+                    "limit_ioc_pass": pass_idx + 1,
+                }
         return {"ok": False, "error": last_err, "close_method": "limit_ioc"}
 
     def close_by_position_side(
@@ -1730,7 +1915,11 @@ class BinanceConnector:
             resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
         except RuntimeError as e:
             if _is_percent_price_error(e):
-                log.warning("close_by_position_side %s %s MARKET -4131 — LIMIT IOC fallback", sym, ps)
+                log.warning(
+                    "close_by_position_side %s %s MARKET -4131 — band-clamped LIMIT IOC fallback",
+                    sym,
+                    ps,
+                )
                 lim = self._limit_ioc_close_leg(
                     symbol=sym,
                     exit_side=exit_side,
@@ -1941,7 +2130,11 @@ class BinanceConnector:
                 resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
             except RuntimeError as e:
                 if _is_percent_price_error(e):
-                    log.warning("close_position %s %s MARKET -4131 — LIMIT IOC fallback", sym, side_tag)
+                    log.warning(
+                        "close_position %s %s MARKET -4131 — band-clamped LIMIT IOC fallback",
+                        sym,
+                        side_tag,
+                    )
                     lim = self._limit_ioc_close_leg(
                         symbol=sym,
                         exit_side=exit_side,
