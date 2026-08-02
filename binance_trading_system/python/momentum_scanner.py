@@ -392,6 +392,25 @@ class MomentumScanner:
             return 0.0
         return ((coin.price - entry) / entry) * 100.0
 
+    def _exchange_long_covers_recovery(self, coin: CoinStrategy, *, legs: int = 1) -> bool:
+        """True when exchange LONG already approximates legs of recovery sizing."""
+        if getattr(self._connector.cfg, "paper", False):
+            return False
+        price = float(coin.price or 0) or float((coin.short.entry if coin.short else 0) or 0)
+        if price <= 0:
+            return False
+        fn = getattr(self._connector, "exchange_long_qty", None)
+        if not callable(fn):
+            return False
+        ex_long = float(fn(coin.symbol) or 0)
+        if ex_long <= 1e-12:
+            return False
+        one = self._qty_for(coin.symbol, price, LONG1_LEVERAGE, self._long1_pct)
+        if one <= 0:
+            return False
+        need = one * max(1, int(legs))
+        return ex_long >= need * 0.85
+
     def _long1_entry_allowed(self, coin: CoinStrategy) -> bool:
         """Long 1 after primary short + settle delay when price is live ≥2% above short entry."""
         if not coin.short or coin.short_was_closed:
@@ -400,6 +419,11 @@ class MomentumScanner:
             return False
         if not self._exchange_has_short(coin.symbol):
             log.warning("scanner LONG1 blocked %s: no exchange short", coin.symbol)
+            return False
+        # Never stack a fresh Long1 on top of an already-sized recovery LONG.
+        if self._exchange_long_covers_recovery(coin, legs=1):
+            log.info("scanner LONG1 skipped %s: exchange LONG already covers recovery", coin.symbol)
+            self._adopt_symbol_from_exchange(coin)
             return False
         if not self._short_settle_elapsed(coin):
             return False
@@ -423,6 +447,12 @@ class MomentumScanner:
             return False
         if not self._exchange_has_short(coin.symbol):
             log.warning("scanner LONG2 blocked %s: no exchange short", coin.symbol)
+            return False
+        # If exchange already holds ~2 recovery partitions, split/adopt — do not open a 3rd.
+        if self._exchange_long_covers_recovery(coin, legs=2):
+            log.info("scanner LONG2 skipped %s: exchange LONG already covers Long1+Long2", coin.symbol)
+            if coin.long1 is None or coin.long2 is None:
+                self._adopt_symbol_from_exchange(coin)
             return False
         if coin.long1 is not None:
             if not self._exchange_has_long(coin.symbol):
@@ -704,20 +734,23 @@ class MomentumScanner:
                     tp1 = l_entry * (1.0 + LONG_TP_PCT / 100.0)
                     if self._adopt_exchange_long1(coin, sym, l_qty, l_entry, tp1):
                         longs += 1
-                        remainder = l_qty - float(coin.long1.qty or 0)
-                        # Two-partition long: split remainder into Long 2.
-                        if (
-                            coin.long2 is None
-                            and l1_expected > 0
-                            and remainder > l1_expected * 0.2
-                        ):
-                            coin.long1.qty = min(float(coin.long1.qty or 0), l1_expected)
-                            remainder = l_qty - float(coin.long1.qty or 0)
+                        # Always split a 2-partition LONG before manage can open another Long2.
+                        if l1_expected > 0 and l_qty > l1_expected * 1.2 and coin.long2 is None:
+                            coin.long1.qty = min(float(coin.long1.qty or l_qty), l1_expected)
+                            remainder = max(0.0, l_qty - float(coin.long1.qty or 0))
                             tp2 = l_entry * (1.0 + LONG_TP_PCT / 100.0)
                             if remainder > 1e-12 and self._adopt_exchange_long2(
                                 coin, sym, remainder, l_entry, tp2
                             ):
                                 longs += 1
+                            else:
+                                # Keep full qty on Long1 if Long2 adopt failed — better than opening a 3rd leg.
+                                coin.long1.qty = l_qty
+                                log.warning(
+                                    "scanner %s adopt split failed — keeping combined long on Long1 qty=%s",
+                                    sym,
+                                    l_qty,
+                                )
         elif coin.long1 is None and coin.long2 is not None and self._exchange_has_long(sym):
             # Long 2 already in memory — adopt residual as Long 1 only.
             long_leg = self._exchange_long_leg(sym) or {}

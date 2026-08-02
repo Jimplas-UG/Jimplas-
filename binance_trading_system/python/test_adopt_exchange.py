@@ -267,6 +267,31 @@ def test_close_backoff_grows_and_clears() -> None:
     print("OK close backoff: exponential, capped at 30s, cleared on success")
 
 
+def test_adopt_two_partition_long_splits_before_manage() -> None:
+    """Combined Long1+Long2 qty must split on adopt — never leave Long2 None to re-open."""
+    from momentum_scanner import STATUS_LONG2
+
+    conn = LiveConnector([_short_pos(entry=0.05), _long_pos(entry=0.052, qty=1600.0)])
+    sc = MomentumScanner(conn, lambda: False)
+    sc._qty_for = lambda symbol, price, leverage, partition_pct: 800.0  # type: ignore[method-assign]
+    sc.load_symbols(["RIFUSDT"])
+    coin = sc._coins["RIFUSDT"]
+    coin.price = 0.052
+    out = sc.adopt_open_strategies_from_exchange()
+    assert out["adopted_shorts"] == 1
+    assert coin.long1 is not None and abs(coin.long1.qty - 800.0) < 1e-6, coin.long1
+    assert coin.long2 is not None and abs(coin.long2.qty - 800.0) < 1e-6, coin.long2
+    assert coin.status == STATUS_LONG2
+    # Manage must not try to open another Long2 on top.
+    opened: list[str] = []
+    sc._try_open_long2 = lambda c: opened.append("long2")  # type: ignore[method-assign]
+    coin.short_opened_ms = int(time.time() * 1000) - 60_000
+    coin.long1_opened_ms = int(time.time() * 1000) - 60_000
+    sc._manage_positions(coin)
+    assert opened == [], opened
+    print("OK adopt: 2-partition long splits; manage does not triple-hedge")
+
+
 def test_manage_still_arms_long1_during_close_backoff() -> None:
     conn = LiveConnector([_short_pos()])
     sc = MomentumScanner(conn, lambda: False)
@@ -417,6 +442,7 @@ if __name__ == "__main__":
         test_manage_still_arms_long1_during_close_backoff()
         test_adopt_single_long_past_4pct_as_long2()
         test_adopt_long1_qty_excludes_existing_long2()
+        test_adopt_two_partition_long_splits_before_manage()
         test_sibling_wipe_marks_rearm_not_closed()
         test_close_vol_caps_to_preserve_sibling()
     except AssertionError as e:
