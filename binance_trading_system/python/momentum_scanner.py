@@ -175,6 +175,9 @@ class CoinStrategy:
     entry_submit_ms: int = 0
     long1_submit_ms: int = 0
     long2_submit_ms: int = 0
+    # Last exit reason per recovery leg — SIBLING_WIPE means accidental shared-LONG wipe.
+    last_long1_exit_reason: str = ""
+    last_long2_exit_reason: str = ""
     _history: deque[PricePoint] = field(default_factory=lambda: deque(maxlen=2500))
 
     def active(self) -> bool:
@@ -640,11 +643,15 @@ class MomentumScanner:
             return False
         fill = float(leg.get("price_open") or fallback_entry or coin.price or 0)
         qty = float(leg.get("volume") or fallback_qty or 0)
+        # Never attribute Long 2 volume to Long 1 — that inflates close qty and wipes siblings.
+        if coin.long2 is not None:
+            qty = max(0.0, qty - float(coin.long2.qty or 0))
         if fill <= 0 or qty <= 1e-12:
             return False
         coin.long1 = LegPosition("BUY", fill, qty, LONG1_LEVERAGE, MAGIC_LONG1, tp)
         coin.status = STATUS_LONG1
         coin.long1_peak_price = fill
+        coin.long1_was_closed = False
         self._mark_long1_opened(coin, sym)
         self._last_exec_error = None
         self._emit_signal(coin, "long1_entered")
@@ -675,22 +682,52 @@ class MomentumScanner:
                     shorts = 1
         if not coin.short:
             return shorts, longs
-        if coin.long1 is None and self._exchange_has_long(sym):
+        if coin.long1 is None and coin.long2 is None and self._exchange_has_long(sym):
             long_leg = self._exchange_long_leg(sym) or {}
             l_entry = float(long_leg.get("price_open") or 0) or float(coin.price or 0)
             l_qty = float(long_leg.get("volume") or 0)
             if l_entry > 0 and l_qty > 1e-12:
+                l1_expected = self._qty_for(sym, l_entry, LONG1_LEVERAGE, self._long1_pct)
+                adverse = self._short_adverse_pct(coin)
+                # One-partition long past +4%: prefer Long 2 (Long 1 already done).
+                as_long2_only = (
+                    l1_expected > 0
+                    and l_qty <= l1_expected * 1.25
+                    and adverse >= LONG2_ADVERSE_PCT
+                )
+                if as_long2_only:
+                    coin.long1_was_closed = True
+                    tp2 = l_entry * (1.0 + LONG_TP_PCT / 100.0)
+                    if self._adopt_exchange_long2(coin, sym, l_qty, l_entry, tp2):
+                        longs += 1
+                else:
+                    tp1 = l_entry * (1.0 + LONG_TP_PCT / 100.0)
+                    if self._adopt_exchange_long1(coin, sym, l_qty, l_entry, tp1):
+                        longs += 1
+                        remainder = l_qty - float(coin.long1.qty or 0)
+                        # Two-partition long: split remainder into Long 2.
+                        if (
+                            coin.long2 is None
+                            and l1_expected > 0
+                            and remainder > l1_expected * 0.2
+                        ):
+                            coin.long1.qty = min(float(coin.long1.qty or 0), l1_expected)
+                            remainder = l_qty - float(coin.long1.qty or 0)
+                            tp2 = l_entry * (1.0 + LONG_TP_PCT / 100.0)
+                            if remainder > 1e-12 and self._adopt_exchange_long2(
+                                coin, sym, remainder, l_entry, tp2
+                            ):
+                                longs += 1
+        elif coin.long1 is None and coin.long2 is not None and self._exchange_has_long(sym):
+            # Long 2 already in memory — adopt residual as Long 1 only.
+            long_leg = self._exchange_long_leg(sym) or {}
+            l_entry = float(long_leg.get("price_open") or 0) or float(coin.price or 0)
+            l_qty = float(long_leg.get("volume") or 0)
+            residual = max(0.0, l_qty - float(coin.long2.qty or 0))
+            if residual > 1e-12:
                 tp1 = l_entry * (1.0 + LONG_TP_PCT / 100.0)
-                if self._adopt_exchange_long1(coin, sym, l_qty, l_entry, tp1):
+                if self._adopt_exchange_long1(coin, sym, residual, l_entry, tp1):
                     longs += 1
-                    # Long qty materially above one Long 1 partition means Long 2 also filled.
-                    l1_expected = self._qty_for(sym, l_entry, LONG1_LEVERAGE, self._long1_pct)
-                    remainder = l_qty - l1_expected
-                    if coin.long2 is None and l1_expected > 0 and remainder > l1_expected * 0.2:
-                        coin.long1.qty = l1_expected
-                        tp2 = l_entry * (1.0 + LONG_TP_PCT / 100.0)
-                        if self._adopt_exchange_long2(coin, sym, remainder, l_entry, tp2):
-                            longs += 1
         return shorts, longs
 
     def adopt_open_strategies_from_exchange(self) -> dict[str, Any]:
@@ -787,23 +824,27 @@ class MomentumScanner:
     ) -> bool:
         """Adopt Long 2 from exchange long volume beyond Long 1 (best-effort)."""
         sym = symbol.upper()
-        if not coin.short or not coin.long1:
+        if not coin.short:
+            return False
+        # Long 2 alone is legal after Long 1 already closed (or when classifying a +4% residual).
+        if coin.long1 is None and not coin.long1_was_closed:
             return False
         if coin.long2 is not None:
             return True
         leg = self._exchange_long_leg(sym)
-        if not leg:
+        if not leg and float(fallback_qty or 0) <= 1e-12:
             return False
-        fill = float(leg.get("price_open") or fallback_entry or coin.price or 0)
-        qty = float(leg.get("volume") or 0)
-        long1_qty = float(coin.long1.qty or 0)
+        fill = float((leg or {}).get("price_open") or fallback_entry or coin.price or 0)
+        qty = float((leg or {}).get("volume") or 0)
+        long1_qty = float(coin.long1.qty or 0) if coin.long1 else 0.0
         # If total long qty is materially larger than Long 1, treat the remainder as Long 2.
-        extra = max(0.0, qty - long1_qty)
+        extra = max(0.0, qty - long1_qty) if qty > 1e-12 else 0.0
         use_qty = extra if extra > 1e-12 else float(fallback_qty or 0)
         if fill <= 0 or use_qty <= 1e-12:
             return False
         coin.long2 = LegPosition("BUY", fill, use_qty, LONG2_LEVERAGE, MAGIC_LONG2, tp)
         coin.long2_peak_price = fill
+        coin.long2_was_closed = False
         coin.status = STATUS_LONG2
         self._mark_long2_opened(coin)
         self._last_exec_error = None
@@ -1295,17 +1336,127 @@ class MomentumScanner:
                 coin.long1 = None
                 coin.long1_peak_price = None
                 coin.long1_was_closed = True
+                if not coin.last_long1_exit_reason:
+                    coin.last_long1_exit_reason = "EXCHANGE_FLAT"
             if coin.long2:
                 log.info("scanner %s clearing phantom Long 2 — exchange LONG flat", sym)
                 coin.long2 = None
                 coin.long2_peak_price = None
                 coin.long2_was_closed = True
+                if not coin.last_long2_exit_reason:
+                    coin.last_long2_exit_reason = "EXCHANGE_FLAT"
             coin.status = STATUS_SHORT if coin.short else STATUS_WATCHING
+
+        # Repair: accidental sibling wipe left a naked short still past recovery gates.
+        self._repair_naked_short_hedges(coin)
 
         if not coin.short and not coin.long1 and not coin.long2:
             return False
 
         return True
+
+    def _repair_naked_short_hedges(self, coin: CoinStrategy) -> None:
+        """Re-arm recovery longs wiped with the sibling on the shared LONG side.
+
+        Intentional LONG1_TP / LONG1_PULLBACK / LONG2_* exits keep was_closed=True.
+        SIBLING_WIPE clears was_closed so the surviving hedge can re-open while the
+        short is still underwater past its gate.
+        """
+        if not coin.short or getattr(self._connector.cfg, "paper", False):
+            return
+        if self._exchange_has_long(coin.symbol):
+            return
+        adverse = self._short_adverse_pct(coin)
+        repaired = False
+        if (
+            coin.long1 is None
+            and coin.long1_was_closed
+            and coin.last_long1_exit_reason == "SIBLING_WIPE"
+            and adverse >= LONG1_ADVERSE_PCT
+        ):
+            coin.long1_was_closed = False
+            coin.last_long1_exit_reason = ""
+            repaired = True
+        if (
+            coin.long2 is None
+            and coin.long2_was_closed
+            and coin.last_long2_exit_reason == "SIBLING_WIPE"
+            and adverse >= LONG2_ADVERSE_PCT
+        ):
+            coin.long2_was_closed = False
+            coin.last_long2_exit_reason = ""
+            repaired = True
+        if repaired:
+            log.info(
+                "scanner %s hedge repair armed long1_closed=%s long2_closed=%s adverse=%.2f",
+                coin.symbol,
+                coin.long1_was_closed,
+                coin.long2_was_closed,
+                adverse,
+            )
+
+    def validate_open_pair_logic(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        """Audit open exchange positions against short-first rules."""
+        issues: list[dict[str, Any]] = []
+        with self._lock:
+            positions = self._exchange_positions()
+            by_sym: dict[str, list[dict[str, Any]]] = {}
+            for p in positions:
+                sym = str(p.get("symbol") or "").upper()
+                if not sym or float(p.get("volume") or 0) <= 1e-12:
+                    continue
+                if symbol and sym != symbol.upper():
+                    continue
+                by_sym.setdefault(sym, []).append(p)
+            for sym, legs in by_sym.items():
+                has_short = any(str(p.get("positionSide") or "").upper() == "SHORT" for p in legs)
+                has_long = any(str(p.get("positionSide") or "").upper() == "LONG" for p in legs)
+                coin = self._coins.get(sym)
+                if has_long and not has_short:
+                    issues.append({"symbol": sym, "issue": "orphan_long", "severity": "error"})
+                if has_short and coin and coin.short is None:
+                    issues.append({"symbol": sym, "issue": "short_not_adopted", "severity": "warn"})
+                if has_short and coin and coin.short:
+                    adverse = self._short_adverse_pct(coin)
+                    if (
+                        adverse >= LONG2_ADVERSE_PCT
+                        and not has_long
+                        and coin.long2 is None
+                        and coin.long2_was_closed
+                        and coin.last_long2_exit_reason == "SIBLING_WIPE"
+                    ):
+                        issues.append(
+                            {
+                                "symbol": sym,
+                                "issue": "missing_long2_after_wipe",
+                                "severity": "error",
+                                "adverse_pct": round(adverse, 3),
+                            }
+                        )
+                    elif adverse >= LONG1_ADVERSE_PCT and not has_long and coin.long1 is None and not coin.long1_was_closed:
+                        issues.append(
+                            {
+                                "symbol": sym,
+                                "issue": "long1_should_arm",
+                                "severity": "info",
+                                "adverse_pct": round(adverse, 3),
+                            }
+                        )
+                    issues.append(
+                        {
+                            "symbol": sym,
+                            "issue": "pair_state",
+                            "severity": "ok",
+                            "adverse_pct": round(adverse, 3),
+                            "has_long": has_long,
+                            "status": coin.status,
+                            "long1_closed": coin.long1_was_closed,
+                            "long2_closed": coin.long2_was_closed,
+                            "scanner_long1": coin.long1 is not None,
+                            "scanner_long2": coin.long2 is not None,
+                        }
+                    )
+        return issues
 
     def reconcile_from_exchange(self) -> dict[str, Any]:
         """Sync scanner state to Binance — flatten orphan longs, adopt live shorts, reset flat symbols."""
@@ -1397,6 +1548,8 @@ class MomentumScanner:
         coin.entry_submit_ms = 0
         coin.long1_submit_ms = 0
         coin.long2_submit_ms = 0
+        coin.last_long1_exit_reason = ""
+        coin.last_long2_exit_reason = ""
         coin.unrealized_pnl = 0.0
         coin.retrace_pct = 0.0
         self._in_flight.discard(coin.symbol)
@@ -1480,6 +1633,7 @@ class MomentumScanner:
             "signals": list(self._recent_signals),
             "blocks": self.trade_blocks(),
             "execution_events": self._engine.events()[:16],
+            "position_logic": self.validate_open_pair_logic(),
             "ts": int(time.time() * 1000),
         }
 
@@ -2247,10 +2401,16 @@ class MomentumScanner:
         close_blocked = self._close_backoff_active(sym)
         if (coin.short or coin.long1 or coin.long2) and not getattr(self._connector.cfg, "paper", False):
             if hasattr(self._connector, "ensure_exchange_leverage"):
-                from leverage_policy import symbol_exchange_leverage
+                from leverage_policy import LONG1_LEVERAGE, symbol_exchange_leverage
 
                 has_long = bool(coin.long1) or bool(coin.long2)
-                self._connector.ensure_exchange_leverage(sym, symbol_exchange_leverage(has_recovery_long=has_long))
+                # Isolated margin cannot reduce 10x→5x with an open short — keep 10x while
+                # the primary short lives to avoid a per-tick leverage warning storm.
+                if coin.short and not has_long:
+                    target = LONG1_LEVERAGE
+                else:
+                    target = symbol_exchange_leverage(has_recovery_long=has_long)
+                self._connector.ensure_exchange_leverage(sym, target)
 
         price = coin.price
         if not coin.short and not coin.long1 and not coin.long2:
@@ -2364,6 +2524,47 @@ class MomentumScanner:
                 self._close_all(coin, short_exit_reason)
                 return
 
+    def _safe_recovery_close_qty(
+        self,
+        symbol: str,
+        close_vol: float,
+        sibling_qty: float,
+    ) -> float | None:
+        """
+        Cap a Long1/Long2 partial close so the sibling share of the shared LONG survives.
+
+        Returns the safe close qty, or None when the close must be refused to avoid a wipe.
+        AKEUSDT regression: never close more than (exchange_long - sibling_qty).
+        """
+        sym = symbol.upper()
+        qty = max(float(close_vol or 0), 0.0)
+        if qty <= 0:
+            return None
+        if getattr(self._connector.cfg, "paper", False):
+            return qty
+        ex_long = 0.0
+        fn = getattr(self._connector, "exchange_long_qty", None)
+        if callable(fn):
+            ex_long = float(fn(sym) or 0)
+        sib = max(float(sibling_qty or 0), 0.0)
+        max_close = max(0.0, ex_long - sib)
+        if max_close > 1e-12:
+            if qty > max_close + 1e-12:
+                log.warning(
+                    "scanner %s close_vol capped %.6f -> %.6f to preserve sibling",
+                    sym,
+                    qty,
+                    max_close,
+                )
+            return min(qty, max_close)
+        if ex_long > 1e-12:
+            log.warning(
+                "scanner %s refuse close — cannot preserve sibling long qty",
+                sym,
+            )
+            return None
+        return qty
+
     def _close_leg(self, coin: CoinStrategy, leg_name: str, reason: str = "", *, force: bool = False) -> None:
         sym = coin.symbol
         if not force and self._close_backoff_active(sym):
@@ -2382,6 +2583,7 @@ class MomentumScanner:
         if leg_name == "short" and (coin.long1 or coin.long2):
             self._close_all(coin, f"{reason or 'SHORT_CLOSE'}_ORPHAN_FLATTEN", force=force)
             return
+        reopen_after_wipe = False
         pair_gate.begin_close(sym)
         try:
             # Primary short: flatten the full SHORT side (dust-safe).
@@ -2398,6 +2600,10 @@ class MomentumScanner:
                 if close_vol <= 0:
                     log.warning("scanner close leg %s %s: missing qty with sibling long open", sym, leg_name)
                     return
+                safe = self._safe_recovery_close_qty(sym, close_vol, float(sibling_long.qty or 0))
+                if safe is None:
+                    return
+                close_vol = safe
 
             if hasattr(self._connector, "close_by_position_side"):
                 if leg.side == "SELL":
@@ -2441,20 +2647,28 @@ class MomentumScanner:
                             log.warning("scanner force flatten long %s: %s", sym, e)
                             return
                     elif sibling_long is not None and not still_long:
-                        # Partial close took the whole long — sibling is gone on exchange.
+                        # Partial close took the whole long — sibling was wiped, not exited.
+                        wiped = "long2" if leg_name == "long1" else "long1"
                         log.warning(
-                            "scanner %s %s close flattened shared LONG — clearing sibling recovery leg",
+                            "scanner %s %s close flattened shared LONG — sibling %s wiped, will re-arm",
                             sym,
                             leg_name,
+                            wiped,
                         )
                         if leg_name == "long1":
                             coin.long2 = None
                             coin.long2_peak_price = None
-                            coin.long2_was_closed = True
+                            coin.long2_was_closed = False
+                            coin.last_long2_exit_reason = "SIBLING_WIPE"
+                            coin.submitted_long2_signal_id = ""
+                            coin.long2_submit_ms = 0
                         else:
                             coin.long1 = None
                             coin.long1_peak_price = None
-                            coin.long1_was_closed = True
+                            coin.long1_was_closed = False
+                            coin.last_long1_exit_reason = "SIBLING_WIPE"
+                            coin.submitted_long1_signal_id = ""
+                            coin.long1_submit_ms = 0
             if leg_name == "short":
                 coin.short = None
                 coin.short_trough_price = None
@@ -2464,11 +2678,13 @@ class MomentumScanner:
                 coin.long1 = None
                 coin.long1_peak_price = None
                 coin.long1_was_closed = True
+                coin.last_long1_exit_reason = reason or coin.last_long1_exit_reason or "LONG1_CLOSE"
                 coin.status = STATUS_LONG2 if coin.long2 else (STATUS_SHORT if coin.short else STATUS_CLOSED)
             elif leg_name == "long2":
                 coin.long2 = None
                 coin.long2_peak_price = None
                 coin.long2_was_closed = True
+                coin.last_long2_exit_reason = reason or coin.last_long2_exit_reason or "LONG2_CLOSE"
                 coin.status = STATUS_LONG1 if coin.long1 else (STATUS_SHORT if coin.short else STATUS_CLOSED)
             # Shared LONG went flat — drop any phantom recovery sibling.
             if leg.side == "BUY" and not getattr(self._connector.cfg, "paper", False):
@@ -2476,19 +2692,46 @@ class MomentumScanner:
                     if coin.long1:
                         coin.long1 = None
                         coin.long1_peak_price = None
-                        coin.long1_was_closed = True
+                        # Only mark closed if this close targeted long1; else sibling wipe.
+                        if leg_name == "long1":
+                            coin.long1_was_closed = True
+                            if not coin.last_long1_exit_reason:
+                                coin.last_long1_exit_reason = reason or "LONG1_CLOSE"
+                        else:
+                            coin.long1_was_closed = False
+                            coin.last_long1_exit_reason = "SIBLING_WIPE"
                     if coin.long2:
                         coin.long2 = None
                         coin.long2_peak_price = None
-                        coin.long2_was_closed = True
+                        if leg_name == "long2":
+                            coin.long2_was_closed = True
+                            if not coin.last_long2_exit_reason:
+                                coin.last_long2_exit_reason = reason or "LONG2_CLOSE"
+                        else:
+                            coin.long2_was_closed = False
+                            coin.last_long2_exit_reason = "SIBLING_WIPE"
                     coin.status = STATUS_SHORT if coin.short else STATUS_CLOSED
             self._clear_close_backoff(sym)
             self._refresh_exchange_tps(coin)
             self._connector.invalidate_positions_cache()
             if reason:
                 log.info("scanner closed leg %s %s reason=%s", sym, leg_name, reason)
+            reopen_after_wipe = (
+                coin.short is not None
+                and (
+                    coin.last_long1_exit_reason == "SIBLING_WIPE"
+                    or coin.last_long2_exit_reason == "SIBLING_WIPE"
+                )
+            )
         finally:
             pair_gate.end_close(sym)
+        # Re-arm only after close_pending clears — otherwise opens are blocked.
+        if reopen_after_wipe:
+            self._repair_naked_short_hedges(coin)
+            if coin.long1 is None and not coin.long1_was_closed and self._long1_entry_allowed(coin):
+                self._try_open_long1(coin)
+            if coin.long2 is None and not coin.long2_was_closed and self._long2_entry_allowed(coin):
+                self._try_open_long2(coin)
 
     def _close_succeeded(self, close_result: dict[str, Any], symbol: str | None = None) -> bool:
         """Only treat flatten as success when exchange is actually flat (or already_flat)."""

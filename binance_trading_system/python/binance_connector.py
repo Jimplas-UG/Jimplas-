@@ -186,6 +186,7 @@ class BinanceConnector:
         self._all_specs_cache: dict[str, dict[str, Any]] = {}
         self._all_specs_loaded_at = 0.0
         self._prepared_cache: dict[tuple[str, int, str], float] = {}
+        self._leverage_fail_cache: dict[tuple[str, str], float] = {}
         self._http_conn: http.client.HTTPSConnection | None = None
         self._http_host: str = ""
         self._positions_cache: list[dict[str, Any]] | None = None
@@ -1356,6 +1357,30 @@ class BinanceConnector:
             self.cfg.leverage = target
             self._prepared_cache[(sym, target, "ISOLATED")] = time.time()
             return True
+        # Isolated + open position: Binance rejects leverage reductions. Keep the higher
+        # exchange leverage and stop retrying until the symbol is flat.
+        if current > target:
+            fail_key = (sym, "reduce_blocked")
+            last = float(self._leverage_fail_cache.get(fail_key) or 0.0)
+            if time.time() - last < 300.0:
+                self.cfg.leverage = current
+                return True
+            open_legs = [
+                p
+                for p in self.positions(sym, force=False)
+                if float(p.get("volume") or 0) > 1e-12
+            ]
+            if open_legs:
+                self._leverage_fail_cache[fail_key] = time.time()
+                log.info(
+                    "exchange leverage %s stays %sx (cannot reduce to %sx with open position)",
+                    sym,
+                    current,
+                    target,
+                )
+                self.cfg.leverage = current
+                self._prepared_cache[(sym, current, "ISOLATED")] = time.time()
+                return True
         try:
             self._request(
                 "POST",
@@ -1367,9 +1392,21 @@ class BinanceConnector:
             self.cfg.symbol = sym
             self._prepared_cache = {k: v for k, v in self._prepared_cache.items() if k[0] != sym}
             self._prepared_cache[(sym, target, "ISOLATED")] = time.time()
+            self._leverage_fail_cache.pop((sym, "reduce_blocked"), None)
             log.info("exchange leverage %s set %sx -> %sx", sym, current, target)
             return True
         except RuntimeError as e:
+            msg = str(e)
+            if "Leverage reduction is not supported" in msg or "-2027" in msg or "-4141" in msg:
+                self._leverage_fail_cache[(sym, "reduce_blocked")] = time.time()
+                self.cfg.leverage = current
+                self._prepared_cache[(sym, current, "ISOLATED")] = time.time()
+                log.info(
+                    "exchange leverage %s keep %sx — reduction blocked with open position",
+                    sym,
+                    current,
+                )
+                return True
             log.warning("ensure_exchange_leverage %s: %s", sym, e)
             return False
 

@@ -8,6 +8,8 @@ the live modules still match the working contract:
   +2% adverse from short → Long 1 BUY (40%, 10x), close on 0.5% peak retrace
   +4% adverse from short → Long 2 BUY (40%, 10x), close on 0.5% peak retrace
   Short TP −2.5%; never leave orphan longs without the primary short
+  Shared LONG close must never wipe/retire the sibling recovery leg
+  (Long1 close must not permanently kill Long2, and vice versa)
 
 If assert_frozen_contract() fails, the bridge must not silently trade a drifted policy.
 """
@@ -146,6 +148,15 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert hasattr(ms.MomentumScanner, "_try_open_long1")
     assert hasattr(ms.MomentumScanner, "_try_open_long2")
     assert hasattr(ms.MomentumScanner, "adopt_open_strategies_from_exchange")
+
+    # AKEUSDT regression lock: sibling wipe on shared LONG must re-arm, never retire.
+    assert hasattr(ms.MomentumScanner, "_repair_naked_short_hedges")
+    assert hasattr(ms.MomentumScanner, "_safe_recovery_close_qty")
+    assert hasattr(ms.MomentumScanner, "validate_open_pair_logic")
+    src = open(ms.__file__, encoding="utf-8").read()
+    assert "SIBLING_WIPE" in src, "sibling-wipe re-arm marker missing from momentum_scanner"
+    assert "preserve sibling" in src, "safe recovery close qty guard missing"
+    assert "def _safe_recovery_close_qty" in src
 
     return frozen_contract_snapshot()
 

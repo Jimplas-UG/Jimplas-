@@ -88,10 +88,22 @@ def test_snapshot_unchanged() -> None:
     print("OK frozen snapshot is stable")
 
 
+def test_sibling_wipe_guards_locked_in_frozen_contract() -> None:
+    from frozen_strategy import assert_frozen_contract
+    import momentum_scanner as ms
+
+    assert_frozen_contract()
+    # Guard methods must remain callable — removing them breaks startup.
+    assert callable(getattr(ms.MomentumScanner, "_safe_recovery_close_qty"))
+    assert callable(getattr(ms.MomentumScanner, "_repair_naked_short_hedges"))
+    print("OK frozen contract locks sibling-wipe guards")
+
+
 if __name__ == "__main__":
     test_frozen_contract_matches_live_modules()
     test_forbidden_long_first_labels_rejected()
     test_execution_engine_still_short_first()
     test_scanner_status_exposes_strategy_id()
     test_snapshot_unchanged()
+    test_sibling_wipe_guards_locked_in_frozen_contract()
     print("test_frozen_strategy: ALL OK")

@@ -286,6 +286,121 @@ def test_manage_still_arms_long1_during_close_backoff() -> None:
     print("OK close backoff: Long 1 entry still runs")
 
 
+def test_adopt_single_long_past_4pct_as_long2() -> None:
+    """One-partition long with short already +4% adverse → Long 2, not a fake Long 1."""
+    from momentum_scanner import LONG2_ADVERSE_PCT, STATUS_LONG2
+
+    entry = 0.05
+    price = entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.001)
+    conn = LiveConnector([_short_pos(entry=entry), _long_pos(entry=price, qty=800.0)])
+    sc = MomentumScanner(conn, lambda: False)
+    sc.load_symbols(["RIFUSDT"])
+    coin = sc._coins["RIFUSDT"]
+    coin.price = price
+    out = sc.adopt_open_strategies_from_exchange()
+    assert out["adopted_shorts"] == 1
+    assert coin.long1 is None, "must not mis-label the residual as Long 1"
+    assert coin.long1_was_closed is True
+    assert coin.long2 is not None and coin.status == STATUS_LONG2
+    print("OK adopt: +4% single long residual → Long 2")
+
+
+def test_adopt_long1_qty_excludes_existing_long2() -> None:
+    conn = LiveConnector(
+        [_short_pos(), _long_pos(qty=1600.0)]  # combined long
+    )
+    sc = MomentumScanner(conn, lambda: False)
+    sc.load_symbols(["RIFUSDT"])
+    coin = sc._coins["RIFUSDT"]
+    coin.price = 0.051
+    # Pretend Long 2 already recovered in memory.
+    from momentum_scanner import LegPosition, LONG2_LEVERAGE, MAGIC_LONG2
+
+    coin.short = None
+    sc.adopt_open_strategies_from_exchange()
+    assert coin.short is not None
+    # Force long2 present then re-adopt long1 attribution
+    coin.long2 = LegPosition("BUY", 0.051, 800.0, LONG2_LEVERAGE, MAGIC_LONG2, 0.052)
+    coin.long1 = None
+    assert sc._adopt_exchange_long1(coin, "RIFUSDT", 1600.0, 0.051, 0.052)
+    assert abs(coin.long1.qty - 800.0) < 1e-6, coin.long1.qty
+    print("OK adopt: Long1 qty excludes existing Long2 share")
+
+
+def test_sibling_wipe_marks_rearm_not_closed() -> None:
+    """Closing Long1 must not permanently retire Long2 if the shared LONG was wiped."""
+    from momentum_scanner import LegPosition, LONG1_LEVERAGE, LONG2_LEVERAGE, MAGIC_LONG1, MAGIC_LONG2
+
+    class WipeConnector(LiveConnector):
+        def close_by_position_side(self, symbol, position_side, volume=None) -> dict:
+            # Simulate exchange wiping the whole LONG regardless of partial volume.
+            self._positions = [p for p in self._positions if str(p.get("positionSide")) != "LONG"]
+            return {"ok": True, "closed": [{"symbol": symbol, "position_side": position_side}]}
+
+        def exchange_long_qty(self, symbol=None) -> float:
+            return sum(
+                float(p.get("volume") or 0)
+                for p in self.positions(symbol)
+                if str(p.get("positionSide") or "").upper() == "LONG"
+            )
+
+    conn = WipeConnector([_short_pos(), _long_pos(qty=1600.0)])
+    sc = MomentumScanner(conn, lambda: False)
+    sc.load_symbols(["RIFUSDT"])
+    sc.adopt_open_strategies_from_exchange()
+    coin = sc._coins["RIFUSDT"]
+    coin.short_opened_ms = int(time.time() * 1000) - 60_000
+    coin.long1 = LegPosition("BUY", 0.051, 800.0, LONG1_LEVERAGE, MAGIC_LONG1, 0.052)
+    coin.long2 = LegPosition("BUY", 0.052, 800.0, LONG2_LEVERAGE, MAGIC_LONG2, 0.053)
+    coin.long1_opened_ms = int(time.time() * 1000) - 60_000
+    coin.long2_opened_ms = int(time.time() * 1000) - 60_000
+    coin.price = 0.05 * 1.045
+
+    reopened: list[str] = []
+    sc._try_open_long2 = lambda c: reopened.append("long2")  # type: ignore[method-assign]
+    sc._try_open_long1 = lambda c: reopened.append("long1")  # type: ignore[method-assign]
+    sc._close_leg(coin, "long1", reason="LONG1_PULLBACK")
+    assert coin.long2 is None
+    assert coin.long2_was_closed is False
+    assert coin.last_long2_exit_reason == "SIBLING_WIPE"
+    assert "long2" in reopened, reopened
+    print("OK close: sibling wipe re-arms Long2 instead of retiring it")
+
+
+def test_close_vol_caps_to_preserve_sibling() -> None:
+    from momentum_scanner import LegPosition, LONG1_LEVERAGE, LONG2_LEVERAGE, MAGIC_LONG1, MAGIC_LONG2
+
+    class CapConnector(LiveConnector):
+        def __init__(self) -> None:
+            super().__init__([_short_pos(), _long_pos(qty=1600.0)])
+            self.last_close_vol = None
+
+        def close_by_position_side(self, symbol, position_side, volume=None) -> dict:
+            self.last_close_vol = volume
+            # Leave sibling residual on exchange.
+            for p in self._positions:
+                if str(p.get("positionSide")) == "LONG":
+                    p["volume"] = 800.0
+            return {"ok": True, "closed": [{"symbol": symbol}]}
+
+        def exchange_long_qty(self, symbol=None) -> float:
+            return 1600.0
+
+    conn = CapConnector()
+    sc = MomentumScanner(conn, lambda: False)
+    sc.load_symbols(["RIFUSDT"])
+    sc.adopt_open_strategies_from_exchange()
+    coin = sc._coins["RIFUSDT"]
+    # Inflated Long1 qty that would wipe sibling if uncapped.
+    coin.long1 = LegPosition("BUY", 0.051, 1600.0, LONG1_LEVERAGE, MAGIC_LONG1, 0.052)
+    coin.long2 = LegPosition("BUY", 0.052, 800.0, LONG2_LEVERAGE, MAGIC_LONG2, 0.053)
+    sc._close_leg(coin, "long1", reason="LONG1_PULLBACK")
+    assert conn.last_close_vol is not None
+    assert conn.last_close_vol <= 800.0 + 1e-6, conn.last_close_vol
+    assert coin.long2 is not None, "sibling must survive capped close"
+    print("OK close: volume capped to preserve sibling long")
+
+
 if __name__ == "__main__":
     try:
         test_adopt_short_from_empty_scanner()
@@ -300,6 +415,10 @@ if __name__ == "__main__":
         test_close_failure_backoff_blocks_retry_storm()
         test_close_backoff_grows_and_clears()
         test_manage_still_arms_long1_during_close_backoff()
+        test_adopt_single_long_past_4pct_as_long2()
+        test_adopt_long1_qty_excludes_existing_long2()
+        test_sibling_wipe_marks_rearm_not_closed()
+        test_close_vol_caps_to_preserve_sibling()
     except AssertionError as e:
         print("FAIL", e, file=sys.stderr)
         raise SystemExit(1)
