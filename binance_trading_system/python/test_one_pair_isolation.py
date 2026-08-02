@@ -66,6 +66,34 @@ def test_close_all_blocks_opens() -> None:
     assert ok
 
 
+def test_stale_close_all_releases_when_flat() -> None:
+    import time as _t
+
+    from pair_isolation import CLOSE_GATE_FLAT_RELEASE_MS
+
+    gate = PairIsolationGate()
+    gate.begin_close_all(["AKEUSDT"])
+    # Simulate a gate that has been stuck longer than the flat-release window.
+    gate._global_close_all_ms = int(_t.time() * 1000) - (CLOSE_GATE_FLAT_RELEASE_MS + 1000)
+    gate._close_started_ms["AKEUSDT"] = gate._global_close_all_ms
+    released = gate.release_stale_close_gates(lambda: [])
+    assert released.get("cleared_close_all") is True
+    ok, _ = gate.can_open("ETHUSDT", lambda: None, lambda: [])
+    assert ok
+    print("OK stale close_all releases when flat")
+
+
+def test_force_clear_close_gates() -> None:
+    gate = PairIsolationGate()
+    gate.begin_close_all(["X"])
+    gate.begin_close("YUSDT")
+    out = gate.force_clear_close_gates("test")
+    assert out["cleared_close_all"] is True
+    assert not gate.is_close_pending("YUSDT")
+    ok, _ = gate.can_open("ETHUSDT", lambda: None, lambda: [])
+    assert ok
+
+
 def main() -> int:
     tests = [
         test_blocks_second_symbol,
@@ -74,6 +102,8 @@ def main() -> int:
         test_exchange_position_blocks,
         test_nested_close_refcount,
         test_close_all_blocks_opens,
+        test_stale_close_all_releases_when_flat,
+        test_force_clear_close_gates,
     ]
     failed = 0
     for t in tests:

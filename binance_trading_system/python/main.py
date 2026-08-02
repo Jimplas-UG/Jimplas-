@@ -422,6 +422,9 @@ async def lifespan(app: FastAPI):
     async def startup_session_and_recovery() -> None:
         await restore_persisted_session()
         try:
+            # Never inherit a stuck close_all gate across process lifetime issues —
+            # gate is in-memory, but release any accidental leftover after warm start.
+            pair_gate.force_clear_close_gates("startup")
             snap = connector.status_snapshot(skip_ping=True, light=True)
             if snap.get("connected"):
                 log.info("scanner ready for execution (Binance session active)")
@@ -436,6 +439,7 @@ async def lifespan(app: FastAPI):
                 )
                 log.info("startup adopt: %s", adopted)
                 await asyncio.to_thread(momentum_scanner.reconcile_from_exchange)
+                pair_gate.release_stale_close_gates(lambda: connector.positions() or [])
                 _flush_scanner_snapshot()
         except Exception as e:
             log.warning("scanner exec restore on startup skipped: %s", e)
@@ -1257,9 +1261,23 @@ def api_close_all():
             r["ok"] = bool(r2.get("ok")) and not r2.get("remaining")
             r["errors"] = r2.get("errors") or r.get("errors")
             r["remaining"] = r2.get("remaining")
-            flat = bool(r.get("ok"))
+            flat = bool(r.get("ok")) and not r.get("remaining")
+        # Re-check live — if account is flat, never leave close_all_pending stuck.
+        try:
+            left = [
+                p
+                for p in (connector.positions(force=True) or [])
+                if float(p.get("volume") or 0) > 1e-12
+            ]
+            if not left:
+                flat = True
+                r["ok"] = True
+                r["remaining"] = []
+        except Exception as e:
+            log.warning("close-all flat recheck: %s", e)
         if not flat:
             # Keep gate pending so scanner cannot open while leftovers exist.
+            # Stale release (TTL / flat heal) will clear it once exchange is empty.
             raise HTTPException(status_code=400, detail=r)
     except HTTPException:
         raise
@@ -1268,6 +1286,9 @@ def api_close_all():
     finally:
         if flat:
             pair_gate.end_close_all(open_syms or ["*"])
+        else:
+            # Heal immediately if somehow already flat despite flat=False.
+            pair_gate.release_stale_close_gates(lambda: connector.positions(force=True) or [])
 
     # Sync scanner reset BEFORE bg work — prevents instant re-entry on the flattened symbol.
     try:
