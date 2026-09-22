@@ -271,20 +271,22 @@ class ExecutionEngine:
         if max_open > 0:
             leg_u = (signal.leg or "").upper()
             side_u = signal.side.upper()
-            # Same-symbol recovery longs are exempt; primary short / standalone legs count.
-            is_recovery_long = side_u == "BUY" and leg_u in ("LONG1", "LONG2")
-            if not is_recovery_long and self._open_trade_count() >= max_open:
+            # Same-symbol recovery shorts are exempt; primary long / standalone legs count.
+            is_recovery_short = side_u == "SELL" and leg_u in ("SHORT", "LONG1", "LONG2")
+            if not is_recovery_short and self._open_trade_count() >= max_open:
                 return "max_open_trades"
         return None
 
     def _validate_short_first(self, signal: ExecutionSignal) -> str | None:
-        """Short-first scanner: only recovery LONG1/LONG2 (or desk MANUAL) may BUY."""
+        """Long-first scanner: primary LONG1 BUY; desk MANUAL may BUY or SELL."""
         side = signal.side.upper()
         leg = (signal.leg or "").upper()
         if side != "BUY":
             return None
-        if leg in ("LONG1", "LONG2", "MANUAL"):
+        if leg in ("LONG1", "MANUAL"):
             return None
+        if leg == "LONG2":
+            return "buy_blocked_not_primary_long"
         return "buy_blocked_short_first_policy"
 
     def _validate_scanner_leg(self, signal: ExecutionSignal) -> str | None:

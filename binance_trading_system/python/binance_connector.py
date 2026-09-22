@@ -161,15 +161,17 @@ def build_limit_ioc_candidates(
 def close_leg_sides(magic: int) -> tuple[str, str] | None:
     """Order side + hedge positionSide needed to close a scanner leg by MAGIC.
 
-    MAGIC_SHORT=88001 is the primary short → BUY back the SHORT side.
-    MAGIC_LONG1=88002 / MAGIC_LONG2=88003 are recovery longs → SELL the LONG side.
+    Long-first:
+      MAGIC_LONG1=88002 primary Long → SELL the LONG side
+      MAGIC_SHORT=88001 Short 1 → BUY back the SHORT side
+      MAGIC_LONG2=88003 Short 2 → BUY back the SHORT side
     Returns None for unknown magics so callers fall back to a full symbol close.
     """
     magic_i = int(magic)
-    if magic_i == 88001:
-        return "BUY", "SHORT"
-    if magic_i in (88002, 88003):
+    if magic_i == 88002:
         return "SELL", "LONG"
+    if magic_i in (88001, 88003):
+        return "BUY", "SHORT"
     return None
 
 
