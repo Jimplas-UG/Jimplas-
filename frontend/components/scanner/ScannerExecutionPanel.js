@@ -110,8 +110,8 @@ export default function ScannerExecutionPanel({ rows, scannerMeta, ready, execut
     <PilotCard style={{ marginBottom: spacing.md, padding: spacing.md }}>
       <PilotSectionTitle title="Execution queue" />
       <Text style={{ color: C.dim, fontSize: 11, lineHeight: 16, marginBottom: spacing.sm }}>
-        Long when a symbol gains ≥{GAIN_THRESHOLD_PCT}% (1m–15m), then retraces {RETRACE_ENTRY_PCT}% from the peak.
-        Recovery shorts open at −2% and −4% against the long entry.
+        Short when a symbol gains ≥{GAIN_THRESHOLD_PCT}% (1m–15m), then retraces {RETRACE_ENTRY_PCT}% from the peak.
+        Recovery longs open at +2% and +4% against the short entry.
       </Text>
 
       {!ready ? (

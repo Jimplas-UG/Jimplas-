@@ -1,17 +1,17 @@
-/** Scanner execution queue helpers — Watching / Pending long entries. */
+/** Scanner execution queue helpers — Watching / Pending short entries. */
 
 export const RETRACE_ENTRY_PCT = 0.7;
 export const GAIN_THRESHOLD_PCT = 5.0;
 
-/** Live trade statuses from the Python scanner (Long → Short 1 → Short 2). */
-export const ACTIVE_TRADE_STATUSES = new Set(['Long', 'Short 1', 'Short 2']);
+/** Live trade statuses from the Python scanner (Short → Long 1 → Long 2). */
+export const ACTIVE_TRADE_STATUSES = new Set(['Short', 'Long 1', 'Long 2']);
 
 const STATUS_RANK = {
   Pending: 0,
   Watching: 1,
-  Long: 2,
-  'Short 1': 3,
-  'Short 2': 4,
+  Short: 2,
+  'Long 1': 3,
+  'Long 2': 4,
 };
 
 const QUEUE_STATUSES = new Set(['Watching', 'Pending']);
@@ -19,9 +19,9 @@ const QUEUE_STATUSES = new Set(['Watching', 'Pending']);
 /** Normalize legacy scanner status strings for display and sorting. */
 export function normalizeScannerStatus(status) {
   const s = String(status || '');
-  if (s === 'Long 1' || s === 'Long1') return 'Long';
-  if (s === 'Short' || s === 'SHORT') return 'Short 1';
-  if (s === 'Long 2' || s === 'Long2') return 'Short 2';
+  if (s === 'Short 1' || s === 'Short1' || s === 'SHORT') return 'Short';
+  if (s === 'Long1' || s === 'Long' || s === 'LONG') return 'Long 1';
+  if (s === 'Short 2' || s === 'Short2' || s === 'Long2') return 'Long 2';
   return s;
 }
 
@@ -55,7 +55,7 @@ export function pickPrimaryExecutionCandidate(rows, scannerMeta) {
 export function executionStatusHint(row) {
   if (!row) return '';
   if (row.status === 'Pending') {
-    return `Retrace ${Number(row.retracePct ?? 0).toFixed(2)}% ≥ ${RETRACE_ENTRY_PCT}% — armed for long entry`;
+    return `Retrace ${Number(row.retracePct ?? 0).toFixed(2)}% ≥ ${RETRACE_ENTRY_PCT}% — armed for short entry`;
   }
   if (row.status === 'Watching') {
     const retrace = Number(row.retracePct ?? 0);

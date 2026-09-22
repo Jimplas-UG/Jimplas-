@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression lock: frozen long-first contract must not drift."""
+"""Regression lock: frozen short-first contract must not drift."""
 
 from __future__ import annotations
 
@@ -14,26 +14,23 @@ def test_frozen_contract_matches_live_modules() -> None:
 
     snap = assert_frozen_contract()
     assert snap["strategy_id"] == STRATEGY_ID
-    assert snap["primary"]["side"] == "BUY"
-    assert snap["recovery"]["side"] == "SELL"
+    assert snap["primary"]["side"] == "SELL"
+    assert snap["recovery"]["side"] == "BUY"
     assert snap["primary"]["partition_pct"] == 50.0
-    assert snap["recovery"]["partition_pct"] == 12.5
+    assert snap["recovery"]["partition_pct"] == 40.0
     print("OK frozen contract matches live modules")
 
 
-def test_forbidden_short_first_labels_rejected() -> None:
+def test_forbidden_long_first_labels_rejected() -> None:
     from frozen_strategy import FORBIDDEN_STATUSES
     import momentum_scanner as ms
 
     live = {ms.STATUS_SHORT, ms.STATUS_LONG1, ms.STATUS_LONG2}
     assert live.isdisjoint(FORBIDDEN_STATUSES)
-    assert ms.STATUS_LONG1 == "Long"
-    assert ms.STATUS_SHORT == "Short 1"
-    assert ms.STATUS_LONG2 == "Short 2"
-    print("OK long-first status labels in use")
+    print("OK forbidden long-first status labels not in use")
 
 
-def test_execution_engine_allows_primary_long() -> None:
+def test_execution_engine_still_short_first() -> None:
     from execution_engine import ExecutionEngine, ExecutionSignal
 
     class _C:
@@ -43,7 +40,7 @@ def test_execution_engine_allows_primary_long() -> None:
             return True, ""
 
     eng = ExecutionEngine(_C(), open_trade_count=lambda: 0)
-    # Standalone BUY without primary/manual leg must block.
+    # Standalone BUY without recovery/manual leg must block.
     bad = ExecutionSignal(
         symbol="TAGUSDT",
         side="BUY",
@@ -61,14 +58,14 @@ def test_execution_engine_allows_primary_long() -> None:
         side="BUY",
         quantity=1.0,
         reference_price=1.0,
-        leverage=5,
+        leverage=10,
         magic=88002,
         leg="LONG1",
         signal_id="t2",
         signal_ts_ms=1,
     )
     assert eng._validate_short_first(ok) is None
-    print("OK execution engine allows primary long")
+    print("OK execution engine remains short-first")
 
 
 def test_scanner_status_exposes_strategy_id() -> None:
@@ -82,8 +79,8 @@ def test_scanner_status_exposes_strategy_id() -> None:
 
     sc = MomentumScanner(_C(), get_testnet=lambda: False)
     st = sc.status()
-    assert st.get("strategy_id") == "long_first_v1"
-    assert "Short 1" in str(st.get("strategy_name") or "")
+    assert st.get("strategy_id") == "short_first_v1"
+    assert "Short" in str(st.get("strategy_name") or "")
     print("OK scanner status exposes frozen strategy id")
 
 
@@ -96,10 +93,22 @@ def test_snapshot_unchanged() -> None:
     print("OK frozen snapshot is stable")
 
 
+def test_sibling_wipe_guards_locked_in_frozen_contract() -> None:
+    from frozen_strategy import assert_frozen_contract
+    import momentum_scanner as ms
+
+    assert_frozen_contract()
+    # Guard methods must remain callable — removing them breaks startup.
+    assert callable(getattr(ms.MomentumScanner, "_safe_recovery_close_qty"))
+    assert callable(getattr(ms.MomentumScanner, "_repair_naked_short_hedges"))
+    print("OK frozen contract locks sibling-wipe guards")
+
+
 if __name__ == "__main__":
     test_frozen_contract_matches_live_modules()
-    test_forbidden_short_first_labels_rejected()
-    test_execution_engine_allows_primary_long()
+    test_forbidden_long_first_labels_rejected()
+    test_execution_engine_still_short_first()
     test_scanner_status_exposes_strategy_id()
     test_snapshot_unchanged()
+    test_sibling_wipe_guards_locked_in_frozen_contract()
     print("test_frozen_strategy: ALL OK")

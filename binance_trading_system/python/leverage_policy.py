@@ -1,12 +1,13 @@
 """
 Fixed per-leg leverage — institutional policy, no overrides.
 
-Primary long (LONG1 BUY): 5x sizing + Binance exchange leverage
-Recovery shorts (LONG1/LONG2 SELL): 10x sizing + Binance exchange leverage
-Manual SHORT: 5x
+Primary short (SHORT SELL): 5x sizing + Binance exchange leverage
+Recovery longs (LONG1 / LONG2 BUY): 10x sizing + Binance exchange leverage
+Manual desk order: 5x
 
-Note: Binance USDT-M sets one leverage per symbol. While Short 1/2 are open the
-symbol is at 10x (including any open long). After shorts close, long-only restores to 5x.
+Note: Binance USDT-M sets one leverage per symbol. While Long 1 / Long 2 are open the
+symbol is at 10x (including the primary short). After the longs close, short-only
+restores to 5x.
 """
 
 from __future__ import annotations
@@ -19,15 +20,14 @@ ALLOWED_LEVERAGES = frozenset({SHORT_LEVERAGE, LONG1_LEVERAGE})
 
 
 def sizing_leverage(leg: str, side: str = "") -> int | None:
-    """Leverage for notional / margin math — primary long 5x, recovery shorts 10x."""
+    """Leverage for notional / margin math — primary short 5x, recovery longs 10x."""
     leg_u = (leg or "").upper()
-    side_u = side.upper()
     if leg_u == "MANUAL":
         return SHORT_LEVERAGE
     if leg_u == "SHORT":
         return SHORT_LEVERAGE
     if leg_u == "LONG1":
-        return SHORT_LEVERAGE if side_u == "BUY" else LONG1_LEVERAGE
+        return LONG1_LEVERAGE
     if leg_u == "LONG2":
         return LONG2_LEVERAGE
     return None
@@ -39,7 +39,7 @@ def required_leverage(leg: str, side: str = "") -> int | None:
 
 
 def exchange_leverage(leg: str = "", side: str = "") -> int:
-    """Leverage sent to Binance /fapi/v1/leverage — Long 5x, recovery shorts 10x."""
+    """Leverage sent to Binance /fapi/v1/leverage — short 5x, recovery longs 10x."""
     required = sizing_leverage(leg, side)
     if required is not None:
         return required
@@ -47,17 +47,17 @@ def exchange_leverage(leg: str = "", side: str = "") -> int:
 
 
 def policy_display_leverage(*, side: str, position_side: str = "") -> int:
-    """UI/policy leverage: primary long 5x, recovery shorts 10x."""
+    """UI/policy leverage: primary short 5x, recovery longs 10x."""
     ps = (position_side or "").upper()
     side_u = side.upper()
     if ps == "SHORT" or side_u == "SELL":
-        return LONG1_LEVERAGE
-    return SHORT_LEVERAGE
+        return SHORT_LEVERAGE
+    return LONG1_LEVERAGE
 
 
-def symbol_exchange_leverage(*, has_recovery_short: bool) -> int:
+def symbol_exchange_leverage(*, has_recovery_long: bool) -> int:
     """Active symbol leverage on Binance while a strategy is open."""
-    return LONG1_LEVERAGE if has_recovery_short else SHORT_LEVERAGE
+    return LONG1_LEVERAGE if has_recovery_long else SHORT_LEVERAGE
 
 
 def apply_leverage_policy(leg: str, side: str, requested: int) -> int:

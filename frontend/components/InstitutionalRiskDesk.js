@@ -119,7 +119,7 @@ export default function InstitutionalRiskDesk({
       <View style={st.hero}>
         <Text style={[st.heroTitle, { color: C.text }]}>Risk settings</Text>
         <Text style={[st.heroSub, { color: C.dim }]}>
-          15m momentum entry — long 50%, recovery shorts 12.5% each · Isolated margin only
+          15m momentum entry — short 50%, recovery longs 40% each · Isolated margin only
         </Text>
       </View>
 
@@ -161,21 +161,21 @@ export default function InstitutionalRiskDesk({
         </View>
         <View style={st.metricGrid}>
           <MetricTile
-            label="Long"
+            label="Short"
             value={`${config.shortPartitionPct}%`}
             sub={fmtRiskUsd(metrics.shortLegUsd)}
             color={C.accentLight}
             C={C}
           />
           <MetricTile
-            label="Short 1"
+            label="Long 1"
             value={`${config.long1PartitionPct}%`}
             sub={fmtRiskUsd(metrics.long1LegUsd)}
             color={C.teal}
             C={C}
           />
           <MetricTile
-            label="Short 2"
+            label="Long 2"
             value={`${config.long2PartitionPct}%`}
             sub={fmtRiskUsd(metrics.long2LegUsd)}
             color={C.amber}
@@ -201,7 +201,8 @@ export default function InstitutionalRiskDesk({
         />
         {config.partitionLocked ? (
           <Text style={[st.ruleNote, { color: C.amber }]}>
-            Partition ${config.partitionUsd} subscribed and locked (50% long · 12.5% short 1 · 12.5% short 2).
+            Partition ${config.partitionUsd} subscribed and locked ({config.shortPartitionPct}% short ·{' '}
+            {config.long1PartitionPct}% long 1 · {config.long2PartitionPct}% long 2).
           </Text>
         ) : null}
         <Text style={[st.ruleNote, { color: C.dim }]}>
@@ -212,12 +213,12 @@ export default function InstitutionalRiskDesk({
       {/* Leverage + margin (Binance Futures) */}
       <RiskCard
         title="LEVERAGE POLICY"
-        badge={`LONG ${LEG_LEVERAGE_POLICY.short}x · SHORT ${LEG_LEVERAGE_POLICY.long1}x · ${config.marginMode}`}
+        badge={`SHORT ${LEG_LEVERAGE_POLICY.short}x · LONG ${LEG_LEVERAGE_POLICY.long1}x · ${config.marginMode}`}
         C={C}
       >
         <View style={st.metricGrid}>
-          <MetricTile label="Long entry" value={`${LEG_LEVERAGE_POLICY.short}x`} color={C.accentLight} C={C} />
-          <MetricTile label="Short 1 / Short 2" value={`${LEG_LEVERAGE_POLICY.long1}x`} color={C.accentLight} C={C} />
+          <MetricTile label="Short entry" value={`${LEG_LEVERAGE_POLICY.short}x`} color={C.accentLight} C={C} />
+          <MetricTile label="Long 1 / Long 2" value={`${LEG_LEVERAGE_POLICY.long1}x`} color={C.accentLight} C={C} />
           <MetricTile
             label="Active on Binance"
             value={`${metrics.activeLeverage}x`}
@@ -232,7 +233,7 @@ export default function InstitutionalRiskDesk({
           />
         </View>
         <Text style={[st.ruleNote, { color: C.dim }]}>
-          Fixed institutional policy — long opens at 5x; recovery shorts at 10x. Not configurable.
+          Fixed institutional policy — the short opens at 5x; recovery longs at 10x. Not configurable.
         </Text>
         <View style={[st.metricTile, { borderColor: C.border, width: '100%' }]}>
           <Text style={[st.metricLab, { color: C.dim }]}>Margin mode</Text>
