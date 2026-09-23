@@ -4,7 +4,8 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { EmailTokenRecord, OtpRecord, RefreshTokenRecord, UserRecord } from './types';
 
-const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../auth/data');
+const DATA_DIR = process.env.AUTH_DATA_DIR?.trim()
+  || path.join(path.dirname(fileURLToPath(import.meta.url)), '../../auth/data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const REFRESH_FILE = path.join(DATA_DIR, 'refresh_tokens.json');
 const OTP_FILE = path.join(DATA_DIR, 'otps.json');

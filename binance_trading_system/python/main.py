@@ -11,6 +11,7 @@ import re
 import time
 import asyncio
 import threading
+import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
@@ -34,11 +35,18 @@ from app_config import ensure_valid_or_exit, load_settings
 from logging_setup import setup_logging
 from session_store import clear_binance_session, load_binance_session, save_binance_session
 from frozen_strategy import verify_frozen_contract_or_raise
+from strategy_mode import strategy_mode_snapshot
 
 _settings = load_settings()
 setup_logging(_settings.log_dir, os.environ.get("LOG_LEVEL", "INFO"))
 log = logging.getLogger("binance_api")
 log.info("Bilshenz env=%s paper=%s testnet=%s", _settings.env, _settings.paper, _settings.testnet)
+_mode = strategy_mode_snapshot()
+log.info(
+    "strategy_mode=%s research_enabled=%s (live execution stays short_first_v1 until wired)",
+    _mode["strategy_mode"],
+    _mode["research_enabled"],
+)
 
 try:
     _frozen = verify_frozen_contract_or_raise()
@@ -61,7 +69,7 @@ except Exception as e:
     _frozen = None
 
 BRIDGE_TOKEN = _settings.bridge_token or os.environ.get("BRIDGE_TOKEN", "").strip()
-_PUBLIC_PATHS = frozenset({"/health", "/ping", "/docs", "/openapi.json"})
+_PUBLIC_PATHS = frozenset({"/health", "/health/ready", "/ping", "/docs", "/openapi.json"})
 # Unsigned Binance market data — safe without bridge token (home M30 feed).
 _PUBLIC_QUOTE_PREFIXES = ("/api/tick/", "/api/bars/", "/api/symbol/", "/api/scanner/", "/api/symbols")
 
@@ -78,6 +86,53 @@ _SENSITIVE_PATHS = frozenset({"/api/login", "/api/order", "/api/attach", "/api/l
 _TRADE_PATHS = frozenset({"/api/close", "/api/close-all", "/api/scanner/close"})
 _rate_buckets: dict[str, list[float]] = defaultdict(list)
 _DEFAULT_SYMBOL = (os.environ.get("BINANCE_SYMBOL") or "BTCUSDT").strip().upper()
+
+# Idempotent close ops — prevent duplicate MARKET closes from double-taps / retries.
+_close_ops_lock = threading.Lock()
+_close_ops: dict[str, dict[str, Any]] = {}
+_CLOSE_OP_TTL_S = 120.0
+
+
+def _close_op_prune(now: float | None = None) -> None:
+    t = now if now is not None else time.time()
+    dead = [k for k, v in _close_ops.items() if t - float(v.get("ts") or 0) > _CLOSE_OP_TTL_S]
+    for k in dead:
+        _close_ops.pop(k, None)
+
+
+def _close_op_begin(op_id: str) -> dict[str, Any] | None:
+    """Return cached result if replay; raise 409 if in-flight; else mark CLOSING."""
+    with _close_ops_lock:
+        _close_op_prune()
+        existing = _close_ops.get(op_id)
+        if existing:
+            st = str(existing.get("status") or "")
+            if st == "CLOSED" and isinstance(existing.get("result"), dict):
+                return dict(existing["result"])
+            if st == "CLOSING":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "ok": False,
+                        "error": "close_in_progress",
+                        "close_operation_id": op_id,
+                        "status": "CLOSING",
+                    },
+                )
+            if st == "CLOSE_FAILED" and isinstance(existing.get("result"), dict):
+                # Allow retry with same id after failure — clear and re-enter.
+                pass
+        _close_ops[op_id] = {"status": "CLOSING", "ts": time.time(), "result": None}
+    return None
+
+
+def _close_op_finish(op_id: str, *, ok: bool, result: dict[str, Any]) -> None:
+    with _close_ops_lock:
+        _close_ops[op_id] = {
+            "status": "CLOSED" if ok else "CLOSE_FAILED",
+            "ts": time.time(),
+            "result": dict(result),
+        }
 
 
 def _rate_ok(client_key: str, max_per_min: int = 20, *, path: str = "") -> bool:
@@ -321,9 +376,19 @@ async def lifespan(app: FastAPI):
                 "yes",
                 "on",
             )
+            # BINANCE_TESTNET=1 locks strategy testing to testnet (no silent mainnet fallback).
+            force_testnet = prefer_tn or os.environ.get("BINANCE_FORCE_TESTNET", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
             stored_tn = bool(stored.get("testnet", False))
-            # Prefer env network first; only hard-block testnet when FORCE_MAINNET=1.
-            if not prefer_tn and stored_tn and not force_mainnet:
+            if force_testnet and not force_mainnet:
+                if not stored_tn:
+                    log.warning("BINANCE_TESTNET=1 — ignoring persisted mainnet session; testnet only")
+                stored_tn = True
+            elif not prefer_tn and stored_tn and not force_mainnet:
                 log.warning("persisted session was testnet while BINANCE_TESTNET=0 — trying mainnet first")
                 stored_tn = False
             elif force_mainnet and stored_tn:
@@ -337,11 +402,13 @@ async def lifespan(app: FastAPI):
                     stored_tn,
                 )
                 # Keys often work on only one network — try the other before giving up,
-                # unless FORCE_MAINNET forbids testnet.
+                # unless FORCE_MAINNET / TESTNET locks the network.
                 if acct is None and _is_key_env_mismatch(err or ""):
                     alt_tn = not stored_tn
                     if force_mainnet and alt_tn:
                         log.error("mainnet keys required (BINANCE_FORCE_MAINNET=1) — not falling back to testnet")
+                    elif force_testnet and not alt_tn:
+                        log.error("BINANCE_TESTNET=1 — not falling back to mainnet")
                     else:
                         acct, err = await asyncio.to_thread(
                             _attempt_binance_login,
@@ -395,16 +462,24 @@ async def lifespan(app: FastAPI):
         env_secret = os.environ.get("BINANCE_API_SECRET", "").strip()
         if env_key and env_secret:
             prefer_tn = _env_testnet_default()
+            force_testnet = prefer_tn or os.environ.get("BINANCE_FORCE_TESTNET", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
             try:
                 acct, err = await asyncio.to_thread(
                     _attempt_binance_login, env_key, env_secret, prefer_tn
                 )
-                if acct is None and _is_key_env_mismatch(err or ""):
+                if acct is None and _is_key_env_mismatch(err or "") and not force_testnet:
                     acct, err = await asyncio.to_thread(
                         _attempt_binance_login, env_key, env_secret, not prefer_tn
                     )
                     if acct is not None:
                         prefer_tn = not prefer_tn
+                elif acct is None and force_testnet:
+                    log.error("BINANCE_TESTNET=1 — env keys must be from testnet.binancefuture.com")
                 if acct is not None:
                     await asyncio.to_thread(save_binance_session, env_key, env_secret, prefer_tn)
                     log.info(
@@ -559,6 +634,7 @@ class CloseBody(BaseModel):
     position_side: str | None = None
     volume: float | None = Field(None, gt=0)
     close_pair: bool = False
+    close_operation_id: str | None = Field(None, max_length=64, pattern=r"^[A-Za-z0-9_\-:.]{8,64}$")
 
 
 class MarginBody(BaseModel):
@@ -611,11 +687,31 @@ def health():
         "scanner_stream": scanner_stream.status(),
         "user_data_stream": user_data_stream.status(),
         "scanner": momentum_scanner.status(),
+        # Never call connector.positions() here — a Binance 418 used to sleep 60–300s
+        # inside /health and stall the whole bridge (WS reconnect felt frozen).
         "pair_isolation": pair_gate.status(
             momentum_scanner._global_active_symbol,
-            lambda: connector.positions(),
+            connector.cached_positions,
         ),
+        "rest_cool_s": round(connector.rest_cooling_left(), 1),
     }
+
+
+@app.get("/health/ready")
+def health_ready():
+    """Readiness — process up. Does not call Binance REST."""
+    connected = bool(getattr(connector, "_connected", False) and connector.cfg.api_key) or bool(
+        connector.cfg.paper
+    )
+    cool = round(connector.rest_cooling_left(), 1)
+    checks = {
+        "api": True,
+        "connector_ready": connected or bool(connector.cfg.api_key) or bool(connector.cfg.paper),
+        "tick_ws": bool(tick_stream.status().get("ws_connected")),
+        "rest_cool_s": cool,
+    }
+    ready = bool(checks["api"] and checks["connector_ready"] and cool <= 120)
+    return {"ok": ready, "ready": ready, "checks": checks}
 
 
 @app.get("/api/diagnostics")
@@ -749,8 +845,45 @@ async def ws_scanner(websocket: WebSocket):
 
 def _attempt_binance_login(api_key: str, api_secret: str, testnet: bool) -> tuple[dict[str, Any] | None, str | None]:
     t0 = time.perf_counter()
+    key = (api_key or "").strip()
+    secret = (api_secret or "").strip()
+    # Explicit Connect/Retry must be allowed to probe — clear stale cool first.
+    connector.clear_rest_cool()
+    # Already live with the same keys: return soft success without another REST hit
+    # when Binance is still rate-limiting the VPS IP.
+    same_keys = (
+        connector.cfg.api_key == key
+        and connector.cfg.api_secret == secret
+        and bool(connector.cfg.testnet) == bool(testnet)
+        and connector._connected
+    )
+    if same_keys:
+        cached = None
+        try:
+            cached = connector.account_info_light()
+        except Exception as e:
+            msg = str(e)
+            if "cooling" in msg.lower() or "418" in msg or "429" in msg:
+                log.info("login soft-ok during REST cool (session already live)")
+                return {
+                    "login": (key[:8] + "…") if key else "",
+                    "server": "testnet" if testnet else "mainnet",
+                    "balance": None,
+                    "equity": None,
+                    "margin": None,
+                    "margin_free": None,
+                    "profit": None,
+                    "currency": "USDT",
+                    "trade_allowed": True,
+                    "leverage": int(connector.cfg.leverage),
+                    "margin_type": connector.cfg.margin_type,
+                }, None
+            log.warning("login re-verify failed: %s", e)
+        if cached is not None:
+            return cached, None
+
     connector.cfg.paper = False
-    connector.configure(api_key, api_secret, testnet)
+    connector.configure(key, secret, testnet)
     try:
         acct = connector.account_info_light()
         connector._connected = acct is not None
@@ -764,6 +897,23 @@ def _attempt_binance_login(api_key: str, api_secret: str, testnet: bool) -> tupl
             )
         return acct, None
     except Exception as e:
+        msg = str(e)
+        # Keep prior session if re-login hits cool/ban mid-flight with same keys.
+        if same_keys or (
+            connector.cfg.api_key == key
+            and connector.cfg.api_secret == secret
+            and ("cooling" in msg.lower() or "418" in msg)
+        ):
+            connector._connected = True
+            log.info("login kept live session despite REST cool: %s", msg)
+            return {
+                "login": (key[:8] + "…") if key else "",
+                "server": "testnet" if testnet else "mainnet",
+                "currency": "USDT",
+                "trade_allowed": True,
+                "leverage": int(connector.cfg.leverage),
+                "margin_type": connector.cfg.margin_type,
+            }, None
         connector._connected = False
         log.warning(
             "login failed env=%s latency_ms=%.0f err=%s",
@@ -942,6 +1092,19 @@ def api_ready():
 @app.get("/api/status")
 def api_status():
     snap = connector.status_snapshot(skip_ping=connector._connected, light=connector._connected)
+    # During REST cool-down / transient Binance errors, keep connected=true when
+    # session keys are loaded — forward-bot otherwise idles forever.
+    if connector.cfg.api_key and connector.cfg.api_secret:
+        if connector._connected or snap.get("mode") not in ("unconfigured", None):
+            snap["connected"] = True
+            snap.setdefault("mode", "testnet" if connector.cfg.testnet else "live")
+            snap.setdefault("testnet", connector.cfg.testnet)
+            if not snap.get("account"):
+                snap["account"] = {
+                    "trade_allowed": True,
+                    "server": "testnet" if connector.cfg.testnet else "mainnet",
+                    "currency": "USDT",
+                }
     # Keep exec margin cache warm from status polls so manual taps skip account REST.
     try:
         acct = snap.get("account") or {}
@@ -951,11 +1114,24 @@ def api_status():
     except Exception:
         pass
     st = momentum_scanner.status()
+    cool = connector.rest_cooling_left()
+    link_health = "CONNECTED"
+    if not snap.get("connected"):
+        link_health = "DISCONNECTED"
+    elif cool > 0.5:
+        link_health = "DEGRADED"
+    elif snap.get("error"):
+        link_health = "DEGRADED"
     return {
         **snap,
+        "trade_allowed": True if snap.get("connected") else False,
         "exec_enabled": st.get("exec_enabled"),
         "can_execute": st.get("can_execute"),
         "exec_block": st.get("exec_block"),
+        "rest_cool_s": round(cool, 1),
+        "link_health": link_health,
+        "tick_stream": tick_stream.status(),
+        "user_data_stream": user_data_stream.status(),
     }
 
 
@@ -1034,11 +1210,30 @@ async def ws_tick(websocket: WebSocket, symbol: str):
 
 @app.get("/api/positions")
 def api_positions(symbol: str | None = None):
+    cool = connector.rest_cooling_left()
     try:
-        return {"ok": True, "positions": connector.positions(symbol)}
+        pos = connector.positions(symbol)
+        # During cool, connector may serve last-good without raising — flag for UI.
+        stale = cool > 0.5
+        return {
+            "ok": True,
+            "positions": pos,
+            "stale": stale,
+            "rest_cool_s": round(cool, 1),
+        }
     except Exception as e:
         log.warning("api_positions: %s", e)
-        return {"ok": False, "positions": [], "error": str(e)[:200]}
+        sticky = connector.last_good_positions()
+        if symbol:
+            sym_u = symbol.upper()
+            sticky = [p for p in sticky if str(p.get("symbol") or "").upper() == sym_u]
+        return {
+            "ok": False,
+            "positions": sticky,
+            "stale": bool(sticky),
+            "rest_cool_s": round(cool, 1),
+            "error": str(e)[:200],
+        }
 
 
 @app.post("/api/order")
@@ -1160,7 +1355,15 @@ def api_close(body: CloseBody):
     if os.environ.get("FORWARD_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
         raise HTTPException(status_code=403, detail={"ok": False, "error": "FORWARD_DRY_RUN", "dry_run": True})
     sym = body.symbol.upper()
+    op_id = (body.close_operation_id or "").strip() or f"close-{sym}-{uuid.uuid4().hex[:16]}"
+    cached = _close_op_begin(op_id)
+    if cached is not None:
+        log.info("close idempotent replay op=%s symbol=%s", op_id, sym)
+        return {**cached, "close_operation_id": op_id, "idempotent_replay": True}
+
+    t0 = time.perf_counter()
     pair_gate.begin_close(sym)
+    r: dict[str, Any] = {"ok": False, "broker": "binance"}
     try:
         if body.close_pair:
             coin = momentum_scanner._coins.get(sym)
@@ -1179,12 +1382,38 @@ def api_close(body: CloseBody):
                         r = {**r2, "closed": merged, "ok": bool(r2.get("ok"))}
             if not r.get("ok"):
                 err = r.get("error") or "close_failed"
-                raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
+                # Already flat on exchange — reconcile sticky state as success.
+                if r.get("already_flat") or err in ("nothing_to_close", "no_position"):
+                    connector.apply_symbol_positions_snapshot(sym, [])
+                    r = {
+                        "ok": True,
+                        "closed": [],
+                        "verified_flat": True,
+                        "remaining": [],
+                        "reconciled_already_flat": True,
+                        "broker": "binance",
+                    }
+                else:
+                    raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
         elif body.position_side:
             r = momentum_scanner.close_leg_manual(sym, body.position_side, body.volume)
             if not r.get("ok"):
                 err = r.get("error") or "close_failed"
-                raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
+                if r.get("already_flat") or str(err).startswith("no_"):
+                    # Exchange already flat for this leg — treat as closed + reconcile.
+                    left = connector.positions(sym, force=True)
+                    connector.apply_symbol_positions_snapshot(sym, left)
+                    r = {
+                        "ok": True,
+                        "closed": [],
+                        "verified_flat": len(left) == 0,
+                        "remaining": left,
+                        "reconciled_already_flat": True,
+                        "position_side": body.position_side,
+                        "broker": "binance",
+                    }
+                else:
+                    raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
         else:
             positions = connector.positions(sym, force=True)
             if len(positions) > 1:
@@ -1207,10 +1436,114 @@ def api_close(body: CloseBody):
                 r = connector.close_position(sym, None)
             if not r.get("ok"):
                 err = r.get("error") or "close_failed"
-                raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
+                if r.get("already_flat") or err in ("nothing_to_close", "no_position"):
+                    connector.apply_symbol_positions_snapshot(sym, [])
+                    r = {
+                        "ok": True,
+                        "closed": [],
+                        "verified_flat": True,
+                        "remaining": [],
+                        "reconciled_already_flat": True,
+                        "broker": "binance",
+                    }
+                else:
+                    raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
+
+        # Verify exchange state before telling the client CLOSED.
+        try:
+            remaining = connector.positions(sym, force=True)
+        except Exception as e:
+            log.warning("close verify positions %s: %s", sym, e)
+            remaining = None
+        if remaining is not None:
+            if body.close_pair or not body.position_side:
+                target_left = remaining
+            else:
+                ps = str(body.position_side).upper()
+                target_left = [
+                    p
+                    for p in remaining
+                    if str(p.get("positionSide") or "").upper() == ps
+                    or (
+                        ps == "SHORT"
+                        and str(p.get("type", "")).upper() == "SELL"
+                        and str(p.get("positionSide") or "SHORT").upper() != "LONG"
+                    )
+                    or (ps == "LONG" and str(p.get("type", "")).upper() == "BUY")
+                ]
+            # SHORT manual close flattens the pair — expect symbol flat.
+            if body.position_side and str(body.position_side).upper() == "SHORT":
+                target_left = remaining
+            r["remaining"] = [
+                {
+                    "position_side": p.get("positionSide"),
+                    "type": p.get("type"),
+                    "volume": p.get("volume"),
+                }
+                for p in (remaining or [])
+            ]
+            r["verified_flat"] = len(target_left) == 0
+            if target_left and not r.get("reconciled_already_flat"):
+                # Partial leftover — still report ok if we closed something, but flag pending.
+                r["status"] = "CLOSE_PENDING_VERIFY"
+                r["close_pending"] = True
+                log.warning(
+                    "CLOSE_PENDING_VERIFY op=%s symbol=%s side=%s remaining=%s",
+                    op_id,
+                    sym,
+                    body.position_side,
+                    r["remaining"],
+                )
+            else:
+                r["status"] = "CLOSED"
+        else:
+            r["status"] = "CLOSING"
+            r["verify_error"] = "position_query_failed"
+
         connector.invalidate_positions_cache()
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        r["latency_ms"] = r.get("latency_ms") or latency_ms
+        r["close_operation_id"] = op_id
+        r["timing"] = {
+            "server_received_ms": round(t0 * 1000),
+            "total_close_latency_ms": latency_ms,
+            "exchange_latency_ms": r.get("latency_ms"),
+            "status": r.get("status"),
+            "verified_flat": r.get("verified_flat"),
+        }
+        order_id = (r.get("closed") or [{}])[0].get("order") if r.get("closed") else r.get("order")
+        log.info(
+            "CLOSE_OK op=%s symbol=%s side=%s close_pair=%s order=%s latency_ms=%s status=%s verified_flat=%s",
+            op_id,
+            sym,
+            body.position_side,
+            body.close_pair,
+            order_id,
+            r.get("latency_ms"),
+            r.get("status"),
+            r.get("verified_flat"),
+        )
+        _close_op_finish(op_id, ok=True, result=r)
+    except HTTPException as he:
+        detail = he.detail if isinstance(he.detail, dict) else {"ok": False, "error": str(he.detail)}
+        detail = {**detail, "close_operation_id": op_id, "status": "CLOSE_FAILED"}
+        _close_op_finish(op_id, ok=False, result=detail)
+        log.warning(
+            "CLOSE_FAILED op=%s symbol=%s side=%s error=%s",
+            op_id,
+            sym,
+            body.position_side,
+            detail.get("error"),
+        )
+        raise HTTPException(status_code=he.status_code, detail=detail) from he
+    except Exception as e:
+        detail = {"ok": False, "error": str(e)[:200], "close_operation_id": op_id, "status": "CLOSE_FAILED"}
+        _close_op_finish(op_id, ok=False, result=detail)
+        log.exception("CLOSE_FAILED op=%s symbol=%s", op_id, sym)
+        raise HTTPException(status_code=400, detail=detail) from e
     finally:
         pair_gate.end_close(sym)
+
     pair_gate.record_order(
         symbol=sym,
         side="CLOSE_PAIR" if body.close_pair else f"CLOSE_{body.position_side or 'LEG'}",
@@ -1229,7 +1562,6 @@ def api_close(body: CloseBody):
 
     threading.Thread(target=_bg_after_manual_close, daemon=True, name="close-reconcile").start()
     return r
-
 
 @app.post("/api/close-all")
 def api_close_all():

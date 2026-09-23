@@ -12,6 +12,7 @@ export function useBrokerLiveFeed({
   symbol,
   pollTicks = true,
   loadBars = true,
+  pauseFeedUi = false,
 }) {
   const { setBaseUrl } = useBinanceBridge();
   const sym = symbol ?? defaultSymbolForBroker();
@@ -23,6 +24,7 @@ export function useBrokerLiveFeed({
     pollTicks,
     loadBars,
     publicQuotes: true,
+    pauseFeedUi,
     onBridgeUrlResolved: setBaseUrl,
   });
   return { ...feed, brokerMode: getBrokerMode(), isBinance: true };

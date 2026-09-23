@@ -1,5 +1,5 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState, startTransition } from 'react';
+import { View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { hideBootSplash } from './lib/bootSplash';
 import { shouldPlayOpening } from './lib/devPreview';
@@ -10,6 +10,9 @@ import AuthGate from './components/auth/AuthGate';
 import OnboardingGate, { useOnboardingDone } from './components/OnboardingGate';
 import AppBottomNav from './components/AppBottomNav';
 import ScannerScreen from './screens/ScannerScreen';
+import RiskScreen from './screens/RiskScreen';
+import TradeScreen from './screens/TradeScreen';
+import ProfileScreen from './screens/ProfileScreen';
 import { ThemeProvider, useBilshenzTheme } from './contexts/ThemeContext';
 import { AuthProvider } from './contexts/AuthContext';
 import { BinanceBridgeProvider, useBinanceBridge } from './contexts/BinanceBridgeContext';
@@ -17,53 +20,55 @@ import { DevPreviewProvider } from './contexts/DevPreviewContext';
 import { useTickScanner } from './hooks/useTickScanner';
 import { useDeskSession } from './hooks/useDeskSession';
 
-const RiskScreenLazy = lazy(() => import('./screens/RiskScreen'));
-const TradeScreenLazy = lazy(() => import('./screens/TradeScreen'));
-const ProfileScreenLazy = lazy(() => import('./screens/ProfileScreen'));
-
-const AppOpeningSplashLazy = lazy(() => import('./components/AppOpeningSplash'));
-
-function TabFallback() {
-  const { colors: C } = useBilshenzTheme();
-  return (
-    <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: C.appBg }}>
-      <ActivityIndicator color={C.goldL} />
-    </View>
-  );
-}
+// Opening splash stays lazy — not on the tab path.
+const AppOpeningSplash = React.lazy(() => import('./components/AppOpeningSplash'));
 
 function AppContent() {
   const { colors: C, styles } = useBilshenzTheme();
   const insets = useSafeAreaInsets();
   const { baseUrl, connected, sessionEpoch } = useBinanceBridge();
   const [tab, setTab] = useState('scanner');
-  const [mounted, setMounted] = useState({ scanner: true });
+  // Mount tabs on first visit only — shell/header/nav/feeds stay alive; no remount on return.
+  const [mounted, setMounted] = useState({
+    scanner: true,
+    risk: false,
+    trade: false,
+    profile: false,
+  });
+  const [tradeVisited, setTradeVisited] = useState(false);
 
   const onTabChange = useCallback((name) => {
-    setTab(name);
-    setMounted((m) => (m[name] ? m : { ...m, [name]: true }));
+    startTransition(() => {
+      setTab(name);
+      if (name === 'trade') setTradeVisited(true);
+      setMounted((m) => (m[name] ? m : { ...m, [name]: true }));
+    });
   }, []);
 
   const hasApi = !!baseUrl?.trim();
-  // Open scanner + desk feeds as soon as API URL is bound (any tab).
   const deskEnabled = hasApi;
   const scannerEnabled = hasApi;
 
+  // Keep quote WS + desk feeds alive across ALL tabs — navigation must not tear Binance down.
+  // pauseFeedUi slows REST churn on Profile without disconnecting streams.
   const desk = useDeskSession({
     enabled: deskEnabled,
-    loadBars: tab === 'trade',
-    pollTicks: tab === 'trade' || tab === 'risk',
+    loadBars: tradeVisited || tab === 'trade',
+    pollTicks: true,
+    pauseFeedUi: tab === 'profile',
   });
   const tickScanner = useTickScanner(baseUrl, {
     enabled: scannerEnabled,
     connected,
     sessionEpoch,
+    // Buffer scanner row churn off Home/Trade so tab switches stay instant.
+    pauseUi: tab !== 'scanner' && tab !== 'trade',
   });
 
   const { done: onboardingDone, markDone: markOnboardingDone } = useOnboardingDone();
 
   const pad = Math.max(16, Math.min(24, 14 + insets.left));
-  const openProfile = useCallback(() => setTab('profile'), []);
+  const openProfile = useCallback(() => onTabChange('profile'), [onTabChange]);
 
   const homeAccount = useMemo(() => {
     if (!connected || !desk.brokerFeed?.account) return null;
@@ -90,45 +95,46 @@ function AppContent() {
       <EmailVerificationBanner />
 
       {mounted.scanner ? (
-        <View style={tabStyle('scanner')}>
+        <View style={tabStyle('scanner')} pointerEvents={tab === 'scanner' ? 'auto' : 'none'} collapsable={false}>
           <ScannerScreen
             pad={pad}
             scanner={tickScanner}
             onOpenProfile={openProfile}
             connected={connected}
             account={homeAccount}
+            active={tab === 'scanner'}
           />
         </View>
       ) : null}
       {mounted.risk ? (
-        <View style={tabStyle('risk')}>
-          <Suspense fallback={<TabFallback />}>
-            <RiskScreenLazy pad={pad} desk={desk} onOpenProfile={openProfile} active={tab === 'risk'} />
-          </Suspense>
+        <View style={tabStyle('risk')} pointerEvents={tab === 'risk' ? 'auto' : 'none'} collapsable={false}>
+          <RiskScreen pad={pad} desk={desk} onOpenProfile={openProfile} active={tab === 'risk'} />
         </View>
       ) : null}
       {mounted.trade ? (
-        <View style={tabStyle('trade')}>
-          <Suspense fallback={<TabFallback />}>
-            <TradeScreenLazy pad={pad} desk={desk} scanner={tickScanner} onOpenProfile={openProfile} active={tab === 'trade'} />
-          </Suspense>
+        <View style={tabStyle('trade')} pointerEvents={tab === 'trade' ? 'auto' : 'none'} collapsable={false}>
+          <TradeScreen
+            pad={pad}
+            desk={desk}
+            scanner={tickScanner}
+            onOpenProfile={openProfile}
+            active={tab === 'trade'}
+          />
         </View>
       ) : null}
       {mounted.profile ? (
-        <View style={tabStyle('profile')}>
-          <Suspense fallback={<TabFallback />}>
-            <ProfileScreenLazy pad={pad} />
-          </Suspense>
+        <View style={tabStyle('profile')} pointerEvents={tab === 'profile' ? 'auto' : 'none'} collapsable={false}>
+          <ProfileScreen pad={pad} active={tab === 'profile'} />
         </View>
       ) : null}
 
-      <AppBottomNav tab={tab} onChange={onTabChange} bottomInset={insets.bottom} />
+      <AppBottomNav tab={tab} onChange={onTabChange} bottomInset={insets.bottom} pad={pad} />
 
       <OnboardingGate
         visible={onboardingDone === false}
         onComplete={markOnboardingDone}
         onOpenProfile={() => {
-          setTab('profile');
+          onTabChange('profile');
           markOnboardingDone();
         }}
       />
@@ -186,9 +192,9 @@ export default function App() {
                 <AppRoot />
               </AuthGate>
               {showOpening ? (
-                <Suspense fallback={null}>
-                  <AppOpeningSplashLazy onComplete={() => setShowOpening(false)} />
-                </Suspense>
+                <React.Suspense fallback={null}>
+                  <AppOpeningSplash onComplete={() => setShowOpening(false)} />
+                </React.Suspense>
               ) : null}
             </BinanceBridgeProvider>
           </DevPreviewProvider>

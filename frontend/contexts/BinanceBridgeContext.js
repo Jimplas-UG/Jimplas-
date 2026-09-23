@@ -2,8 +2,11 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getBinanceApiUrl } from '../lib/envConfig';
 import { fetchBinanceSession, pickReachableBinanceBridgeUrl, binanceFetch } from '../broker/binanceFuturesApi';
-import { getDefaultBinanceBridgeUrl, resolveBridgeUrlForDevice } from '../utils/binanceApiUrl';
-import { isLocalhostApiUrl } from '../utils/bridgeLanUrl';
+import {
+  getDefaultBinanceBridgeUrl,
+  isObsoleteBridgeUrl,
+  resolveBridgeUrlForDevice,
+} from '../utils/binanceApiUrl';
 import { getBrokerMode } from '../lib/brokerMode';
 import {
   hasBinanceCredentials,
@@ -19,28 +22,27 @@ const BinanceBridgeContext = createContext(null);
 const STORAGE_BINANCE_BASE = '@bilshenz_v1/binanceApiBaseUrl';
 const STORAGE_BINANCE_CONNECTED = '@bilshenz_v1/binanceApiConnected';
 const STORAGE_BINANCE_URL_REV = '@bilshenz_v1/binanceApiUrlRev';
-const BINANCE_URL_REV = '3';
-const HEALTH_TIMEOUT_MS = 600;
-const RESTORE_TIMEOUT_MS = 3500;
-const SESSION_TIMEOUT_MS = 1200;
+/** Bump when default VPS host changes — forces phone off stale AsyncStorage URLs. */
+const BINANCE_URL_REV = '4-fra';
+const HEALTH_TIMEOUT_MS = 8000;
+const RESTORE_TIMEOUT_MS = 20000;
+const SESSION_TIMEOUT_MS = 10000;
 const STABLE_WATCHDOG_MS = 60000;
 const FAST_WATCHDOG_MS = 15000;
 const CRED_CACHE_MS = 30000;
 
 function canonicalBinanceUrl() {
   const u = getBinanceApiUrl();
-  if (u && !isLocalhostApiUrl(u)) return u.replace(/\/$/, '');
+  if (u && !isObsoleteBridgeUrl(u)) return u.replace(/\/$/, '');
   return resolveBridgeUrlForDevice(getDefaultBinanceBridgeUrl());
 }
 
 function resolveStoredUrl(storedUrl, urlRev) {
-  let resolved = canonicalBinanceUrl();
-  if (storedUrl && urlRev === BINANCE_URL_REV && !isLocalhostApiUrl(storedUrl)) {
-    resolved = storedUrl.replace(/\/$/, '');
-  } else if (storedUrl && isLocalhostApiUrl(storedUrl)) {
-    resolved = resolveBridgeUrlForDevice();
+  const canonical = canonicalBinanceUrl();
+  if (!storedUrl || isObsoleteBridgeUrl(storedUrl) || urlRev !== BINANCE_URL_REV) {
+    return canonical;
   }
-  return resolved;
+  return storedUrl.replace(/\/$/, '');
 }
 
 function execFromBridgeSession(session) {
@@ -59,6 +61,9 @@ export function BinanceBridgeProvider({ children }) {
   const [hydrated, setHydrated] = useState(false);
   const [sessionEpoch, setSessionEpoch] = useState(0);
   const [sessionExec, setSessionExec] = useState({ canExecute: false, block: null });
+  /** CONNECTED | DEGRADED | RECONNECTING | DISCONNECTED | AUTH_ERROR */
+  const [linkHealth, setLinkHealth] = useState('DISCONNECTED');
+  const [restCoolS, setRestCoolS] = useState(0);
   const credsCacheRef = useRef({ at: 0, creds: null, mode: null });
   const stableTicksRef = useRef(0);
 
@@ -108,6 +113,8 @@ export function BinanceBridgeProvider({ children }) {
       if (session.ok) {
         setSessionExec(execFromBridgeSession(session));
         setConnected(true);
+        setLinkHealth(session.linkHealth || (session.restCoolS > 0.5 ? 'DEGRADED' : 'CONNECTED'));
+        setRestCoolS(Number(session.restCoolS) || 0);
         setSessionEpoch((n) => n + 1);
         await AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, '1');
         return;
@@ -193,10 +200,14 @@ export function BinanceBridgeProvider({ children }) {
     setConnected(!!isConnected);
     if (isConnected) {
       if (session) setSessionExec(execFromBridgeSession(session));
+      setLinkHealth(session?.linkHealth || (session?.restCoolS > 0.5 ? 'DEGRADED' : 'CONNECTED'));
+      setRestCoolS(Number(session?.restCoolS) || 0);
       setSessionEpoch((n) => n + 1);
       stableTicksRef.current = 0;
     } else {
       setSessionExec({ canExecute: false, block: null });
+      setLinkHealth('DISCONNECTED');
+      setRestCoolS(0);
       stableTicksRef.current = 0;
     }
     AsyncStorage.setItem(STORAGE_BINANCE_CONNECTED, isConnected ? '1' : '0').catch(() => {});
@@ -227,16 +238,20 @@ export function BinanceBridgeProvider({ children }) {
         failStreak = 0;
         stableTicksRef.current += 1;
         setSessionExec(execFromBridgeSession(session));
+        setLinkHealth(session.linkHealth || (session.restCoolS > 0.5 ? 'DEGRADED' : 'CONNECTED'));
+        setRestCoolS(Number(session.restCoolS) || 0);
         scheduleNext(stableTicksRef.current >= 3 ? STABLE_WATCHDOG_MS : FAST_WATCHDOG_MS);
         return;
       }
 
       if (isHardBinanceAuthFailure(session.error)) {
+        setLinkHealth('AUTH_ERROR');
         markConnected(false);
         return;
       }
 
       failStreak += 1;
+      setLinkHealth(failStreak >= 2 ? 'RECONNECTING' : 'DEGRADED');
       if (failStreak === 1 && isTransientBridgeError(session.error)) {
         await new Promise((r) => setTimeout(r, 400));
         const retry = await fetchBinanceSession(baseUrl, 4000, 0);
@@ -245,12 +260,15 @@ export function BinanceBridgeProvider({ children }) {
           failStreak = 0;
           stableTicksRef.current += 1;
           setSessionExec(execFromBridgeSession(retry));
+          setLinkHealth(retry.linkHealth || (retry.restCoolS > 0.5 ? 'DEGRADED' : 'CONNECTED'));
+          setRestCoolS(Number(retry.restCoolS) || 0);
           scheduleNext(stableTicksRef.current >= 3 ? STABLE_WATCHDOG_MS : FAST_WATCHDOG_MS);
           return;
         }
       }
 
       if (failStreak >= 2) {
+        setLinkHealth('RECONNECTING');
         const restored = await restoreBinanceBridgeSession(baseUrl, 12000);
         if (cancelled) return;
         if (restored.ok && restored.session) {
@@ -261,7 +279,13 @@ export function BinanceBridgeProvider({ children }) {
           scheduleNext(FAST_WATCHDOG_MS);
           return;
         }
-        if (restored.hardFail) markConnected(false);
+        // Transient restore failure — stay CONNECTED/DEGRADED; only hard auth flips offline.
+        if (restored.hardFail) {
+          setLinkHealth('AUTH_ERROR');
+          markConnected(false);
+        } else {
+          setLinkHealth('DEGRADED');
+        }
       }
 
       scheduleNext(FAST_WATCHDOG_MS);
@@ -284,8 +308,10 @@ export function BinanceBridgeProvider({ children }) {
       sessionExec,
       hydrated,
       sessionEpoch,
+      linkHealth,
+      restCoolS,
     }),
-    [baseUrl, setBaseUrl, connected, markConnected, applyBridgeSession, sessionExec, hydrated, sessionEpoch],
+    [baseUrl, setBaseUrl, connected, markConnected, applyBridgeSession, sessionExec, hydrated, sessionEpoch, linkHealth, restCoolS],
   );
 
   return <BinanceBridgeContext.Provider value={value}>{children}</BinanceBridgeContext.Provider>;

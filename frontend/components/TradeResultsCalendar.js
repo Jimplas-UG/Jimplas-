@@ -50,7 +50,7 @@ function PnlCell({ cell, C, compact, weekMode }) {
               {fmtCalendarMoney(pnl)}
             </Text>
             <Text style={[st.cellTrades, { color: C.dim }]} numberOfLines={1}>
-              {cell.trades} {cell.trades === 1 ? 'close' : 'closes'}
+              {cell.trades} {cell.trades === 1 ? 'day fill' : 'day fills'}
             </Text>
           </>
         ) : (

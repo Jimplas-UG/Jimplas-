@@ -94,17 +94,21 @@ export async function fetchBinanceSession(apiBaseUrl, timeoutMs = 12000, retries
       }
       const j = await res.json();
       const account = j.account && typeof j.account === 'object' ? j.account : null;
-      const connected = !!j.connected && !!account;
+      // Bridge may keep connected=true during REST cool with a stub account — do not treat as offline.
+      const bridgeConnected = !!j.connected;
+      const cool = Number(j.rest_cool_s) || 0;
       return {
-        ok: connected,
-        connected: !!j.connected,
+        ok: bridgeConnected,
+        connected: bridgeConnected,
         account,
         mode: j.mode ?? null,
         testnet: j.testnet,
         can_execute: j.can_execute,
         exec_enabled: j.exec_enabled,
         exec_block: j.exec_block ?? null,
-        error: connected ? null : j.error ?? (j.connected ? 'No account in status' : 'Bridge not connected'),
+        restCoolS: cool,
+        linkHealth: cool > 0.5 ? 'DEGRADED' : bridgeConnected ? 'CONNECTED' : 'DISCONNECTED',
+        error: bridgeConnected ? null : j.error ?? 'Bridge not connected',
       };
     } catch (e) {
       last = {
@@ -272,11 +276,32 @@ export async function fetchBinancePositions(apiBaseUrl, symbol) {
   const qs = symbol ? `?symbol=${encodeURIComponent(symbol)}` : '';
   try {
     const res = await binanceFetch(b, `/api/positions${qs}`, {}, 12000);
-    if (!res.ok) return [];
-    const j = await res.json();
-    return Array.isArray(j.positions) ? j.positions : [];
-  } catch {
-    return [];
+    const j = await res.json().catch(() => ({}));
+    const positions = Array.isArray(j.positions) ? j.positions : [];
+    if (!res.ok) {
+      return {
+        ok: false,
+        positions,
+        stale: !!j.stale || positions.length > 0,
+        restCoolS: Number(j.rest_cool_s) || 0,
+        error: typeof j.detail === 'string' ? j.detail : j.error || `HTTP ${res.status}`,
+      };
+    }
+    return {
+      ok: j.ok !== false,
+      positions,
+      stale: !!j.stale,
+      restCoolS: Number(j.rest_cool_s) || 0,
+      error: j.error || null,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      positions: [],
+      stale: true,
+      restCoolS: 0,
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
 }
 
@@ -347,7 +372,7 @@ export async function fetchBinanceBarsM30(
 /** Last known-good bridge URL — instant reconnect on credential re-entry. */
 let cachedBridgeUrl = null;
 
-export async function probeBridgeHealth(url, timeoutMs = 700) {
+export async function probeBridgeHealth(url, timeoutMs = 8000) {
   const u = String(url || '').trim().replace(/\/$/, '');
   if (!u) return null;
   const health = await binanceFetch(u, '/health', {}, timeoutMs);
@@ -388,15 +413,17 @@ function firstReachableBridge(urls, timeoutMs) {
 /** Pick first bridge URL that responds to /health — cached + preferred URL first. */
 export async function pickReachableBinanceBridgeUrl(preferred = '', _symbol = DEFAULT_CHART_SYMBOL) {
   const pref = String(preferred || '').trim().replace(/\/$/, '');
+  // Mobile → remote VPS needs multi-second budgets (old 450–700ms caused false "Bridge offline").
+  const probeMs = 8000;
 
   if (cachedBridgeUrl) {
-    const hit = await probeBridgeHealth(cachedBridgeUrl, 450);
+    const hit = await probeBridgeHealth(cachedBridgeUrl, probeMs);
     if (hit) return hit;
     cachedBridgeUrl = null;
   }
 
   if (pref) {
-    const hit = await probeBridgeHealth(pref, 700);
+    const hit = await probeBridgeHealth(pref, probeMs);
     if (hit) {
       cachedBridgeUrl = hit;
       return hit;
@@ -404,7 +431,7 @@ export async function pickReachableBinanceBridgeUrl(preferred = '', _symbol = DE
   }
 
   const rest = binanceBridgeUrlCandidates(preferred).filter((u) => u !== pref && u !== cachedBridgeUrl);
-  const found = await firstReachableBridge(rest, 1100);
+  const found = await firstReachableBridge(rest, probeMs);
   if (found) return found;
   return null;
 }
@@ -438,20 +465,21 @@ export async function fetchBinanceTradeCalendar(apiBaseUrl, days = 400) {
 
 export async function postBinanceClosePosition(
   apiBaseUrl,
-  { symbol = DEFAULT_CHART_SYMBOL, positionSide = null, closePair = false, volume = null } = {},
+  { symbol = DEFAULT_CHART_SYMBOL, positionSide = null, closePair = false, volume = null, closeOperationId = null } = {},
 ) {
   const b = base(apiBaseUrl);
   const body = { symbol };
   if (positionSide) body.position_side = String(positionSide).toUpperCase();
   if (closePair) body.close_pair = true;
   if (volume != null) body.volume = volume;
+  if (closeOperationId) body.close_operation_id = String(closeOperationId).slice(0, 64);
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await binanceFetch(
         b,
         '/api/close',
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
-        12000,
+        45000,
       );
       const text = await res.text();
       let j = {};
@@ -466,6 +494,18 @@ export async function postBinanceClosePosition(
           await new Promise((r) => setTimeout(r, 200));
           continue;
         }
+        if (res.status === 409 && (j.detail?.error === 'close_in_progress' || j.error === 'close_in_progress')) {
+          return {
+            ok: false,
+            status: 409,
+            bodySnippet: 'Close already in progress',
+            connected: true,
+            closed: [],
+            error: 'close_in_progress',
+            closePending: true,
+            closeOperationId: j.detail?.close_operation_id || j.close_operation_id || closeOperationId,
+          };
+        }
         if (typeof j.detail === 'string') snippet = j.detail;
         else if (j.detail?.error) snippet = String(j.detail.error);
         else if (j.detail) snippet = trimSnippet(JSON.stringify(j.detail));
@@ -479,6 +519,11 @@ export async function postBinanceClosePosition(
         closed: Array.isArray(j.closed) ? j.closed : j.detail?.closed || [],
         latencyMs: j.latency_ms ?? j.detail?.latency_ms,
         error: j.error ?? j.detail?.error,
+        verifiedFlat: j.verified_flat === true || j.detail?.verified_flat === true,
+        closePending: j.close_pending === true || j.status === 'CLOSE_PENDING_VERIFY',
+        statusLabel: j.status || j.detail?.status,
+        remaining: j.remaining || j.detail?.remaining || [],
+        closeOperationId: j.close_operation_id || j.detail?.close_operation_id || closeOperationId,
       };
     } catch (e) {
       if (attempt < 1) {
@@ -525,7 +570,12 @@ export async function postBinanceCloseAllPositions(apiBaseUrl) {
       error: j.error ?? j.detail?.error,
     };
   } catch (e) {
-    return { ok: false, status: 0, bodySnippet: trimSnippet(e instanceof Error ? e.message : String(e)), connected };
+    return {
+      ok: false,
+      status: 0,
+      bodySnippet: trimSnippet(e instanceof Error ? e.message : String(e)),
+      connected: false,
+    };
   }
 }
 

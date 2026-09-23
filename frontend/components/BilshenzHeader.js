@@ -19,8 +19,12 @@ export default function BilshenzHeader() {
       <AnimatedHexLogo size={VB} />
       <View style={styles.textStack}>
         <Text style={[styles.h1, { fontFamily: serifHeading, color: C.goldL }]}>BILSHENZ</Text>
-        <Text style={[styles.sub, { color: C.dim }]}>Jimplas Capital Management · USDT-M Institutional Desk</Text>
-        <Text style={[styles.vtag, { color: C.dim2 }]}>AUTOMATED · RISK-MANAGED · BINANCE FUTURES</Text>
+        <Text style={[styles.sub, { color: C.dim }]} numberOfLines={1}>
+          Jimplas Capital Management · USDT-M Institutional Desk
+        </Text>
+        <Text style={[styles.vtag, { color: C.dim2 }]} numberOfLines={1}>
+          AUTOMATED · RISK-MANAGED · BINANCE FUTURES
+        </Text>
       </View>
     </View>
   );

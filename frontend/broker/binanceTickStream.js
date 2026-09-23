@@ -2,7 +2,7 @@
  * Binance bridge WebSocket tick stream — replaces REST polling when available.
  */
 import { getBridgeToken, getDeskApiKey } from '../lib/envConfig';
-import { resetWsBackoff, scheduleWsReconnect } from '../lib/wsReconnect';
+import { resetWsBackoff, scheduleWsReconnect, startWsSilenceWatch } from '../lib/wsReconnect';
 
 function wsBase(httpBase) {
   return String(httpBase || '')
@@ -27,7 +27,7 @@ export function binanceTickWsUrl(baseUrl, symbol) {
 
 /**
  * Subscribe to live ticks. Calls onTick on each message; returns cleanup function.
- * Reconnects immediately on drop, then fast capped backoff.
+ * Reconnects instantly on drop; force-closes zombie sockets after silence.
  */
 export function subscribeBinanceTickStream(baseUrl, symbol, onTick, { onError, onOpen, onClose } = {}) {
   if (!baseUrl?.trim() || !symbol || typeof WebSocket === 'undefined') {
@@ -38,11 +38,14 @@ export function subscribeBinanceTickStream(baseUrl, symbol, onTick, { onError, o
   let closed = false;
   const timerRef = { current: null };
   const backoffRef = { current: 0 };
+  let silence = null;
 
   const isClosed = () => closed;
 
   const connect = () => {
     if (closed) return;
+    silence?.stop();
+    silence = null;
     const url = binanceTickWsUrl(baseUrl, symbol);
     try {
       ws = new WebSocket(url);
@@ -52,14 +55,29 @@ export function subscribeBinanceTickStream(baseUrl, symbol, onTick, { onError, o
       return;
     }
 
+    silence = startWsSilenceWatch({
+      getWs: () => ws,
+      closed: isClosed,
+      onSilent: () => {
+        try {
+          ws?.close();
+        } catch {
+          /* ignore */
+        }
+      },
+    });
+
     ws.onopen = () => {
       resetWsBackoff(backoffRef);
+      silence?.mark();
       onOpen?.();
     };
 
     ws.onmessage = (ev) => {
+      silence?.mark();
       try {
         const tk = JSON.parse(String(ev.data ?? ''));
+        if (tk?.type === 'hb') return;
         if (tk && Number.isFinite(tk.bid) && Number.isFinite(tk.ask)) {
           resetWsBackoff(backoffRef);
           onTick(tk);
@@ -75,6 +93,8 @@ export function subscribeBinanceTickStream(baseUrl, symbol, onTick, { onError, o
 
     ws.onclose = () => {
       ws = null;
+      silence?.stop();
+      silence = null;
       onError?.('WebSocket closed');
       onClose?.();
       if (!closed) {
@@ -87,6 +107,8 @@ export function subscribeBinanceTickStream(baseUrl, symbol, onTick, { onError, o
 
   return () => {
     closed = true;
+    silence?.stop();
+    silence = null;
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;

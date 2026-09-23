@@ -168,7 +168,8 @@ def test_long2_tp_at_2_5_pct() -> None:
     print("OK long2: TP at +2.5%")
 
 
-def test_long1_opens_at_2pct_and_closes_on_half_pct_retrace() -> None:
+def test_long1_opens_at_2pct_and_holds_while_short_underwater() -> None:
+    """Paired hold: 0.5% long pullback must NOT dump the hedge while short is losing."""
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -191,12 +192,12 @@ def test_long1_opens_at_2pct_and_closes_on_half_pct_retrace() -> None:
 
         sc.on_tick(sym, peak * 1.004)  # new peak
         sc.on_tick(sym, peak * 1.004 * (1.0 - (LONG_HEDGE_PULLBACK_PCT + 0.05) / 100.0))
-        assert coin.long1 is None, "long1 must close on a 0.5% retrace from its peak"
-        assert coin.short is not None, "closing long1 must not touch the primary short"
-    print("OK long1: opens at +2%, closes on 0.5% peak retrace")
+        assert coin.long1 is not None, "long1 must stay while short underwater (paired hold)"
+        assert coin.short is not None
+    print("OK long1: opens at +2%, holds through 0.5% peak retrace while short underwater")
 
 
-def test_long2_closes_immediately_on_half_pct_retrace() -> None:
+def test_long2_holds_pullback_while_short_underwater() -> None:
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -215,9 +216,53 @@ def test_long2_closes_immediately_on_half_pct_retrace() -> None:
         coin.status = STATUS_LONG2
         coin.long2_was_closed = False
         sc.on_tick(sym, peak * (1.0 - (LONG_HEDGE_PULLBACK_PCT + 0.05) / 100.0))
-        assert coin.long2 is None, "long2 must close on a 0.5% retrace from its peak"
+        assert coin.long2 is not None, "long2 must hold while short underwater"
         assert coin.short is not None
-    print("OK long2: closes immediately on 0.5% peak retrace")
+    print("OK long2: holds 0.5% peak retrace while short underwater")
+
+
+def test_invalidation_flattens_pair() -> None:
+    with _no_smart_exit():
+        from momentum_scanner import PAIR_INVALIDATION_PCT
+
+        conn = FakeConnector()
+        sc = MomentumScanner(conn, lambda: True)
+        sym = "TESTUSDT"
+        entry = 100.0
+        sc.load_symbols([sym])
+        sc.on_tick(sym, entry)
+        coin = sc._coins[sym]
+        from momentum_scanner import LegPosition, LONG1_LEVERAGE, MAGIC_LONG1, MAGIC_SHORT, SHORT_LEVERAGE
+
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry
+        coin.long1 = LegPosition("BUY", entry * 1.02, 1.0, LONG1_LEVERAGE, MAGIC_LONG1, None)
+        coin.status = STATUS_LONG1
+        sc.on_tick(sym, entry * (1.0 + PAIR_INVALIDATION_PCT / 100.0 + 0.01))
+        assert coin.short is None and coin.long1 is None, "invalidation must flatten pair"
+    print("OK invalidation flattens short+long1")
+
+
+def test_rescue_flattens_when_long_covers_short() -> None:
+    with _no_smart_exit():
+        conn = FakeConnector()
+        sc = MomentumScanner(conn, lambda: True)
+        sc._partition_usd = 100.0
+        sym = "TESTUSDT"
+        entry = 100.0
+        sc.load_symbols([sym])
+        sc.on_tick(sym, entry)
+        coin = sc._coins[sym]
+        from momentum_scanner import LegPosition, LONG1_LEVERAGE, MAGIC_LONG1, MAGIC_SHORT, SHORT_LEVERAGE
+
+        # Short qty small, long qty large → at +5% long profit covers short loss.
+        coin.short = LegPosition("SELL", entry, 1.0, SHORT_LEVERAGE, MAGIC_SHORT, None)
+        coin.short_trough_price = entry
+        coin.long1 = LegPosition("BUY", entry * 1.02, 5.0, LONG1_LEVERAGE, MAGIC_LONG1, None)
+        coin.status = STATUS_LONG1
+        sc.on_tick(sym, entry * 1.05)
+        assert coin.short is None and coin.long1 is None, "rescue must flatten when long covers short"
+    print("OK rescue flattens when long covers short+buffer")
 
 
 def test_short_survives_sub_1pct_adverse() -> None:
@@ -727,8 +772,10 @@ if __name__ == "__main__":
         test_multi_tf_gain_then_retrace_pending()
         test_short_tp_at_2_5_pct()
         test_long2_tp_at_2_5_pct()
-        test_long1_opens_at_2pct_and_closes_on_half_pct_retrace()
-        test_long2_closes_immediately_on_half_pct_retrace()
+        test_long1_opens_at_2pct_and_holds_while_short_underwater()
+        test_long2_holds_pullback_while_short_underwater()
+        test_invalidation_flattens_pair()
+        test_rescue_flattens_when_long_covers_short()
         test_short_survives_sub_1pct_adverse()
         test_naked_short_trail_waits_for_recovery()
         test_short_trail_closes_after_recovery_cycle()

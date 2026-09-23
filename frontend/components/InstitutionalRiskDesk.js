@@ -81,6 +81,8 @@ export default function InstitutionalRiskDesk({
   brokerConnected,
   brokerAccount,
   brokerPositions,
+  brokerPositionsStale = false,
+  brokerPositionsCoolS = 0,
   brokerDeals,
   binanceBaseUrl,
   livePrice,
@@ -88,6 +90,7 @@ export default function InstitutionalRiskDesk({
   ask,
   onRefreshBroker,
   onRefreshAfterClose,
+  onOptimisticClose,
   onBrokerCloseMsg,
   feedReady,
   feedError,
@@ -261,6 +264,8 @@ export default function InstitutionalRiskDesk({
         {brokerConnected ? (
           <OpenPositionsPanel
             positions={brokerPositions ?? []}
+            positionsStale={brokerPositionsStale}
+            positionsCoolS={brokerPositionsCoolS}
             brokerDeals={brokerDeals ?? []}
             livePrice={livePrice}
             bid={bid}
@@ -271,6 +276,7 @@ export default function InstitutionalRiskDesk({
             brokerConnected={brokerConnected}
             onRefresh={onRefreshBroker}
             onRefreshAfterClose={onRefreshAfterClose}
+            onOptimisticClose={onOptimisticClose}
             onCloseMessage={onBrokerCloseMsg}
           />
         ) : null}

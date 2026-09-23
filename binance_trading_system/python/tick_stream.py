@@ -20,8 +20,9 @@ log = logging.getLogger("tick_stream")
 MAINNET_WS = "wss://fstream.binance.com/ws"
 TESTNET_WS = "wss://stream.binancefuture.com/ws"
 MAX_TICK_AGE_SEC = 120.0
-RECONNECT_MIN_SEC = 0.05
-RECONNECT_MAX_SEC = 5.0
+RECONNECT_MIN_SEC = 0.02
+RECONNECT_MAX_SEC = 0.6
+CLIENT_HB_SEC = 1.5
 
 
 def _parse_book_ticker(msg: dict[str, Any]) -> dict[str, Any] | None:
@@ -114,12 +115,27 @@ class BinanceTickStream:
         cached = self.get_tick(sym, max_age_sec=MAX_TICK_AGE_SEC)
         if cached:
             await websocket.send_json(cached)
+
+        async def _heartbeat() -> None:
+            while True:
+                await asyncio.sleep(CLIENT_HB_SEC)
+                try:
+                    await websocket.send_json({"type": "hb", "t": int(time.time() * 1000), "symbol": sym})
+                except Exception:
+                    break
+
+        hb = asyncio.create_task(_heartbeat(), name=f"tick-client-hb-{sym}")
         try:
             while True:
                 await websocket.receive_text()
         except WebSocketDisconnect:
             pass
         finally:
+            hb.cancel()
+            try:
+                await hb
+            except asyncio.CancelledError:
+                pass
             async with self._lock:
                 self._clients.discard(key)
 
@@ -138,7 +154,7 @@ class BinanceTickStream:
             if not self._running:
                 break
             await asyncio.sleep(backoff)
-            backoff = min(RECONNECT_MAX_SEC, backoff * 1.8)
+            backoff = min(RECONNECT_MAX_SEC, backoff * 1.45)
 
     async def _connect_and_listen(self) -> None:
         testnet = self._get_testnet()
@@ -154,7 +170,13 @@ class BinanceTickStream:
             url = f"{root}/stream?streams={streams}"
 
         log.info("connecting Binance WS %s testnet=%s", url, testnet)
-        async with websockets.connect(url, ping_interval=20, ping_timeout=30, close_timeout=5) as ws:
+        async with websockets.connect(
+            url,
+            ping_interval=8,
+            ping_timeout=12,
+            close_timeout=2,
+            open_timeout=8,
+        ) as ws:
             self._ws_connected = True
             self._last_error = None
             log.info("Binance WS connected")

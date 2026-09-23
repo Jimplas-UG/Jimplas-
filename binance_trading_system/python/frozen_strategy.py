@@ -5,8 +5,11 @@ This module is a regression lock. It does NOT alter trading behavior; it verifie
 the live modules still match the working contract:
 
   Entry: 15m ≥5% gain + ≥0.7% retrace → SHORT (50% partition, 5x)
-  +2% adverse from short → Long 1 BUY (40%, 10x), close on 0.5% peak retrace
-  +4% adverse from short → Long 2 BUY (40%, 10x), close on 0.5% peak retrace
+  +2% adverse from short → Long 1 BUY (40%, 10x)
+  +4% adverse from short → Long 2 BUY (40%, 10x)
+  While short underwater: hedges stay paired (no solo TP / 0.5% trail)
+  Rescue: long PnL ≥ short loss + buffer → flatten all
+  Invalidation: ≥6.5% adverse from short entry → flatten all
   Short TP −2.5%; never leave orphan longs without the primary short
   Shared LONG close must never wipe/retire the sibling recovery leg
   (Long1 close must not permanently kill Long2, and vice versa)
@@ -44,6 +47,8 @@ SHORT_TP_PCT = 2.5
 LONG_TP_PCT = 2.5
 LONG_HEDGE_PULLBACK_PCT = 0.5
 SHORT_TRAIL_PULLBACK_FLOOR_PCT = 1.5
+PAIR_INVALIDATION_PCT = 6.5
+HEDGE_RESCUE_BUFFER_PCT = 1.0
 
 STATUS_SHORT = "Short"
 STATUS_LONG1 = "Long 1"
@@ -78,6 +83,9 @@ def frozen_contract_snapshot() -> dict[str, Any]:
             "adverse1_pct": LONG1_ADVERSE_PCT,
             "adverse2_pct": LONG2_ADVERSE_PCT,
             "pullback_pct": LONG_HEDGE_PULLBACK_PCT,
+            "paired_hold_while_underwater": True,
+            "invalidation_pct": PAIR_INVALIDATION_PCT,
+            "rescue_buffer_pct": HEDGE_RESCUE_BUFFER_PCT,
         },
         "entry": {
             "gain_pct": GAIN_THRESHOLD_PCT,
@@ -129,6 +137,8 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert abs(ms.LONG_TP_PCT - LONG_TP_PCT) < 1e-9
     assert abs(float(ms.LONG_HEDGE_PULLBACK_PCT) - LONG_HEDGE_PULLBACK_PCT) < 1e-9
     assert float(ms.SHORT_TRAIL_PULLBACK_PCT) + 1e-9 >= SHORT_TRAIL_PULLBACK_FLOOR_PCT
+    assert abs(float(ms.PAIR_INVALIDATION_PCT) - PAIR_INVALIDATION_PCT) < 1e-9
+    assert abs(float(ms.HEDGE_RESCUE_BUFFER_PCT) - HEDGE_RESCUE_BUFFER_PCT) < 1e-9
 
     # Partition policy: 50/40/40 must pass through unchanged.
     s, l1, l2, changed = sanitize_partitions(
@@ -148,6 +158,9 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert hasattr(ms.MomentumScanner, "_try_open_long1")
     assert hasattr(ms.MomentumScanner, "_try_open_long2")
     assert hasattr(ms.MomentumScanner, "adopt_open_strategies_from_exchange")
+    assert hasattr(ms.MomentumScanner, "_hedge_rescue_ready")
+    assert hasattr(ms.MomentumScanner, "_pair_invalidation_hit")
+    assert hasattr(ms.MomentumScanner, "_short_underwater")
 
     # AKEUSDT regression lock: sibling wipe on shared LONG must re-arm, never retire.
     assert hasattr(ms.MomentumScanner, "_repair_naked_short_hedges")
@@ -157,6 +170,7 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "SIBLING_WIPE" in src, "sibling-wipe re-arm marker missing from momentum_scanner"
     assert "preserve sibling" in src, "safe recovery close qty guard missing"
     assert "def _safe_recovery_close_qty" in src
+    assert "paired hold" in src.lower() or "PAIRED" in src or "_short_underwater" in src
 
     return frozen_contract_snapshot()
 

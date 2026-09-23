@@ -91,6 +91,8 @@ export function useBinanceLiveFeed({
   loadBars = true,
   /** When true, load public quotes/bars even if API session is not logged in. */
   publicQuotes = true,
+  /** Slow REST/UI churn without tearing WebSocket (e.g. Profile tab). */
+  pauseFeedUi = false,
   onBridgeUrlResolved,
 }) {
   const [price, setPrice] = useState(null);
@@ -102,6 +104,8 @@ export function useBinanceLiveFeed({
   const [resolvedSymbol, setResolvedSymbol] = useState(symbol);
   const [brokerDeals, setBrokerDeals] = useState([]);
   const [positions, setPositions] = useState([]);
+  const [positionsStale, setPositionsStale] = useState(false);
+  const [positionsCoolS, setPositionsCoolS] = useState(0);
   const [symbolSpec, setSymbolSpec] = useState(null);
   const [feedError, setFeedError] = useState('');
   const [feedReady, setFeedReady] = useState(false);
@@ -109,6 +113,11 @@ export function useBinanceLiveFeed({
   const symRef = useRef(symbol);
   const bgLoadRef = useRef(false);
   const everReadyRef = useRef(false);
+  const positionsRef = useRef([]);
+  const emptyPosStreakRef = useRef(0);
+  const pauseFeedUiRef = useRef(pauseFeedUi);
+  pauseFeedUiRef.current = pauseFeedUi;
+  const lastTickUiAtRef = useRef(0);
 
   const sessionActive = !!connected;
   const bridgeActive = enabled && !!baseUrl?.trim() && (publicQuotes || sessionActive);
@@ -173,6 +182,9 @@ export function useBinanceLiveFeed({
         if (!sessionActive) {
           setBrokerDeals([]);
           setPositions([]);
+          positionsRef.current = [];
+          setPositionsStale(false);
+          emptyPosStreakRef.current = 0;
         }
       }
       return;
@@ -323,18 +335,70 @@ export function useBinanceLiveFeed({
       if (!cancelled) setBrokerDeals(d);
     };
 
+    const applyPositionsResult = (result) => {
+      if (!result || typeof result !== 'object' || !('positions' in result)) {
+        // Legacy callers may still pass a bare array — ignore clearing.
+        if (Array.isArray(result)) {
+          if (result.length) {
+            positionsRef.current = result;
+            setPositions(result);
+            setPositionsStale(false);
+            emptyPosStreakRef.current = 0;
+          }
+        }
+        return;
+      }
+      const next = Array.isArray(result.positions) ? result.positions : [];
+      const cool = Number(result.restCoolS) || 0;
+      setPositionsCoolS(cool);
+      // Never claim FLAT while REST is cooling — sticky last-good may be empty payload.
+      if (cool >= 0.5 && next.length === 0) {
+        if (positionsRef.current.length > 0) setPositionsStale(true);
+        return;
+      }
+      if (result.ok && next.length === 0 && !result.stale && cool < 0.5) {
+        emptyPosStreakRef.current += 1;
+        // Require two consecutive confirmed-empty polls before FLAT (avoids flicker).
+        if (emptyPosStreakRef.current >= 2 || positionsRef.current.length === 0) {
+          positionsRef.current = [];
+          setPositions([]);
+          setPositionsStale(false);
+        } else {
+          setPositionsStale(true);
+        }
+        return;
+      }
+      if (next.length > 0) {
+        emptyPosStreakRef.current = 0;
+        positionsRef.current = next;
+        setPositions(next);
+        setPositionsStale(!!result.stale || cool > 0.5 || result.ok === false);
+        return;
+      }
+      // Error / cool with empty payload — keep last known.
+      if (positionsRef.current.length > 0) {
+        setPositionsStale(true);
+        return;
+      }
+      setPositionsStale(!!result.stale || result.ok === false);
+    };
+
     const refreshPositions = async () => {
-      const p = await fetchBinancePositions(b);
-      if (!cancelled) setPositions(p);
+      const result = await fetchBinancePositions(b);
+      if (!cancelled) applyPositionsResult(result);
     };
 
     void refreshAccount();
     void refreshDeals();
     void refreshPositions();
 
-    const acctId = setInterval(refreshAccount, 8000);
-    const dealsId = setInterval(refreshDeals, 20000);
-    const posId = setInterval(refreshPositions, 5000);
+    // Active desk: fast position sync. Profile pause: slow REST, keep connection.
+    const posMs = pauseFeedUi ? 15000 : 3000;
+    const acctMs = pauseFeedUi ? 20000 : 8000;
+    const dealsMs = pauseFeedUi ? 45000 : 20000;
+    const acctId = setInterval(refreshAccount, acctMs);
+    const dealsId = setInterval(refreshDeals, dealsMs);
+    const posId = setInterval(refreshPositions, posMs);
 
     return () => {
       cancelled = true;
@@ -342,12 +406,12 @@ export function useBinanceLiveFeed({
       clearInterval(dealsId);
       clearInterval(posId);
     };
-  }, [sessionActive, enabled, baseUrl]);
+  }, [sessionActive, enabled, baseUrl, pauseFeedUi]);
 
   const refreshBrokerSnapshot = useCallback(async () => {
     if (!sessionActive || !enabled || !baseUrl?.trim()) return;
     const b = baseUrl.trim();
-    const [st, d, p] = await Promise.all([
+    const [st, d, posResult] = await Promise.all([
       fetchStatusAccount(b),
       fetchBinanceDeals(b, 100),
       fetchBinancePositions(b),
@@ -355,8 +419,59 @@ export function useBinanceLiveFeed({
     if (st.account) setAccount(st.account);
     else if (!st.connected) setAccount(null);
     setBrokerDeals(d);
-    setPositions(p);
+    const next = Array.isArray(posResult?.positions) ? posResult.positions : [];
+    const cool = Number(posResult?.restCoolS) || 0;
+    setPositionsCoolS(cool);
+    // Confirmed exchange snapshot (ok, not stale, not cooling) always wins — including empty after close.
+    if (posResult?.ok && !posResult?.stale && cool < 0.5) {
+      positionsRef.current = next;
+      setPositions(next);
+      setPositionsStale(false);
+      emptyPosStreakRef.current = next.length === 0 ? 2 : 0;
+    } else if (next.length > 0) {
+      positionsRef.current = next;
+      setPositions(next);
+      setPositionsStale(!!posResult?.stale || cool > 0.5 || posResult?.ok === false);
+      emptyPosStreakRef.current = 0;
+    } else if (positionsRef.current.length > 0) {
+      setPositionsStale(true);
+    } else {
+      setPositionsStale(!!posResult?.stale || posResult?.ok === false);
+    }
   }, [sessionActive, enabled, baseUrl]);
+
+  const applyOptimisticClose = useCallback(({ symbol, positionSide = null, closePair = false } = {}) => {
+    if (symbol === '*') {
+      positionsRef.current = [];
+      setPositions([]);
+      setPositionsStale(false);
+      emptyPosStreakRef.current = 2;
+      return;
+    }
+    const sym = String(symbol || '').toUpperCase();
+    if (!sym) return;
+    const prev = positionsRef.current || [];
+    let next;
+    if (closePair || !positionSide) {
+      next = prev.filter((p) => String(p.symbol || '').toUpperCase() !== sym);
+    } else {
+      const ps = String(positionSide).toUpperCase();
+      // SHORT manual close flattens the pair on the bridge — clear all legs for symbol.
+      if (ps === 'SHORT') {
+        next = prev.filter((p) => String(p.symbol || '').toUpperCase() !== sym);
+      } else {
+        next = prev.filter((p) => {
+          if (String(p.symbol || '').toUpperCase() !== sym) return true;
+          const leg = String(p.positionSide || p.leg || (p.type === 'SELL' ? 'SHORT' : 'LONG')).toUpperCase();
+          return leg !== ps;
+        });
+      }
+    }
+    positionsRef.current = next;
+    setPositions(next);
+    setPositionsStale(false);
+    emptyPosStreakRef.current = next.length === 0 ? 2 : 0;
+  }, []);
 
   const refreshAfterClose = useCallback(async () => {
     if (!sessionActive || !enabled || !baseUrl?.trim()) return;
@@ -389,6 +504,11 @@ export function useBinanceLiveFeed({
       (tk) => {
         if (cancelled) return;
         lastWsAt = Date.now();
+        // Throttle UI tick renders on Profile — keep WS connected underneath.
+        if (pauseFeedUiRef.current) {
+          if (Date.now() - lastTickUiAtRef.current < 1000) return;
+          lastTickUiAtRef.current = Date.now();
+        }
         applyTickState(tk, tickSetters);
       },
       {
@@ -433,11 +553,14 @@ export function useBinanceLiveFeed({
     resolvedSymbol,
     brokerDeals,
     positions,
+    positionsStale,
+    positionsCoolS,
     feedError,
     feedReady,
     symbolSpec,
     refreshFeed,
     refreshBrokerSnapshot,
     refreshAfterClose,
+    applyOptimisticClose,
   };
 }

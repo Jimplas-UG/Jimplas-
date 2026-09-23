@@ -1,53 +1,73 @@
 #!/usr/bin/env python3
-"""Start VPS APK build via nohup and verify process is alive."""
+"""Start FRA APK build and optionally open bridge for tokenless old APKs."""
+from __future__ import annotations
+
 import os
 import sys
-import time
+from pathlib import Path
 
-HOST = os.environ.get("VPS_HOST", "157.245.33.42")
-USER = os.environ.get("VPS_USER", "root")
-PASSWORD = os.environ.get("VPS_PASSWORD", "")
+import paramiko
+
+HOST = os.environ.get("VPS_HOST", "159.223.29.223")
+KEY = Path.home() / ".ssh" / "id_ed25519"
+OPEN_BRIDGE = os.environ.get("OPEN_BRIDGE", "1") == "1"
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> int:
-    if not PASSWORD:
-        print("VPS_PASSWORD required", file=sys.stderr)
-        return 1
-    import paramiko
+    pkey = paramiko.Ed25519Key.from_private_key_file(str(KEY))
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.connect(HOST, username="root", pkey=pkey, timeout=45, look_for_keys=False, allow_agent=False)
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(HOST, username=USER, password=PASSWORD, timeout=30, look_for_keys=False, allow_agent=False)
+    # upload build script + onboarding fix
+    sftp = c.open_sftp()
+    sftp.put(str(ROOT / "deploy/ubuntu/build-apk-fra.sh"), "/opt/bilshenz/deploy/ubuntu/build-apk-fra.sh")
+    sftp.put(
+        str(ROOT / "frontend/components/OnboardingGate.js"),
+        "/opt/bilshenz/frontend/components/OnboardingGate.js",
+    )
+    sftp.close()
 
-    steps = [
-        "cd /opt/bilshenz && git fetch origin && git reset --hard origin/main && git log -1 --oneline",
-        "chmod +x /opt/bilshenz/deploy/ubuntu/build-apk-on-vps.sh",
-        "mkdir -p /var/log/bilshenz /opt/bilshenz/frontend/dist",
-        "pkill -f '/opt/bilshenz/deploy/ubuntu/build-apk-on-vps.sh' || true",
-        "pkill -f 'gradlew assembleRelease' || true",
-        "nohup bash /opt/bilshenz/deploy/ubuntu/build-apk-on-vps.sh > /var/log/bilshenz/apk-build.out 2>&1 < /dev/null & echo START_OK",
-        "sleep 3",
-        "pgrep -af build-apk-on-vps || pgrep -af 'sdkmanager|gradlew|expo prebuild' || echo NOT_RUNNING",
-        "tail -n 30 /var/log/bilshenz/apk-build.log 2>/dev/null || echo NO_LOG_YET",
-        "tail -n 20 /var/log/bilshenz/apk-build.out 2>/dev/null || true",
-    ]
+    open_cmd = ""
+    if OPEN_BRIDGE:
+        open_cmd = r"""
+python3 - <<'PY'
+from pathlib import Path
+p=Path('/etc/bilshenz.env')
+lines=[]
+for line in p.read_text().splitlines():
+    if line.startswith('BRIDGE_TOKEN='):
+        lines.append('BRIDGE_TOKEN=')
+    else:
+        lines.append(line)
+p.write_text('\n'.join(lines)+'\n')
+print('bridge_token_cleared_for_old_apk')
+PY
+systemctl restart bilshenz-binance-api
+sleep 5
+"""
 
-    for cmd in steps:
-        print(f"$ {cmd}")
-        _, stdout, stderr = client.exec_command(cmd, get_pty=True, timeout=300)
-        out = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace")
-        code = stdout.channel.recv_exit_status()
-        sys.stdout.buffer.write(out.encode("utf-8", errors="replace"))
-        if err.strip():
-            sys.stderr.buffer.write(err.encode("utf-8", errors="replace"))
-        print(f"[exit={code}]")
-        if cmd.startswith("nohup") and "START_OK" not in out:
-            client.close()
-            return 1
-
-    client.close()
-    return 0
+    cmd = open_cmd + r"""
+chmod +x /opt/bilshenz/deploy/ubuntu/build-apk-fra.sh
+mkdir -p /var/log/bilshenz
+pkill -f build-apk-fra.sh || true
+nohup bash /opt/bilshenz/deploy/ubuntu/build-apk-fra.sh > /var/log/bilshenz/apk-build-nohup.out 2>&1 &
+echo BUILD_STARTED
+sleep 3
+ps aux | grep build-apk-fra | grep -v grep || true
+tail -n 20 /var/log/bilshenz/apk-build.log 2>/dev/null || echo waiting_for_log
+tail -n 20 /var/log/bilshenz/apk-build-nohup.out 2>/dev/null || true
+curl -sS --max-time 8 http://127.0.0.1:8766/health | python3 -c "import sys,json;d=json.load(sys.stdin);print('connected',d.get('connected'),'exec',(d.get('scanner') or {}).get('can_execute'))"
+"""
+    _, o, e = c.exec_command(cmd, timeout=90)
+    sys.stdout.write(o.read().decode("utf-8", errors="replace"))
+    err = e.read().decode("utf-8", errors="replace")
+    if err.strip():
+        sys.stderr.write(err[-1500:])
+    code = o.channel.recv_exit_status()
+    c.close()
+    return code
 
 
 if __name__ == "__main__":

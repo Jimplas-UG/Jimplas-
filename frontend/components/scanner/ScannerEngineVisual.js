@@ -222,14 +222,22 @@ function ScanField({ bubbles, ready, ms, activity }) {
 /**
  * Futuristic entry scanner — coin bubbles drift in a live search field.
  */
-export default function ScannerEngineVisual({ ready, execOn, connected, pulse = 0.5, rows = [] }) {
+export default function ScannerEngineVisual({
+  ready,
+  execOn,
+  connected,
+  pulse = 0.5,
+  rows = [],
+  active = true,
+}) {
   const { colors: C } = useBilshenzTheme();
   const [tick, setTick] = useState(() => Date.now());
 
   useEffect(() => {
+    if (!active) return undefined;
     const id = setInterval(() => setTick(Date.now()), 250);
     return () => clearInterval(id);
-  }, []);
+  }, [active]);
 
   const ms = tick;
   const breathe = 0.5 + ((Math.sin((ms / 1200) * Math.PI * 2) + 1) / 2) * 0.5;
@@ -305,11 +313,13 @@ const st = StyleSheet.create({
   },
   row: {
     flexDirection: 'row',
-    alignItems: 'stretch',
+    alignItems: 'center',
     minHeight: FIELD_H + 12,
+    flexWrap: 'wrap',
   },
   field: {
     width: FIELD_W,
+    maxWidth: '48%',
     height: FIELD_H + 12,
     overflow: 'hidden',
     borderRightWidth: 1,
@@ -389,7 +399,7 @@ const st = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.md,
-    minWidth: 0,
+    minWidth: 140,
   },
   eyebrow: {
     fontSize: 8,
@@ -397,6 +407,7 @@ const st = StyleSheet.create({
     letterSpacing: 1.4,
     color: '#67E8F9',
     marginBottom: 2,
+    flexShrink: 1,
   },
   title: {
     fontSize: 15,

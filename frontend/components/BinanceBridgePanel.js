@@ -33,6 +33,7 @@ import {
 import {
   formatBinanceNetworkError,
   getDefaultBinanceBridgeUrl,
+  isObsoleteBridgeUrl,
 } from '../utils/binanceApiUrl';
 import { getMetroLanHost, isLocalhostApiUrl } from '../utils/bridgeLanUrl';
 
@@ -138,12 +139,15 @@ export default function BinanceBridgePanel() {
     const b = (urlOverride || baseUrl)?.trim();
     if (!b) return;
     try {
-      const [tkRes, pos] = await Promise.all([
+      const [tkRes, posResult] = await Promise.all([
         binanceFetch(b, `/api/tick/${DEFAULT_CHART_SYMBOL}`, {}, 5000),
         fetchBinancePositions(b),
       ]);
       if (tkRes.ok) setTick(await tkRes.json());
-      setPositions(pos);
+      const next = Array.isArray(posResult?.positions) ? posResult.positions : [];
+      if (next.length > 0 || (posResult?.ok && !posResult?.stale)) {
+        setPositions(next);
+      }
     } catch {
       /* non-blocking — session already live from login */
     }
@@ -191,8 +195,11 @@ export default function BinanceBridgePanel() {
       const tkRes = await binanceFetch(b, `/api/tick/${DEFAULT_CHART_SYMBOL}`, {}, 10000);
       if (tkRes.ok) setTick(await tkRes.json());
 
-      const pos = await fetchBinancePositions(b);
-      setPositions(pos);
+      const posResult = await fetchBinancePositions(b);
+      const next = Array.isArray(posResult?.positions) ? posResult.positions : [];
+      if (next.length > 0 || (posResult?.ok && !posResult?.stale)) {
+        setPositions(next);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (isHardBinanceAuthFailure(msg)) {
@@ -285,10 +292,10 @@ export default function BinanceBridgePanel() {
   }, [credsHydrated, hasCredentials, mode, connected, setConnected]);
 
   useEffect(() => {
-    if (isLocalhostApiUrl(baseUrl) && metroLan) {
+    if (isLocalhostApiUrl(baseUrl) || isObsoleteBridgeUrl(baseUrl)) {
       setBaseUrl(getDefaultBinanceBridgeUrl());
     }
-  }, [baseUrl, metroLan, setBaseUrl]);
+  }, [baseUrl, setBaseUrl]);
 
   useEffect(() => {
     if (!hasCredentials || !connected || !baseUrl || account) return;
@@ -391,6 +398,12 @@ export default function BinanceBridgePanel() {
       });
 
       if (!result.ok) {
+        // Already live — cool-down / rate-limit on re-login is not a hard disconnect.
+        if (wasConnected && isTransientBridgeError(result.error)) {
+          setErr('');
+          void refreshMarketData();
+          return;
+        }
         if (!wasConnected || isHardBinanceAuthFailure(result.error)) {
           setConnected(false);
           setAccount(null);
@@ -398,7 +411,9 @@ export default function BinanceBridgePanel() {
         const msg = formatLoginEnvError(result.error, result.testnet ?? testnet);
         const netMsg = /bridge|network|fetch|ECONNREFUSED/i.test(msg)
           ? formatBinanceNetworkError(msg, baseUrl)
-          : msg;
+          : /cooling|418|429|IP banned|rate limit/i.test(msg)
+            ? 'Binance is briefly rate-limiting this server IP. Trading can stay live — wait ~20s and tap Retry Connect.'
+            : msg;
         setErr(netMsg);
         if (!wasConnected) {
           if (/bridge|network|fetch|ECONNREFUSED/i.test(msg)) {

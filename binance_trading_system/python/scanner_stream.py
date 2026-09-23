@@ -26,10 +26,11 @@ MAINNET_WS = "wss://fstream.binance.com/ws"
 TESTNET_WS = "wss://stream.binancefuture.com/ws"
 MAINNET_REST = "https://fapi.binance.com"
 TESTNET_REST = "https://testnet.binancefuture.com"
-RECONNECT_MIN_SEC = 0.05
-RECONNECT_MAX_SEC = 5.0
-REST_POLL_SEC = 1.0
-WS_STALL_SEC = 4.0
+RECONNECT_MIN_SEC = 0.02
+RECONNECT_MAX_SEC = 0.6
+REST_POLL_SEC = 0.75
+WS_STALL_SEC = 2.5
+CLIENT_HB_SEC = 1.5
 # Offload on_tick so asyncio can answer Binance WS keepalive pings (prevents 1011 timeouts).
 # Single worker + scanner RLock — prevents concurrent ticks from racing strategy state.
 _TICK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scanner-tick")
@@ -171,12 +172,27 @@ class BinanceScannerStream:
             snap = self._last_snapshot
         if snap:
             await websocket.send_json({"type": "snapshot", **snap})
+
+        async def _heartbeat() -> None:
+            while True:
+                await asyncio.sleep(CLIENT_HB_SEC)
+                try:
+                    await websocket.send_json({"type": "hb", "t": int(time.time() * 1000)})
+                except Exception:
+                    break
+
+        hb = asyncio.create_task(_heartbeat(), name="scanner-client-hb")
         try:
             while True:
                 await websocket.receive_text()
         except WebSocketDisconnect:
             pass
         finally:
+            hb.cancel()
+            try:
+                await hb
+            except asyncio.CancelledError:
+                pass
             async with self._lock:
                 self._clients.discard(websocket)
 
@@ -220,7 +236,7 @@ class BinanceScannerStream:
             if not self._running:
                 break
             await asyncio.sleep(backoff)
-            backoff = min(RECONNECT_MAX_SEC, backoff * 1.8)
+            backoff = min(RECONNECT_MAX_SEC, backoff * 1.45)
 
     def _ws_is_live(self) -> bool:
         if not self._ws_connected:
@@ -231,8 +247,8 @@ class BinanceScannerStream:
 
     async def _run_rest_loop(self) -> None:
         """Poll all prices when WS is silent/stalled (common on mainnet from some VPS IPs)."""
-        # Give WS a short head start; then poll whenever WS is not delivering.
-        await asyncio.sleep(2.0)
+        # Give WS a brief head start; then poll whenever WS is not delivering.
+        await asyncio.sleep(0.4)
         warned = False
         while self._running:
             try:
@@ -282,13 +298,14 @@ class BinanceScannerStream:
         base = TESTNET_WS if testnet else MAINNET_WS
         url = f"{base}/!miniTicker@arr"
         log.info("connecting scanner WS %s testnet=%s", url, testnet)
-        # Longer ping timeout: under load the loop must still answer keepalives.
+        # Tight ping so dead upstream sockets are detected in ~10s, not ~60s.
         async with websockets.connect(
             url,
-            ping_interval=15,
-            ping_timeout=60,
-            close_timeout=5,
+            ping_interval=8,
+            ping_timeout=12,
+            close_timeout=2,
             max_queue=32,
+            open_timeout=8,
         ) as ws:
             self._ws_connected = True
             self._last_error = None

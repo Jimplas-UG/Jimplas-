@@ -314,6 +314,23 @@ def test_symbol_filters_carry_price_band_multipliers() -> None:
     print("OK symbol filters expose PERCENT_PRICE multipliers")
 
 
+def test_apply_symbol_positions_snapshot_clears_sticky() -> None:
+    """Per-symbol force refresh must update last-good so closed legs do not resurrect."""
+    c = HedgeConnector()
+    c._last_good_positions = [
+        {"symbol": "BTCUSDT", "positionSide": "SHORT", "volume": 1.0, "type": "SELL"},
+        {"symbol": "ETHUSDT", "positionSide": "LONG", "volume": 2.0, "type": "BUY"},
+    ]
+    c._last_good_positions_ts = 0.0
+    c._positions_cache = list(c._last_good_positions)
+    c._positions_cache_ts = 0.0
+    c.apply_symbol_positions_snapshot("BTCUSDT", [])
+    assert all(p["symbol"] != "BTCUSDT" for p in c._last_good_positions)
+    assert any(p["symbol"] == "ETHUSDT" for p in c._last_good_positions)
+    assert all(p["symbol"] != "BTCUSDT" for p in (c._positions_cache or []))
+    print("OK apply_symbol_positions_snapshot clears sticky closed symbol")
+
+
 if __name__ == "__main__":
     test_hedge_close_no_reduce_only()
     test_oneway_close_has_reduce_only()
@@ -329,4 +346,5 @@ if __name__ == "__main__":
     test_limit_ioc_retries_lower_after_4016()
     test_limit_ioc_second_pass_is_mark_centered()
     test_symbol_filters_carry_price_band_multipliers()
+    test_apply_symbol_positions_snapshot_clears_sticky()
     print("test_close_orders: ALL OK")

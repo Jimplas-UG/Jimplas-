@@ -1,0 +1,27 @@
+# Desk-api (Node) — Railway service
+FROM node:20-bookworm-slim
+
+WORKDIR /app
+
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY backend/package.json backend/package-lock.json* /app/backend/
+WORKDIR /app/backend
+RUN npm install --omit=dev
+
+COPY backend/ /app/backend/
+
+ENV NODE_ENV=production \
+    DESK_API_PORT=8791 \
+    AUTH_DATA_DIR=/data/auth
+
+RUN mkdir -p /data/auth
+
+EXPOSE 8791
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:${DESK_API_PORT:-8791}/health || exit 1
+
+CMD ["npx", "tsx", "src/server.ts"]

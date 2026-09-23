@@ -1,69 +1,34 @@
 #!/usr/bin/env python3
-"""Start VPS APK build via a remote helper script (avoids self-pkill)."""
-import os
-import sys
-import time
+from pathlib import Path
+import paramiko
 
-HOST = os.environ.get("VPS_HOST", "157.245.33.42")
-USER = os.environ.get("VPS_USER", "root")
-PASSWORD = os.environ.get("VPS_PASSWORD", "")
+script = Path(__file__).resolve().parents[2] / "deploy/ubuntu/build-apk-fra.sh"
+# ensure LF
+raw = script.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+script.write_bytes(raw)
 
-HELPER = r"""#!/usr/bin/env bash
-set -euo pipefail
-export GIT_PAGER=cat PAGER=cat
-cd /opt/bilshenz
-git fetch origin
-git reset --hard origin/main
-git --no-pager log -1 --oneline
-chmod +x deploy/ubuntu/build-apk-on-vps.sh
-# Stop prior build by PID file only
-if [[ -f /var/run/bilshenz-apk-build.pid ]]; then
-  old=$(cat /var/run/bilshenz-apk-build.pid || true)
-  if [[ -n "${old:-}" ]] && kill -0 "$old" 2>/dev/null; then
-    kill "$old" 2>/dev/null || true
-    sleep 2
-    kill -9 "$old" 2>/dev/null || true
-  fi
-fi
-# Stop hung gradle if any (by exact java main class via jps if available)
-if command -v jps >/dev/null 2>&1; then
-  jps -l | awk '/GradleWrapperMain/{print $1}' | xargs -r kill 2>/dev/null || true
-fi
-: > /var/log/bilshenz/apk-build.out
-setsid bash /opt/bilshenz/deploy/ubuntu/build-apk-on-vps.sh >>/var/log/bilshenz/apk-build.out 2>&1 < /dev/null &
-echo $! > /var/run/bilshenz-apk-build.pid
-echo START_OK pid=$(cat /var/run/bilshenz-apk-build.pid)
-sleep 5
-pid=$(cat /var/run/bilshenz-apk-build.pid)
-if kill -0 "$pid" 2>/dev/null; then echo BUILD_RUNNING; else echo BUILD_EXITED_EARLY; fi
-tail -n 20 /var/log/bilshenz/apk-build.out | tr -cd '\11\12\15\40-\176'
+key = paramiko.Ed25519Key.from_private_key_file(str(Path.home() / ".ssh" / "id_ed25519"))
+c = paramiko.SSHClient()
+c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+c.connect("159.223.29.223", username="root", pkey=key, timeout=30, look_for_keys=False, allow_agent=False)
+sftp = c.open_sftp()
+sftp.put(str(script), "/opt/bilshenz/deploy/ubuntu/build-apk-fra.sh")
+sftp.close()
+CMD = r"""
+sed -i 's/\r$//' /opt/bilshenz/deploy/ubuntu/build-apk-fra.sh
+chmod +x /opt/bilshenz/deploy/ubuntu/build-apk-fra.sh
+pkill -f build-apk-fra.sh || true
+sleep 1
+nohup bash /opt/bilshenz/deploy/ubuntu/build-apk-fra.sh > /var/log/bilshenz/apk-build-nohup.out 2>&1 &
+sleep 6
+echo '--- nohup ---'
+head -n 40 /var/log/bilshenz/apk-build-nohup.out || true
+echo '--- log ---'
+head -n 40 /var/log/bilshenz/apk-build.log || true
+echo '--- procs ---'
+ps -ef | grep -E 'build-apk-fra|npm|expo|gradle' | grep -v grep | head -10 || true
 """
-
-
-def main() -> int:
-    if not PASSWORD:
-        print("VPS_PASSWORD required", file=sys.stderr)
-        return 1
-    import paramiko
-
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(HOST, username=USER, password=PASSWORD, timeout=30, look_for_keys=False, allow_agent=False)
-    sftp = client.open_sftp()
-    with sftp.file("/tmp/bilshenz-start-apk.sh", "w") as f:
-        f.write(HELPER)
-    sftp.chmod("/tmp/bilshenz-start-apk.sh", 0o755)
-    sftp.close()
-
-    _, stdout, stderr = client.exec_command("bash /tmp/bilshenz-start-apk.sh", timeout=180)
-    out = stdout.read().decode("utf-8", errors="replace")
-    err = stderr.read().decode("utf-8", errors="replace")
-    sys.stdout.write(out)
-    if err.strip():
-        sys.stderr.write(err)
-    client.close()
-    return 0 if "START_OK" in out else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+_, o, e = c.exec_command(CMD, timeout=60)
+print(o.read().decode("ascii", "replace"))
+print(e.read().decode("ascii", "replace")[-500:])
+c.close()

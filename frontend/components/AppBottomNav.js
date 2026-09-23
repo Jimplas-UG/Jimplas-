@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 
@@ -9,11 +9,11 @@ const NAV = [
   { id: 'profile', icon: '⚙', label: 'Settings' },
 ];
 
-export default function AppBottomNav({ tab, onChange, bottomInset }) {
+function AppBottomNav({ tab, onChange, bottomInset, pad = 16 }) {
   const { colors: C } = useBilshenzTheme();
 
   return (
-    <View style={[st.outer, { paddingBottom: Math.max(bottomInset, 8) }]}>
+    <View style={[st.outer, { paddingHorizontal: pad, paddingBottom: Math.max(bottomInset, 8) }]}>
       <View style={[st.bar, { backgroundColor: C.panel, borderColor: C.border }]}>
         {NAV.map((it) => {
           const active = tab === it.id;
@@ -23,6 +23,7 @@ export default function AppBottomNav({ tab, onChange, bottomInset }) {
               accessibilityRole="tab"
               accessibilityState={{ selected: active }}
               onPress={() => onChange(it.id)}
+              hitSlop={6}
               style={({ pressed }) => [st.item, pressed && { opacity: 0.85 }]}>
               <View
                 style={[
@@ -42,9 +43,10 @@ export default function AppBottomNav({ tab, onChange, bottomInset }) {
   );
 }
 
+export default memo(AppBottomNav);
+
 const st = StyleSheet.create({
   outer: {
-    paddingHorizontal: 12,
     paddingTop: 6,
   },
   bar: {

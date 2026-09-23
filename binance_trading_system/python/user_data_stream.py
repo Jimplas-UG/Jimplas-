@@ -17,8 +17,8 @@ log = logging.getLogger("user_data_stream")
 
 MAINNET_WS = "wss://fstream.binance.com/ws"
 TESTNET_WS = "wss://stream.binancefuture.com/ws"
-RECONNECT_MIN_SEC = 0.05
-RECONNECT_MAX_SEC = 5.0
+RECONNECT_MIN_SEC = 0.02
+RECONNECT_MAX_SEC = 0.6
 
 
 class BinanceUserDataStream:
@@ -161,7 +161,13 @@ class BinanceUserDataStream:
                 keepalive_task.cancel()
             keepalive_task = asyncio.create_task(self._keepalive_loop())
             try:
-                async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
+                async with websockets.connect(
+                    url,
+                    ping_interval=8,
+                    ping_timeout=12,
+                    close_timeout=2,
+                    open_timeout=8,
+                ) as ws:
                     self._ws_connected = True
                     self._last_error = None
                     backoff = RECONNECT_MIN_SEC

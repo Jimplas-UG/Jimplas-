@@ -2,7 +2,7 @@
  * Tick momentum scanner — REST snapshot + WebSocket live updates.
  */
 import { getBridgeToken, getDeskApiKey } from '../lib/envConfig';
-import { resetWsBackoff, scheduleWsReconnect } from '../lib/wsReconnect';
+import { resetWsBackoff, scheduleWsReconnect, startWsSilenceWatch } from '../lib/wsReconnect';
 import { binanceFetch } from './binanceFuturesApi';
 
 function wsBase(httpBase) {
@@ -163,11 +163,14 @@ export function subscribeScannerStream(baseUrl, onSnapshot, { onError, onOpen } 
   let closed = false;
   const timerRef = { current: null };
   const backoffRef = { current: 0 };
+  let silence = null;
 
   const isClosed = () => closed;
 
   const connect = () => {
     if (closed) return;
+    silence?.stop();
+    silence = null;
     try {
       ws = new WebSocket(scannerWsUrl(baseUrl));
     } catch (e) {
@@ -176,14 +179,29 @@ export function subscribeScannerStream(baseUrl, onSnapshot, { onError, onOpen } 
       return;
     }
 
+    silence = startWsSilenceWatch({
+      getWs: () => ws,
+      closed: isClosed,
+      onSilent: () => {
+        try {
+          ws?.close();
+        } catch {
+          /* ignore */
+        }
+      },
+    });
+
     ws.onopen = () => {
       resetWsBackoff(backoffRef);
+      silence?.mark();
       onOpen?.();
     };
 
     ws.onmessage = (ev) => {
+      silence?.mark();
       try {
         const msg = JSON.parse(String(ev.data ?? ''));
+        if (msg?.type === 'hb') return;
         if (msg?.type === 'snapshot' && Array.isArray(msg.rows)) {
           resetWsBackoff(backoffRef);
           onSnapshot(normalizeSnapshot(msg));
@@ -196,6 +214,8 @@ export function subscribeScannerStream(baseUrl, onSnapshot, { onError, onOpen } 
     ws.onerror = () => onError?.('scanner WebSocket error');
     ws.onclose = () => {
       ws = null;
+      silence?.stop();
+      silence = null;
       onError?.('scanner WebSocket closed');
       if (!closed) {
         scheduleWsReconnect({ closed: isClosed, timerRef, backoffRef, connect, immediate: true });
@@ -207,6 +227,8 @@ export function subscribeScannerStream(baseUrl, onSnapshot, { onError, onOpen } 
 
   return () => {
     closed = true;
+    silence?.stop();
+    silence = null;
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;

@@ -79,6 +79,7 @@ export async function loadStoredBinanceCredentials() {
   return {
     apiKey: secureKey || m[STORAGE_BINANCE_KEY] || '',
     apiSecret: secureSecret || m[STORAGE_BINANCE_SECRET] || '',
+    // Default TESTNET for strategy validation; user can switch to Mainnet in Settings.
     testnet: m[STORAGE_BINANCE_TESTNET] !== '0',
   };
 }
@@ -115,7 +116,9 @@ export function hasBinanceCredentials(creds) {
 
 export function isTransientBridgeError(error) {
   const msg = String(error || '');
-  return /network|fetch|timeout|timed out|ECONNREFUSED|abort|failed to connect|bridge offline|503|502|504/i.test(msg);
+  return /network|fetch|timeout|timed out|ECONNREFUSED|abort|failed to connect|bridge offline|503|502|504|cooling|418|429|rate limit|IP banned/i.test(
+    msg,
+  );
 }
 
 export function isHardBinanceAuthFailure(error) {

@@ -2,7 +2,7 @@
   "expo": {
     "name": "Bilshenz",
     "slug": "bilshenz-desk",
-    "version": "1.4.1",
+    "version": "1.4.5",
     "jsEngine": "hermes",
     "newArchEnabled": false,
     "updates": {
@@ -40,6 +40,7 @@
       }
     },
     "android": {
+      "versionCode": 18,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#000000"
@@ -56,8 +57,10 @@
       "lang": "en"
     },
     "extra": {
-      "deskApiUrl": "http://157.245.33.42:8791",
-      "binanceApiUrl": "http://157.245.33.42:8791/v1/binance",
+      "deskApiUrl": "http://159.223.29.223:8791",
+      "binanceApiUrl": "http://159.223.29.223:8766",
+      "deskApiKey": "f44a0e6b7ea7b76418e484d6041e52da",
+      "bridgeToken": "c891511f887e44b19be9d92108eb1cb0fcce82e6b1cfc858",
       "deskRemote": "1",
       "eas": {
         "projectId": "91d965de-38e5-4677-b383-946e37390e50"

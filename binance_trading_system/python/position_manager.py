@@ -43,6 +43,8 @@ class PositionManager:
     def _tick(self) -> None:
         if self.connector.cfg.paper:
             return
+        if getattr(self.connector, "rest_cooling_left", lambda: 0.0)() > 0:
+            return
         positions = self.connector.positions()
         if not positions:
             self._be_applied.clear()

@@ -14,10 +14,12 @@ const SCANNER_RISK_RESYNC_MS = 90000;
 /**
  * Shared Binance session — live feed, risk desk metrics, margin mode handler.
  */
-export function useDeskSession({ enabled = true, loadBars = true, pollTicks = true } = {}) {
+export function useDeskSession({ enabled = true, loadBars = true, pollTicks = true, pauseFeedUi = false } = {}) {
   const { baseUrl, connected, sessionEpoch } = useBinanceBridge();
   const [lastBrokerMsg, setLastBrokerMsg] = useState('');
   const lastSyncKeyRef = useRef('');
+  const lastEpochHandledRef = useRef(-1);
+  const epochTimerRef = useRef(null);
 
   const brokerFeed = useBrokerLiveFeed({
     baseUrl,
@@ -26,6 +28,7 @@ export function useDeskSession({ enabled = true, loadBars = true, pollTicks = tr
     symbol: sanitizeFuturesSymbol(defaultSymbolForBroker(), DEFAULT_CHART_SYMBOL),
     pollTicks: enabled && pollTicks,
     loadBars: enabled && loadBars,
+    pauseFeedUi,
   });
 
   const useBrokerSession = connected;
@@ -106,13 +109,21 @@ export function useDeskSession({ enabled = true, loadBars = true, pollTicks = tr
 
   useEffect(() => {
     if (!baseUrl?.trim() || !riskDesk.hydrated || !connected) return undefined;
-    lastSyncKeyRef.current = '';
-    void syncScannerRisk();
-    void postBinanceMarginMode(baseUrl, {
-      symbol: sanitizeFuturesSymbol(defaultSymbolForBroker(), DEFAULT_CHART_SYMBOL),
-      marginType: 'ISOLATED',
-    }).catch(() => {});
-    return undefined;
+    // Debounce sessionEpoch storms (watchdog restore bumps epoch often).
+    if (sessionEpoch === lastEpochHandledRef.current) return undefined;
+    if (epochTimerRef.current) clearTimeout(epochTimerRef.current);
+    epochTimerRef.current = setTimeout(() => {
+      lastEpochHandledRef.current = sessionEpoch;
+      lastSyncKeyRef.current = '';
+      void syncScannerRisk();
+      void postBinanceMarginMode(baseUrl, {
+        symbol: sanitizeFuturesSymbol(defaultSymbolForBroker(), DEFAULT_CHART_SYMBOL),
+        marginType: 'ISOLATED',
+      }).catch(() => {});
+    }, 750);
+    return () => {
+      if (epochTimerRef.current) clearTimeout(epochTimerRef.current);
+    };
   }, [baseUrl, connected, sessionEpoch, riskDesk.hydrated, syncScannerRisk]);
 
   useEffect(() => {

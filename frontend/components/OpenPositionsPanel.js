@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { formatFuturesPrice } from '../lib/futuresPrice';
@@ -50,6 +50,8 @@ function fmtDealTime(ms) {
 
 export default function OpenPositionsPanel({
   positions = [],
+  positionsStale = false,
+  positionsCoolS = 0,
   brokerDeals = [],
   livePrice,
   bid,
@@ -60,10 +62,12 @@ export default function OpenPositionsPanel({
   hideQuote = false,
   onRefresh,
   onRefreshAfterClose,
+  onOptimisticClose,
   onCloseMessage,
 }) {
   const { colors: C, styles: appStyles } = useBilshenzTheme();
   const [closingKey, setClosingKey] = useState(null);
+  const closingRef = useRef(false);
   const pairLabel = formatPairLabel(
     quoteSymbol || (positions.length === 1 ? positions[0]?.symbol : null) || 'BTCUSDT',
   );
@@ -89,40 +93,53 @@ export default function OpenPositionsPanel({
   const runClose = useCallback(
     async ({ symbol, positionSide, closePair, label }) => {
       const key = closePair ? `pair-${symbol}` : `${symbol}-${positionSide}`;
+      if (closingRef.current) return; // duplicate-click guard
+      closingRef.current = true;
       setClosingKey(key);
+      const closeOperationId = `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
       try {
         const r = await postBinanceClosePosition(binanceBaseUrl, {
           symbol,
           positionSide: closePair ? null : positionSide,
           closePair,
+          closeOperationId,
         });
         if (r.ok) {
+          // Immediate UI — do not wait for poll; sticky last-good used to resurrect closed legs.
+          onOptimisticClose?.({ symbol, positionSide, closePair });
           const closedLegs = Array.isArray(r.closed) ? r.closed : [];
           const closed = closedLegs[0];
           let msg;
-          if (closePair && closedLegs.length > 1) {
+          if (r.closePending) {
+            msg = `Close pending — verifying ${label} on exchange…`;
+          } else if (closePair && closedLegs.length > 1) {
             const pnl = closedLegs.reduce((s, x) => s + Number(x?.realized_pnl ?? x?.profit ?? 0), 0);
             msg = `Closed pair ${symbol}: ${closedLegs.length} legs · P&L ${fmtUsd(pnl)}`;
           } else if (closed) {
             const realized = Number(closed?.realized_pnl ?? closed?.profit ?? 0);
             msg = `Closed ${label} ${fmtVol(closed.volume)} @ ${fmtPx(closed.fill_price)} · P&L ${fmtUsd(realized)}`;
+          } else if (r.verifiedFlat) {
+            msg = `${label} closed (exchange flat)`;
           } else {
             msg = `${label} closed`;
           }
+          if (r.latencyMs != null) msg += ` · ${Math.round(r.latencyMs)}ms`;
           onCloseMessage?.(msg);
-          // Don't block the close button on UI refresh — run in background.
           if (onRefreshAfterClose) void onRefreshAfterClose();
           else if (onRefresh) void onRefresh();
+        } else if (r.error === 'close_in_progress') {
+          onCloseMessage?.('Close already in progress…');
         } else {
           Alert.alert('Close failed', parseCloseError(r));
         }
       } catch (e) {
         Alert.alert('Close failed', e instanceof Error ? e.message : String(e));
       } finally {
+        closingRef.current = false;
         setClosingKey(null);
       }
     },
-    [binanceBaseUrl, onRefresh, onRefreshAfterClose, onCloseMessage],
+    [binanceBaseUrl, onRefresh, onRefreshAfterClose, onCloseMessage, onOptimisticClose],
   );
 
   const confirmCloseLeg = useCallback(
@@ -134,13 +151,17 @@ export default function OpenPositionsPanel({
       const ps = legSide(pos);
       const profit = Number(pos.profit ?? 0);
       const label = legLabel(pos);
+      // SHORT manual close flattens the full pair on the bridge (no orphan longs).
+      const shortFlattens = ps === 'SHORT';
       Alert.alert(
-        `Close ${label} only?`,
-        `${label} ${fmtVol(pos.volume)} ${pos.symbol}\nEntry ${fmtPx(pos.price_open)} · Floating ${fmtUsd(profit)}\n\nOther legs on this symbol will stay open.`,
+        shortFlattens ? `Close SHORT (full pair)?` : `Close ${label} only?`,
+        shortFlattens
+          ? `${label} ${fmtVol(pos.volume)} ${pos.symbol}\nEntry ${fmtPx(pos.price_open)} · Floating ${fmtUsd(profit)}\n\nClosing SHORT market-flattens this symbol (short + any recovery longs).`
+          : `${label} ${fmtVol(pos.volume)} ${pos.symbol}\nEntry ${fmtPx(pos.price_open)} · Floating ${fmtUsd(profit)}\n\nOther legs on this symbol will stay open.`,
         [
           { text: 'Cancel', style: 'cancel' },
           {
-            text: `Close ${label}`,
+            text: shortFlattens ? 'Close pair via SHORT' : `Close ${label}`,
             style: profit >= 0 ? 'default' : 'destructive',
             onPress: () => void runClose({ symbol: pos.symbol, positionSide: ps, closePair: false, label }),
           },
@@ -200,6 +221,7 @@ export default function OpenPositionsPanel({
               try {
                 const r = await postBinanceCloseAllPositions(binanceBaseUrl);
                 if (r.ok) {
+                  onOptimisticClose?.({ closePair: true, symbol: '*' });
                   onCloseMessage?.(`Closed ${r.closed?.length ?? 0} leg(s)`);
                   if (onRefreshAfterClose) {
                     await onRefreshAfterClose();
@@ -219,7 +241,7 @@ export default function OpenPositionsPanel({
         },
       ],
     );
-  }, [brokerConnected, binanceBaseUrl, positions.length, onRefresh, onRefreshAfterClose, onCloseMessage]);
+  }, [brokerConnected, binanceBaseUrl, positions.length, onRefresh, onRefreshAfterClose, onCloseMessage, onOptimisticClose]);
 
   return (
     <View style={st.wrap}>
@@ -252,15 +274,29 @@ export default function OpenPositionsPanel({
               </Pressable>
             ) : null}
             <Text style={[st.badge, { color: positions.length ? C.green : C.dim }]}>
-              {positions.length ? String(positions.length) : 'FLAT'}
+              {positions.length
+                ? String(positions.length)
+                : positionsStale || positionsCoolS > 0.5
+                  ? '…'
+                  : 'FLAT'}
             </Text>
           </View>
         </View>
+        {positionsStale && positions.length ? (
+          <Text style={[st.staleHint, { color: C.amber }]} numberOfLines={1}>
+            Showing last known
+            {positionsCoolS > 0.5 ? ` · REST cooling ${Math.ceil(positionsCoolS)}s` : ' · refreshing…'}
+          </Text>
+        ) : null}
 
         {!brokerConnected ? (
           <Text style={[st.empty, { color: C.dim }]}>Connect Binance in Profile to watch live positions.</Text>
         ) : !positions.length ? (
-          <Text style={[st.empty, { color: C.dim }]}>No open positions — flat on Binance.</Text>
+          <Text style={[st.empty, { color: C.dim }]}>
+            {positionsStale || positionsCoolS > 0.5
+              ? 'Waiting for position refresh…'
+              : 'No open positions — flat on Binance.'}
+          </Text>
         ) : (
           <>
             <View style={[st.totalRow, { borderColor: C.border }]}>
@@ -295,7 +331,7 @@ export default function OpenPositionsPanel({
                   return (
                     <View key={key} style={[st.posCard, { borderColor: C.border, backgroundColor: C.panel2 }]}>
                       <View style={st.posTop}>
-                        <Text style={[st.posSide, { color: sideCol }]}>
+                        <Text style={[st.posSide, { color: sideCol }]} numberOfLines={1}>
                           {label} · {fmtVol(p.volume)} {p.symbol}
                         </Text>
                         <Text style={[st.posPnl, { color: profit >= 0 ? C.green : C.red }]}>{fmtUsd(profit)}</Text>
@@ -398,6 +434,12 @@ const st = StyleSheet.create({
   watchValLg: { fontSize: 18, fontWeight: '800', marginTop: 2 },
   watchHint: { fontSize: 9, textAlign: 'center', paddingBottom: 10, paddingHorizontal: 12 },
   empty: { fontSize: 11, lineHeight: 16, padding: 14 },
+  staleHint: {
+    fontSize: 10,
+    fontWeight: '600',
+    paddingHorizontal: 14,
+    paddingTop: 8,
+  },
   totalRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -410,9 +452,9 @@ const st = StyleSheet.create({
   totalLbl: { fontSize: 9, fontWeight: '700', letterSpacing: 0.4 },
   totalVal: { fontSize: 16, fontWeight: '800' },
   posCard: { marginHorizontal: 12, marginTop: 10, marginBottom: 4, borderWidth: 1, borderRadius: 14, padding: 12 },
-  posTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  posSide: { fontSize: 12, fontWeight: '800' },
-  posPnl: { fontSize: 15, fontWeight: '800' },
+  posTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  posSide: { flex: 1, minWidth: 0, fontSize: 12, fontWeight: '800' },
+  posPnl: { flexShrink: 0, fontSize: 15, fontWeight: '800', textAlign: 'right' },
   posMeta: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 8 },
   metaTxt: { fontSize: 10, fontWeight: '600' },
   closeBtn: {
@@ -442,6 +484,6 @@ const st = StyleSheet.create({
     gap: 8,
   },
   logTime: { width: 62, fontSize: 9, fontWeight: '600' },
-  logSide: { flex: 1, fontSize: 10, fontWeight: '700' },
-  logPl: { fontSize: 11, fontWeight: '800' },
+  logSide: { flex: 1, minWidth: 0, fontSize: 10, fontWeight: '700' },
+  logPl: { minWidth: 72, fontSize: 11, fontWeight: '800', textAlign: 'right', fontVariant: ['tabular-nums'] },
 });

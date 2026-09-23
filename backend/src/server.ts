@@ -343,7 +343,23 @@ function readJson<T>(req: http.IncomingMessage): Promise<T> {
 }
 
 const server = http.createServer(async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const corsOrigins = (process.env.CORS_ORIGINS || '*')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const reqOrigin = String(req.headers.origin || '');
+  const allowOrigin =
+    corsOrigins.includes('*') || !reqOrigin
+      ? corsOrigins.includes('*')
+        ? '*'
+        : corsOrigins[0] || '*'
+      : corsOrigins.includes(reqOrigin)
+        ? reqOrigin
+        : corsOrigins[0] || 'null';
+  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+  if (allowOrigin !== '*') {
+    res.setHeader('Vary', 'Origin');
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Bridge-Token');
   res.setHeader('X-Content-Type-Options', 'nosniff');

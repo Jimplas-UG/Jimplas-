@@ -1,0 +1,23 @@
+# Optional Vercel project for Expo *web* export only (Phase 2).
+# Primary product remains Expo APK via EAS → Railway desk HTTPS.
+#
+# Framework: Expo (Metro), not Next.js — use static output after:
+#   cd frontend && npx expo export --platform web
+#
+# Env (Preview + Production):
+#   EXPO_PUBLIC_DESK_API_URL=https://YOUR-RAILWAY-DESK.up.railway.app
+#   EXPO_PUBLIC_BINANCE_API_URL=https://YOUR-RAILWAY-DESK.up.railway.app/v1/binance
+#   EXPO_PUBLIC_DESK_API_KEY=(desk machine key — prefer user JWT long-term)
+#   EXPO_PUBLIC_AUTH_REQUIRED=1
+#   EXPO_PUBLIC_BROKER_MODE=binance
+#
+# NEVER set on Vercel:
+#   BINANCE_API_KEY, BINANCE_API_SECRET, BRIDGE_TOKEN, AUTH_JWT_SECRET,
+#   SESSION_ENC_KEY, DATABASE_URL
+
+{
+  "buildCommand": "cd frontend && npx expo export --platform web",
+  "outputDirectory": "frontend/dist",
+  "framework": null,
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}

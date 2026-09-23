@@ -192,7 +192,15 @@ class BinanceConnector:
         self._positions_cache: list[dict[str, Any]] | None = None
         self._positions_cache_ts = 0.0
         self._positions_cache_ttl = 1.5
+        # Survives TTL invalidation — UI must not flicker FLAT during REST cool.
+        self._last_good_positions: list[dict[str, Any]] = []
+        self._last_good_positions_ts = 0.0
+        # Fail-fast cool-down after 418/429 — never time.sleep(60+) on the request path
+        # (that froze /health + WS accept under threadpool saturation).
+        self._rest_cool_until = 0.0
+        self._rest_cool_reason = ""
         if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper:
+            self._connected = True
             self.sync_server_time(force=True)
 
     @property
@@ -257,6 +265,40 @@ class BinanceConnector:
         self._http_conn = None
         self._http_host = ""
 
+    def rest_cooling_left(self) -> float:
+        return max(0.0, self._rest_cool_until - time.monotonic())
+
+    def clear_rest_cool(self) -> None:
+        """Allow an explicit login/retry to probe Binance again."""
+        self._rest_cool_until = 0.0
+        self._rest_cool_reason = ""
+
+    def _raise_if_rest_cooling(self) -> None:
+        left = self.rest_cooling_left()
+        if left > 0:
+            raise RuntimeError(
+                f"Binance REST cooling ({self._rest_cool_reason or 'rate'}) {left:.0f}s left"
+            )
+
+    def _engage_rest_cool(self, reason: str, seconds: float) -> None:
+        """Record cool-down without sleeping — callers fail immediately."""
+        # Keep cool short so Settings → Retry Connect recovers quickly.
+        seconds = max(1.0, min(float(seconds), 25.0))
+        until = time.monotonic() + seconds
+        if until > self._rest_cool_until:
+            self._rest_cool_until = until
+            self._rest_cool_reason = reason
+            log.error("Binance %s — cool %.0fs (fail-fast, no thread sleep)", reason, seconds)
+
+    def cached_positions(self) -> list[dict[str, Any]]:
+        """Non-blocking snapshot for /health and gates — never hits Binance."""
+        if self._positions_cache is not None:
+            return list(self._positions_cache)
+        return list(self._last_good_positions)
+
+    def last_good_positions(self) -> list[dict[str, Any]]:
+        return list(self._last_good_positions)
+
     def _http_host_name(self) -> str:
         return urllib.parse.urlparse(self.base_url).netloc
 
@@ -293,6 +335,7 @@ class BinanceConnector:
 
         headers = self._headers(signed)
         try:
+            self._raise_if_rest_cooling()
             self._http_conn.request(method, req_path, headers=headers)
             resp = self._http_conn.getresponse()
             body = resp.read().decode("utf-8", errors="replace")
@@ -303,6 +346,10 @@ class BinanceConnector:
                     detail = {"msg": body}
                 msg = detail.get("msg") or detail.get("detail") or body
                 code = detail.get("code")
+                if resp.status == 418:
+                    self._engage_rest_cool("418", 45.0)
+                elif resp.status == 429:
+                    self._engage_rest_cool("429", 10.0)
                 raise RuntimeError(f"{msg} (code={code}, http={resp.status})")
             return json.loads(body) if body else {}
         except Exception:
@@ -318,6 +365,7 @@ class BinanceConnector:
         timeout: float = 10.0,
         base_url: str | None = None,
     ) -> Any:
+        self._raise_if_rest_cooling()
         params = dict(params or {})
         root = (base_url or self.base_url).rstrip("/")
         last_err: Exception | None = None
@@ -351,28 +399,25 @@ class BinanceConnector:
                     self.sync_server_time(force=True)
                     last_err = RuntimeError(msg)
                     continue
-                if e.code == 429 and attempt < 4:
+                if e.code == 429:
                     retry_after = 1.0
                     try:
                         retry_after = float(e.headers.get("Retry-After", "1"))
                     except (TypeError, ValueError):
                         pass
-                    wait = min(max(retry_after, 0.5), 30.0)
-                    log.warning("Binance 429 rate limit — retry in %.1fs", wait)
-                    time.sleep(wait)
-                    last_err = RuntimeError(detail.get("msg") or detail.get("detail") or body)
-                    continue
-                if e.code == 418 and attempt < 4:
-                    wait = min(60.0 * (attempt + 1), 300.0)
-                    log.error("Binance 418 IP ban — backing off %.0fs", wait)
-                    time.sleep(wait)
-                    last_err = RuntimeError("IP banned by Binance (418) — reduce request rate")
-                    continue
+                    wait = min(max(retry_after, 0.5), 20.0)
+                    self._engage_rest_cool("429", wait)
+                    raise RuntimeError(detail.get("msg") or detail.get("detail") or body) from e
+                if e.code == 418:
+                    # Do NOT sleep here — sleeping blocked the whole bridge for minutes.
+                    wait = min(12.0 * (attempt + 1), 25.0)
+                    self._engage_rest_cool("418", wait)
+                    raise RuntimeError("IP banned by Binance (418) — reduce request rate") from e
                 raise RuntimeError(detail.get("msg") or detail.get("detail") or body) from e
             except urllib.error.URLError as e:
                 last_err = e
                 if attempt < 4:
-                    time.sleep(1.5 * (attempt + 1))
+                    time.sleep(min(0.35 * (attempt + 1), 1.2))
                     continue
                 raise RuntimeError(str(e)) from e
         if last_err:
@@ -953,6 +998,19 @@ class BinanceConnector:
         except Exception as e:
             log.error("status_snapshot: %s", e)
             msg = str(e)
+            # Fail soft while REST is cooling — do not flip connected off for forward-bot.
+            if self._connected and ("cooling" in msg.lower() or "418" in msg or "429" in msg):
+                return {
+                    "connected": True,
+                    "mode": "testnet" if self.cfg.testnet else "live",
+                    "testnet": self.cfg.testnet,
+                    "account": {
+                        "trade_allowed": True,
+                        "server": "testnet" if self.cfg.testnet else "mainnet",
+                        "currency": "USDT",
+                    },
+                    "warning": msg,
+                }
             if self.cfg.testnet and re.search(r"invalid api-key|api-key format|signature", msg, re.I):
                 msg = (
                     f"{msg} — use Futures keys from testnet.binancefuture.com "
@@ -1411,8 +1469,27 @@ class BinanceConnector:
             return False
 
     def invalidate_positions_cache(self) -> None:
+        # Drop TTL cache only — keep last-good so UI does not flash FLAT on cool/WS events.
         self._positions_cache = None
         self._positions_cache_ts = 0.0
+
+    def apply_symbol_positions_snapshot(self, symbol: str, legs: list[dict[str, Any]]) -> None:
+        """Merge a forced symbol snapshot into sticky last-good (including empty = flat)."""
+        sym_u = str(symbol or "").upper()
+        if not sym_u:
+            return
+        legs = list(legs or [])
+        kept = [p for p in self._last_good_positions if str(p.get("symbol") or "").upper() != sym_u]
+        self._last_good_positions = kept + legs
+        self._last_good_positions_ts = time.time()
+        if self._positions_cache is not None:
+            self._positions_cache = [
+                p for p in self._positions_cache if str(p.get("symbol") or "").upper() != sym_u
+            ] + legs
+            self._positions_cache_ts = time.time()
+        else:
+            self._positions_cache = None
+            self._positions_cache_ts = 0.0
 
     def positions(self, symbol: str | None = None, *, force: bool = False) -> list[dict[str, Any]]:
         if self.cfg.paper:
@@ -1436,8 +1513,14 @@ class BinanceConnector:
             data = self._request("GET", "/fapi/v2/positionRisk", params or None, signed=True)
         except Exception as e:
             log.warning("positions: %s", e)
-            if self._positions_cache is not None and symbol is None:
-                return list(self._positions_cache)
+            if symbol is None:
+                if self._positions_cache is not None:
+                    return list(self._positions_cache)
+                if self._last_good_positions:
+                    return list(self._last_good_positions)
+            elif self._last_good_positions:
+                sym_u = symbol.upper()
+                return [p for p in self._last_good_positions if str(p.get("symbol") or "").upper() == sym_u]
             return []
         if not isinstance(data, list):
             data = [data] if data else []
@@ -1476,6 +1559,11 @@ class BinanceConnector:
         if symbol is None:
             self._positions_cache = out
             self._positions_cache_ts = now
+            self._last_good_positions = list(out)
+            self._last_good_positions_ts = now
+        else:
+            # Force/per-symbol fetches must update sticky last-good or closed legs resurrect.
+            self.apply_symbol_positions_snapshot(symbol, out)
         return out
 
     def has_open_position(self, symbol: str | None = None) -> bool:
@@ -1885,7 +1973,7 @@ class BinanceConnector:
 
         targets = [
             p
-            for p in self.positions(sym, force=False)
+            for p in self.positions(sym, force=True)
             if str(p.get("positionSide") or "").upper() == ps
             or (
                 ps == "SHORT"
@@ -1895,19 +1983,7 @@ class BinanceConnector:
             or (ps == "LONG" and str(p.get("type", "")).upper() == "BUY")
         ]
         if not targets:
-            targets = [
-                p
-                for p in self.positions(sym, force=True)
-                if str(p.get("positionSide") or "").upper() == ps
-                or (
-                    ps == "SHORT"
-                    and str(p.get("type", "")).upper() == "SELL"
-                    and str(p.get("positionSide") or "SHORT").upper() != "LONG"
-                )
-                or (ps == "LONG" and str(p.get("type", "")).upper() == "BUY")
-            ]
-        if not targets:
-            return {"ok": False, "error": f"no_{ps.lower()}_leg"}
+            return {"ok": False, "error": f"no_{ps.lower()}_leg", "already_flat": True}
 
         # Cancel resting TP/SL first — otherwise async TP can fire after flatten.
         try:

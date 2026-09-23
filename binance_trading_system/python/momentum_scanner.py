@@ -5,7 +5,8 @@ Monitors 1m / 3m / 5m / 15m rolling % on every price tick (max study window 15m)
 Entry: 15m move >= 5% gain, then >= 0.7% retrace from peak → Short (50% partition, 5x).
 Recovery: +2% adverse from Short → Long 1 (40%, 10x); at +4% → Long 2 (40%, 10x).
 Each recovery long requires a confirmed primary short, settle delay, and live adverse
-(not peak-only latch). Long 1 / Long 2 each close on a 0.5% retrace from their own peak.
+(not peak-only latch). While the short is underwater, Long 1 / Long 2 stay paired
+(no independent TP/0.5% trail) until rescue, invalidation, or short TP flattens all.
 Short TP at 2.5% down; the short trail keeps a profitable-MFE floor so it never acts
 as a hard stop. Recovery longs are never left without the primary short.
 """
@@ -50,11 +51,15 @@ SHORT_TP_PCT = float(os.environ.get("SCANNER_SHORT_TP_PCT", "2.5"))
 LONG1_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG1_PCT", "2.0"))
 LONG2_ADVERSE_PCT = float(os.environ.get("SCANNER_LONG2_PCT", "4.0"))
 LONG_TP_PCT = float(os.environ.get("SCANNER_LONG_TP_PCT", "2.5"))
-# Recovery longs close on a 0.5% retrace from their own peak — the original concept.
-# Deliberately NOT clamped by strategy_guards: the 1.5% floor exists to stop a tight
-# trail acting as a hard stop on the PRIMARY leg, which is the short.
+# Recovery longs may trail only when the primary short is already in profit.
+# While the short is underwater, hedges stay on (paired hold) until rescue / invalidation /
+# short TP — independent 0.5% pullback was the L→wipe loophole.
 LONG_HEDGE_PULLBACK_PCT = max(0.05, float(os.environ.get("SCANNER_LONG_PULLBACK_PCT", "0.5")))
 LONG_BOTH_PULLBACK_PCT = LONG_HEDGE_PULLBACK_PCT
+# Paired rescue: close all when hedge profit covers short loss + this % of partition.
+HEDGE_RESCUE_BUFFER_PCT = max(0.0, float(os.environ.get("SCANNER_RESCUE_BUFFER_PCT", "1.0")))
+# Hard pair invalidation from short entry (circuit breaker after failed fade).
+PAIR_INVALIDATION_PCT = max(3.0, float(os.environ.get("SCANNER_INVALIDATION_PCT", "6.5")))
 # Primary short trail — bounce off the trough, only after a profitable MFE.
 SHORT_TRAIL_PULLBACK_PCT = clamp_pullback_pct(float(os.environ.get("SCANNER_SHORT_PULLBACK_PCT", "1.5")))
 SHORT_TRAIL_MIN_MFE_PCT = clamp_pullback_mfe_pct(
@@ -491,11 +496,56 @@ class MomentumScanner:
         return clamp_pullback_mfe_pct(SHORT_TRAIL_MIN_MFE_PCT)
 
     def _effective_long_pullback_pct(self) -> float:
-        """Recovery Long 1 / Long 2 peak retrace — 0.5% by design, never floored to 1.5%."""
+        """Recovery Long 1 / Long 2 peak retrace — only used when short is already in profit."""
         return max(0.05, float(LONG_HEDGE_PULLBACK_PCT))
 
     def _effective_smart_exit_pct(self) -> float:
         return clamp_smart_exit_pct(SMART_EXIT_NET_PCT)
+
+    def _short_underwater(self, coin: CoinStrategy, price: float | None = None) -> bool:
+        """True when mark is at/above the primary short entry (short losing)."""
+        if not coin.short:
+            return False
+        px = float(price if price is not None else coin.price or 0.0)
+        return px >= float(coin.short.entry) - 1e-12
+
+    def _rescue_buffer_usd(self) -> float:
+        return max(0.0, self._partition_usd * HEDGE_RESCUE_BUFFER_PCT / 100.0)
+
+    def _hedge_rescue_ready(self, coin: CoinStrategy, price: float) -> bool:
+        """Long unrealized covers short loss + buffer → flatten the whole pair."""
+        if not coin.short or not (coin.long1 or coin.long2):
+            return False
+        short_pnl = self._leg_pnl(coin.short, price)
+        if short_pnl >= 0:
+            return False
+        long_pnl = 0.0
+        if coin.long1:
+            long_pnl += self._leg_pnl(coin.long1, price)
+        if coin.long2:
+            long_pnl += self._leg_pnl(coin.long2, price)
+        return long_pnl >= (-short_pnl) + self._rescue_buffer_usd()
+
+    def _pair_invalidation_hit(self, coin: CoinStrategy) -> bool:
+        """Hard circuit breaker from short entry — caps naked-short and failed-fade bleed."""
+        if not coin.short:
+            return False
+        return self._short_adverse_pct(coin) >= PAIR_INVALIDATION_PCT
+
+    def _try_close_hedge_leg(self, coin: CoinStrategy, leg_name: str, reason: str) -> None:
+        """
+        Independent hedge exit is allowed only when the short is already in profit.
+        While underwater, any hedge exit must flatten the full pair (no insurance dump).
+        """
+        if self._short_underwater(coin):
+            log.info(
+                "scanner %s paired hold blocks solo %s — flattening pair",
+                coin.symbol,
+                reason,
+            )
+            self._close_all(coin, f"{reason}_PAIR_FLATTEN")
+            return
+        self._close_leg(coin, leg_name, reason=reason)
 
     def _short_pullback_allowed(self, coin: CoinStrategy, price: float) -> bool:
         """Trail the short only after profitable MFE — never act as a hard stop above entry."""
@@ -2487,51 +2537,74 @@ class MomentumScanner:
         if coin.short and coin.long2 is None and self._long2_entry_allowed(coin):
             self._try_open_long2(coin)
 
-        # Long 1: TP at +2.5% or 0.5% retrace from its own peak — closes that leg only.
+        # Track hedge peaks always (for when short later goes into profit).
         if coin.long1:
             if coin.long1_peak_price is None or price > coin.long1_peak_price:
                 coin.long1_peak_price = price
-            if close_blocked:
-                pass
-            elif coin.long1.tp_price and price >= coin.long1.tp_price:
-                self._close_leg(coin, "long1", reason="LONG1_TP")
-            else:
-                peak = float(coin.long1_peak_price or price)
-                pullback_pct = self._long_hedge_pullback_pct(peak, price)
-                if pullback_pct >= self._effective_long_pullback_pct():
-                    log.info(
-                        "scanner %s LONG1_PULLBACK %.2f%% (peak=%s price=%s entry=%s)",
-                        coin.symbol,
-                        pullback_pct,
-                        peak,
-                        price,
-                        coin.long1.entry,
-                    )
-                    self._close_leg(coin, "long1", reason="LONG1_PULLBACK")
-
-        # Long 2: TP at +2.5% or 0.5% retrace from its own peak — closed immediately.
         if coin.long2:
             if coin.long2_peak_price is None or price > coin.long2_peak_price:
                 coin.long2_peak_price = price
-            if close_blocked:
-                pass
-            elif coin.long2.tp_price and price >= coin.long2.tp_price:
-                self._close_leg(coin, "long2", reason="LONG2_TP")
-            else:
-                peak = float(coin.long2_peak_price or price)
-                pullback_pct = self._long_hedge_pullback_pct(peak, price)
-                if pullback_pct >= self._effective_long_pullback_pct():
-                    log.info(
-                        "scanner %s LONG2_PULLBACK %.2f%% (peak=%s price=%s entry=%s)",
-                        coin.symbol,
-                        pullback_pct,
-                        peak,
-                        price,
-                        coin.long2.entry,
-                    )
-                    self._close_leg(coin, "long2", reason="LONG2_PULLBACK")
 
-        # Primary short: hard TP at -2.5%; trail only after profitable MFE (never a hard stop).
+        if close_blocked:
+            pass
+        elif coin.short and self._pair_invalidation_hit(coin):
+            log.info(
+                "scanner %s INVALIDATION adverse=%.2f%% >= %.2f%%",
+                sym,
+                self._short_adverse_pct(coin),
+                PAIR_INVALIDATION_PCT,
+            )
+            self._close_all(coin, "INVALIDATION")
+            return
+        elif coin.short and self._hedge_rescue_ready(coin, price):
+            log.info(
+                "scanner %s RESCUE long covers short+buffer pnl=%.4f",
+                sym,
+                coin.unrealized_pnl,
+            )
+            self._close_all(coin, "RESCUE")
+            return
+        elif coin.short and self._short_underwater(coin, price) and (coin.long1 or coin.long2):
+            # Paired hold: do not solo-exit hedges while short is losing.
+            pass
+        else:
+            # Short in profit (or no short): independent hedge TP / 0.5% peak trail OK.
+            if coin.long1:
+                if coin.long1.tp_price and price >= coin.long1.tp_price:
+                    self._try_close_hedge_leg(coin, "long1", "LONG1_TP")
+                else:
+                    peak = float(coin.long1_peak_price or price)
+                    pullback_pct = self._long_hedge_pullback_pct(peak, price)
+                    if pullback_pct >= self._effective_long_pullback_pct():
+                        log.info(
+                            "scanner %s LONG1_PULLBACK %.2f%% (peak=%s price=%s entry=%s)",
+                            coin.symbol,
+                            pullback_pct,
+                            peak,
+                            price,
+                            coin.long1.entry,
+                        )
+                        self._try_close_hedge_leg(coin, "long1", "LONG1_PULLBACK")
+
+            if coin.long2:
+                if coin.long2.tp_price and price >= coin.long2.tp_price:
+                    self._try_close_hedge_leg(coin, "long2", "LONG2_TP")
+                else:
+                    peak = float(coin.long2_peak_price or price)
+                    pullback_pct = self._long_hedge_pullback_pct(peak, price)
+                    if pullback_pct >= self._effective_long_pullback_pct():
+                        log.info(
+                            "scanner %s LONG2_PULLBACK %.2f%% (peak=%s price=%s entry=%s)",
+                            coin.symbol,
+                            pullback_pct,
+                            peak,
+                            price,
+                            coin.long2.entry,
+                        )
+                        self._try_close_hedge_leg(coin, "long2", "LONG2_PULLBACK")
+
+        # Primary short: hard TP at -2.5%; trail only after profitable MFE.
+        # INVALIDATION above caps adverse bleed (replaces the old "no hard stop" hole).
         if coin.short:
             if coin.short_trough_price is None or price < coin.short_trough_price:
                 coin.short_trough_price = price

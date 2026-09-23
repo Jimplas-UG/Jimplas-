@@ -4,8 +4,8 @@ import { fetchScannerSnapshot, subscribeScannerStream } from '../broker/binanceS
 
 const CACHE_KEY = '@bilshenz_v1/scannerSnapshotCache';
 const CACHE_TTL_MS = 90_000;
-const WS_STALE_MS = 5000;
-const REST_POLL_MS = 5000;
+const WS_STALE_MS = 2500;
+const REST_POLL_MS = 2000;
 
 function applyPayload(setters, payload) {
   if (!payload) return;
@@ -55,8 +55,10 @@ async function writeSnapshotCache(payload) {
 
 /**
  * Live tick momentum scanner feed — WebSocket primary, always-on REST fallback when WS stale.
+ * When `pauseUi` is true (user on another tab), payloads buffer in a ref so the JS thread
+ * is not flooded with large row-list re-renders during tab switches.
  */
-export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, connected = false } = {}) {
+export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, connected = false, pauseUi = false } = {}) {
   const [rows, setRows] = useState([]);
   const [signals, setSignals] = useState([]);
   const [blocks, setBlocks] = useState([]);
@@ -67,14 +69,37 @@ export function useTickScanner(baseUrl, { enabled = true, sessionEpoch = 0, conn
   const [lastTs, setLastTs] = useState(0);
   const lastWsAtRef = useRef(0);
   const pollBusyRef = useRef(false);
+  const pauseUiRef = useRef(pauseUi);
+  const pendingRef = useRef(null);
+  pauseUiRef.current = pauseUi;
 
-  const apply = useCallback((payload) => {
+  const applyNow = useCallback((payload) => {
     applyPayload(
       { setRows, setReady, setError, setLastTs, setScannerMeta, setSignals, setBlocks, setExecutionEvents },
       payload,
     );
     void writeSnapshotCache(payload);
   }, []);
+
+  const apply = useCallback((payload) => {
+    if (!payload) return;
+    if (pauseUiRef.current) {
+      pendingRef.current = payload;
+      // Keep compact meta fresh for status strips without rewriting the full market table.
+      if (payload.scanner) setScannerMeta(payload.scanner);
+      if (payload.ts) setLastTs(payload.ts);
+      return;
+    }
+    applyNow(payload);
+  }, [applyNow]);
+
+  useEffect(() => {
+    if (pauseUi) return;
+    const pending = pendingRef.current;
+    if (!pending) return;
+    pendingRef.current = null;
+    applyNow(pending);
+  }, [pauseUi, applyNow]);
 
   const refresh = useCallback(async () => {
     if (!baseUrl?.trim()) return;

@@ -81,6 +81,16 @@ const TF_COLS = [
   { key: 'pct15m', label: '15m' },
 ];
 
+const COL = {
+  asset: 72,
+  tf: 46,
+  status: 64,
+  pct24: 44,
+  flow: 40,
+  vol: 48,
+};
+const TABLE_MIN = COL.asset + COL.tf * 4 + COL.status + COL.pct24 + COL.flow + COL.vol;
+
 function MarketTableHeader({ C }) {
   return (
     <View
@@ -88,17 +98,19 @@ function MarketTableHeader({ C }) {
         flexDirection: 'row',
         alignItems: 'center',
         paddingVertical: 10,
-        paddingHorizontal: 4,
+        paddingHorizontal: 0,
         borderBottomWidth: 1,
         borderBottomColor: C.border,
-        minWidth: 380,
+        minWidth: TABLE_MIN,
       }}>
-      <Text style={{ width: 64, color: C.dim, fontSize: 10, fontWeight: '800', letterSpacing: 0.8 }}>Asset</Text>
+      <Text style={{ width: COL.asset, paddingRight: 4, color: C.dim, fontSize: 10, fontWeight: '800', letterSpacing: 0.8 }}>
+        Asset
+      </Text>
       {TF_COLS.map((col) => (
         <Text
           key={col.key}
           style={{
-            width: 48,
+            width: COL.tf,
             color: C.dim,
             fontSize: 10,
             fontWeight: '800',
@@ -110,7 +122,7 @@ function MarketTableHeader({ C }) {
       ))}
       <Text
         style={{
-          width: 56,
+          width: COL.status,
           color: C.dim,
           fontSize: 10,
           fontWeight: '800',
@@ -121,7 +133,7 @@ function MarketTableHeader({ C }) {
       </Text>
       <Text
         style={{
-          width: 44,
+          width: COL.pct24,
           color: C.dim,
           fontSize: 10,
           fontWeight: '800',
@@ -132,7 +144,7 @@ function MarketTableHeader({ C }) {
       </Text>
       <Text
         style={{
-          width: 40,
+          width: COL.flow,
           color: C.dim,
           fontSize: 10,
           fontWeight: '800',
@@ -143,7 +155,7 @@ function MarketTableHeader({ C }) {
       </Text>
       <Text
         style={{
-          width: 44,
+          width: COL.vol,
           color: C.dim,
           fontSize: 10,
           fontWeight: '800',
@@ -164,19 +176,19 @@ function MarketTableRow({ row, C }) {
         flexDirection: 'row',
         alignItems: 'center',
         paddingVertical: 10,
-        paddingHorizontal: 4,
+        paddingHorizontal: 0,
         borderBottomWidth: 1,
         borderBottomColor: C.border,
-        minWidth: 380,
+        minWidth: TABLE_MIN,
       }}>
-      <Text style={{ width: 64, color: C.text, fontSize: 12, fontWeight: '800' }} numberOfLines={1}>
+      <Text style={{ width: COL.asset, paddingRight: 4, color: C.text, fontSize: 12, fontWeight: '800' }} numberOfLines={1}>
         {row.coin || row.symbol}
       </Text>
       {TF_COLS.map((col) => (
         <Text
           key={col.key}
           style={{
-            width: 48,
+            width: COL.tf,
             color: pctColor(row[col.key], C),
             fontSize: 11,
             fontWeight: '700',
@@ -188,7 +200,7 @@ function MarketTableRow({ row, C }) {
       ))}
       <Text
         style={{
-          width: 56,
+          width: COL.status,
           color: statusColor(row.status, C),
           fontSize: 10,
           fontWeight: '800',
@@ -199,7 +211,7 @@ function MarketTableRow({ row, C }) {
       </Text>
       <Text
         style={{
-          width: 44,
+          width: COL.pct24,
           color: pctColor(row.pct24h, C),
           fontSize: 11,
           fontWeight: '700',
@@ -208,12 +220,12 @@ function MarketTableRow({ row, C }) {
         }}>
         {fmtPct(row.pct24h, 1)}
       </Text>
-      <View style={{ width: 40, alignItems: 'flex-end' }}>
+      <View style={{ width: COL.flow, alignItems: 'flex-end' }}>
         <ActivityBar score={score} C={C} />
       </View>
       <Text
         style={{
-          width: 44,
+          width: COL.vol,
           color: C.dim2,
           fontSize: 10,
           fontWeight: '700',
@@ -233,6 +245,7 @@ export default function TickScannerHome({
   connected,
   sessionExec,
   scannerMeta,
+  active = true,
 }) {
   const { colors: C } = useBilshenzTheme();
 
@@ -264,12 +277,13 @@ export default function TickScannerHome({
         connected={connected}
         pulse={pulse}
         rows={marketRows}
+        active={active}
       />
 
-      <PilotCard style={{ marginBottom: spacing.md, paddingHorizontal: spacing.md, paddingTop: spacing.sm, paddingBottom: spacing.xs }}>
+      <PilotCard style={{ marginBottom: spacing.md, padding: spacing.md }}>
         <PilotSectionTitle title="Market overview" />
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          <View style={{ flex: 1, minWidth: '100%' }}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ flexGrow: 1 }}>
+          <View style={{ minWidth: TABLE_MIN, width: '100%' }}>
             <MarketTableHeader C={C} />
             {!ready && !error ? (
               <View style={{ paddingVertical: 28, alignItems: 'center' }}>

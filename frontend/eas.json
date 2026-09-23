@@ -18,8 +18,12 @@
         "EAS_BUILD": "true",
         "EXPO_PUBLIC_DESK_LOCAL": "0",
         "EXPO_PUBLIC_DESK_REMOTE": "1",
-        "EXPO_PUBLIC_DESK_API_URL": "http://157.245.33.42:8791",
-        "EXPO_PUBLIC_BINANCE_API_URL": "http://157.245.33.42:8791/v1/binance",
+        "EXPO_PUBLIC_DESK_API_URL": "http://159.223.29.223:8791",
+        "EXPO_PUBLIC_BINANCE_API_URL": "http://159.223.29.223:8766",
+        "EXPO_PUBLIC_DESK_API_KEY": "f44a0e6b7ea7b76418e484d6041e52da",
+        "EXPO_PUBLIC_BRIDGE_TOKEN": "c891511f887e44b19be9d92108eb1cb0fcce82e6b1cfc858",
+        "EXPO_PUBLIC_BROKER_MODE": "binance",
+
         "ORG_GRADLE_PROJECT_reactNativeArchitectures": "armeabi-v7a,arm64-v8a"
       }
     },

@@ -1,6 +1,7 @@
 /**
  * Production env — process.env (EAS) + app.config extra (runtime fallback).
  * Never imports expo-constants at module load (Expo Go Android crash).
+ * Do not hardcode cloud IPs — set EXPO_PUBLIC_DESK_API_URL for Railway/Vercel.
  */
 
 function extra(key) {
@@ -21,16 +22,15 @@ function isLocalhostUrl(url) {
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(String(url || '').trim());
 }
 
-const PROD_DESK_DEFAULT = 'http://157.245.33.42:8791';
-
 export function getDeskApiUrl() {
   const fromEnv = process.env.EXPO_PUBLIC_DESK_API_URL?.trim();
   if (fromEnv) return stripTrailingSlash(fromEnv);
   const fromExtra = extra('deskApiUrl');
   if (fromExtra) return stripTrailingSlash(fromExtra);
-  // Release / production standalone builds must never fall back to localhost.
+  // Release builds must set EXPO_PUBLIC_DESK_API_URL (Railway HTTPS desk URL).
   if (typeof __DEV__ === 'undefined' || __DEV__ === false) {
-    return PROD_DESK_DEFAULT;
+    console.warn('[envConfig] EXPO_PUBLIC_DESK_API_URL missing in production build');
+    return '';
   }
   return 'http://127.0.0.1:8791';
 }
@@ -51,7 +51,7 @@ export function getBinanceApiUrl() {
   }
 
   if (typeof __DEV__ === 'undefined' || __DEV__ === false) {
-    return `${PROD_DESK_DEFAULT}/v1/binance`;
+    return desk ? `${stripTrailingSlash(desk)}/v1/binance` : '';
   }
   return 'http://127.0.0.1:8766';
 }

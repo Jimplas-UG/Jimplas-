@@ -66,9 +66,9 @@ export default function OnboardingGate({ visible, onComplete, onOpenProfile }) {
           <Text style={[styles.kicker, { color: C.gold }]}>BSV3.2 · BINANCE FUTURES</Text>
           <Text style={[styles.headline, { color: C.goldL }]}>Welcome to your trading desk</Text>
           <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
-            <Step n={1} title="Start the bridge" body="On your PC run: cd binance_trading_system/python && .\\start-api.ps1 — port 8766." C={C} />
-            <Step n={2} title="Connect from Profile" body="Open Profile → enter testnet API keys → Connect. Use testnet first." C={C} />
-            <Step n={3} title="Verify scanner" body="Scanner tab shows live USDT-M tick momentum when the bridge is reachable." C={C} />
+            <Step n={1} title="Confirm server bridge" body="App should use http://159.223.29.223:8766 (Frankfurt VPS). Settings → Advanced if needed." C={C} />
+            <Step n={2} title="Connect mainnet keys" body="Profile / Settings → MAINNET → paste Binance USDT-M Futures API key + secret → Connect." C={C} />
+            <Step n={3} title="Verify scanner" body="Scanner shows live USDT-M momentum when the bridge is connected." C={C} />
             <View style={[styles.probe, { borderColor: C.border, backgroundColor: C.panel2 }]}>
               <Text style={[styles.probeLbl, { color: C.dim }]}>BRIDGE CHECK</Text>
               {busy ? (
