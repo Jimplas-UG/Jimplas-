@@ -195,6 +195,14 @@ class BinanceConnector:
         # Survives TTL invalidation — UI must not flicker FLAT during REST cool.
         self._last_good_positions: list[dict[str, Any]] = []
         self._last_good_positions_ts = 0.0
+        self._last_good_account: dict[str, Any] | None = None
+        self._last_good_account_ts = 0.0
+        self._last_good_deals: list[dict[str, Any]] = []
+        self._last_good_deals_ts = 0.0
+        self._last_good_calendar: dict[str, Any] | None = None
+        self._last_good_calendar_ts = 0.0
+        # Symbols recently traded/closed — survives flatten so /api/logs still queries them.
+        self._deal_symbol_history: set[str] = set()
         # Fail-fast cool-down after 418/429 — never time.sleep(60+) on the request path
         # (that froze /health + WS accept under threadpool saturation).
         self._rest_cool_until = 0.0
@@ -280,6 +288,25 @@ class BinanceConnector:
                 f"Binance REST cooling ({self._rest_cool_reason or 'rate'}) {left:.0f}s left"
             )
 
+    def _wait_or_clear_cool_for_close(self, *, max_wait_s: float = 12.0) -> float:
+        """Emergency flatten must not die on our own cool timer — wait briefly or clear and try."""
+        left = self.rest_cooling_left()
+        if left <= 0:
+            return 0.0
+        wait = min(left + 0.2, max_wait_s)
+        log.warning(
+            "close: REST cool %.1fs (%s) — waiting %.1fs then attempting",
+            left,
+            self._rest_cool_reason or "rate",
+            wait,
+        )
+        time.sleep(wait)
+        still = self.rest_cooling_left()
+        if still > 0:
+            log.warning("close: clearing residual cool %.1fs for emergency order", still)
+            self.clear_rest_cool()
+        return wait
+
     def _engage_rest_cool(self, reason: str, seconds: float) -> None:
         """Record cool-down without sleeping — callers fail immediately."""
         # Keep cool short so Settings → Retry Connect recovers quickly.
@@ -309,6 +336,8 @@ class BinanceConnector:
         params: dict[str, Any] | None = None,
         signed: bool = False,
         timeout: float = 10.0,
+        *,
+        bypass_rest_cool: bool = False,
     ) -> Any:
         """Signed/unsigned REST via persistent HTTPS connection (order hot path)."""
         params = dict(params or {})
@@ -335,7 +364,8 @@ class BinanceConnector:
 
         headers = self._headers(signed)
         try:
-            self._raise_if_rest_cooling()
+            if not bypass_rest_cool:
+                self._raise_if_rest_cooling()
             self._http_conn.request(method, req_path, headers=headers)
             resp = self._http_conn.getresponse()
             body = resp.read().decode("utf-8", errors="replace")
@@ -347,7 +377,8 @@ class BinanceConnector:
                 msg = detail.get("msg") or detail.get("detail") or body
                 code = detail.get("code")
                 if resp.status == 418:
-                    self._engage_rest_cool("418", 45.0)
+                    # Close path: shorter cool so next emergency retry is not stuck 45s.
+                    self._engage_rest_cool("418", 12.0 if bypass_rest_cool else 45.0)
                 elif resp.status == 429:
                     self._engage_rest_cool("429", 10.0)
                 raise RuntimeError(f"{msg} (code={code}, http={resp.status})")
@@ -364,8 +395,11 @@ class BinanceConnector:
         signed: bool = False,
         timeout: float = 10.0,
         base_url: str | None = None,
+        *,
+        bypass_rest_cool: bool = False,
     ) -> Any:
-        self._raise_if_rest_cooling()
+        if not bypass_rest_cool:
+            self._raise_if_rest_cooling()
         params = dict(params or {})
         root = (base_url or self.base_url).rstrip("/")
         last_err: Exception | None = None
@@ -410,7 +444,7 @@ class BinanceConnector:
                     raise RuntimeError(detail.get("msg") or detail.get("detail") or body) from e
                 if e.code == 418:
                     # Do NOT sleep here — sleeping blocked the whole bridge for minutes.
-                    wait = min(12.0 * (attempt + 1), 25.0)
+                    wait = min(8.0 * (attempt + 1), 20.0) if bypass_rest_cool else min(12.0 * (attempt + 1), 25.0)
                     self._engage_rest_cool("418", wait)
                     raise RuntimeError("IP banned by Binance (418) — reduce request rate") from e
                 raise RuntimeError(detail.get("msg") or detail.get("detail") or body) from e
@@ -471,6 +505,11 @@ class BinanceConnector:
     def load_all_symbol_specs(self, force: bool = False) -> dict[str, dict[str, Any]]:
         if self._all_specs_cache and not force and time.time() - self._all_specs_loaded_at < 3600:
             return self._all_specs_cache
+        # Never refresh exchangeInfo during cool — serve cache or fail as rest_cooling.
+        if self.rest_cooling_left() > 0.25:
+            if self._all_specs_cache:
+                return self._all_specs_cache
+            self._raise_if_rest_cooling()
         data = self._request("GET", "/fapi/v1/exchangeInfo", timeout=45.0)
         cache: dict[str, dict[str, Any]] = {}
         for s in data.get("symbols", []):
@@ -485,10 +524,190 @@ class BinanceConnector:
 
     def get_symbol_spec(self, symbol: str) -> dict[str, Any]:
         sym = symbol.upper()
+        if self._all_specs_cache and sym in self._all_specs_cache:
+            return dict(self._all_specs_cache[sym])
         cache = self.load_all_symbol_specs()
         if sym not in cache:
             raise RuntimeError(f"Symbol {sym} not found on Binance Futures")
         return dict(cache[sym])
+
+    def remember_close_deals(self, closed_legs: list[dict[str, Any]] | None) -> None:
+        """Prepend manual/auto close fills into sticky history so UI updates immediately."""
+        if not closed_legs:
+            return
+        now_ms = int(time.time() * 1000)
+        rows: list[dict[str, Any]] = []
+        for leg in closed_legs:
+            if not isinstance(leg, dict):
+                continue
+            sym = str(leg.get("symbol") or "").upper()
+            if not sym:
+                continue
+            self._deal_symbol_history.add(sym)
+            pos_side = str(leg.get("position_side") or leg.get("side") or "").upper()
+            # Closing SHORT = BUY cover; closing LONG = SELL.
+            exit_type = "BUY" if pos_side in ("SHORT", "SELL") else "SELL"
+            vol = float(leg.get("volume") or 0)
+            px = float(leg.get("fill_price") or leg.get("price") or 0)
+            rpnl = float(leg.get("realized_pnl") if leg.get("realized_pnl") is not None else leg.get("profit") or 0)
+            rows.append(
+                {
+                    "ticket": leg.get("order") or f"close-{sym}-{now_ms}",
+                    "order_id": leg.get("order"),
+                    "symbol": sym,
+                    "type": exit_type,
+                    "volume": vol,
+                    "price": px,
+                    "quote_qty": vol * px,
+                    "profit": rpnl,
+                    "realized_pnl": rpnl,
+                    "commission": float(leg.get("commission") or 0),
+                    "position_side": pos_side,
+                    "time": now_ms,
+                    "is_close": True,
+                }
+            )
+        if not rows:
+            return
+        merged = rows + list(self._last_good_deals)
+        # Dedupe by order_id/ticket
+        seen: set[str] = set()
+        out: list[dict[str, Any]] = []
+        for d in merged:
+            key = str(d.get("order_id") or d.get("ticket") or "")
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            out.append(d)
+        self._last_good_deals = out[:200]
+        self._last_good_deals_ts = time.time()
+
+    def _note_deal_symbols(self, symbols: list[str] | set[str] | None) -> None:
+        for s in symbols or []:
+            u = str(s or "").upper()
+            if u:
+                self._deal_symbol_history.add(u)
+        # Cap history size — keep most recent additions by rebuilding from sticky deals + set.
+        if len(self._deal_symbol_history) > 40:
+            keep: set[str] = set()
+            for d in self._last_good_deals[:80]:
+                u = str(d.get("symbol") or "").upper()
+                if u:
+                    keep.add(u)
+            for u in list(self._deal_symbol_history)[-20:]:
+                keep.add(u)
+            self._deal_symbol_history = keep
+
+    def _deal_symbols_for_logs(self, symbol: str | None = None) -> list[str]:
+        sym_u = symbol.upper() if symbol else ""
+        if sym_u:
+            self._note_deal_symbols([sym_u])
+            return [sym_u]
+        symbols: set[str] = set(self._deal_symbol_history)
+        # Always include symbols already in sticky history (survives flatten).
+        for d in self._last_good_deals[:80]:
+            s = str(d.get("symbol") or "").upper()
+            if s:
+                symbols.add(s)
+        try:
+            for p in self.cached_positions() or self.positions(force=False):
+                s = str(p.get("symbol") or "").upper()
+                if s:
+                    symbols.add(s)
+        except Exception:
+            pass
+        # Avoid income hammer while cooling — history set is enough.
+        if self.rest_cooling_left() <= 0.25 and len(symbols) < 3:
+            try:
+                income = self._request("GET", "/fapi/v1/income", {"limit": 100}, signed=True)
+                for row in income or []:
+                    s = str(row.get("symbol") or "").upper()
+                    if s:
+                        symbols.add(s)
+            except Exception as e:
+                log.debug("income symbols: %s", e)
+        if not symbols and self.cfg.symbol:
+            symbols.add(self.cfg.symbol.upper())
+        self._note_deal_symbols(symbols)
+        return sorted(symbols)
+
+    def recent_deals(self, limit: int = 50, symbol: str | None = None) -> list[dict[str, Any]]:
+        """User trades across active/recent symbols — not only cfg.symbol."""
+        if self.cfg.paper:
+            from paper_simulator import paper_store
+
+            return paper_store.recent_deals(limit)
+        if not self.cfg.api_key:
+            return list(self._last_good_deals[: max(1, min(200, int(limit)))])
+        lim = max(1, min(200, int(limit)))
+        # Skip hammering userTrades while REST is cooling — keep last history visible.
+        cool_left = self.rest_cooling_left()
+        if cool_left > 0.25 and self._last_good_deals:
+            return list(self._last_good_deals[:lim])
+        # After restart during cool, sticky is empty — allow one bypass so history list repopulates.
+        bypass_cool = cool_left > 0.25 and not self._last_good_deals
+        symbols = self._deal_symbols_for_logs(symbol)
+        per_sym = max(15, lim // max(len(symbols), 1) + 10)
+        deals: list[dict[str, Any]] = []
+        any_ok = False
+        for sym in symbols:
+            try:
+                rows = self._request(
+                    "GET",
+                    "/fapi/v1/userTrades",
+                    {"symbol": sym, "limit": per_sym},
+                    signed=True,
+                    bypass_rest_cool=bypass_cool,
+                )
+                any_ok = True
+            except Exception as e:
+                log.warning("userTrades %s: %s", sym, e)
+                continue
+            for t in rows or []:
+                side = "BUY" if t.get("buyer") else "SELL"
+                deals.append(
+                    {
+                        "ticket": t.get("id"),
+                        "order_id": t.get("orderId"),
+                        "symbol": t.get("symbol"),
+                        "type": side,
+                        "volume": float(t.get("qty", 0)),
+                        "price": float(t.get("price", 0)),
+                        "quote_qty": float(t.get("quoteQty", 0)),
+                        "profit": float(t.get("realizedPnl", 0)),
+                        "commission": float(t.get("commission", 0)),
+                        "position_side": str(t.get("positionSide") or ""),
+                        "time": int(t.get("time", 0)),
+                    }
+                )
+        from deal_pnl import normalize_user_trades
+        from trade_history import include_trade_time
+
+        deals = normalize_user_trades(deals)
+        deals = [d for d in deals if include_trade_time(d.get("time"))]
+        # Permanent union with sticky — never drop prior history on partial polls.
+        if self._last_good_deals:
+            seen = {str(d.get("order_id") or d.get("ticket") or "") for d in deals}
+            for sticky in self._last_good_deals:
+                key = str(sticky.get("order_id") or sticky.get("ticket") or "")
+                if key and key in seen:
+                    continue
+                deals.append(sticky)
+                if key:
+                    seen.add(key)
+        deals.sort(key=lambda d: int(d.get("time") or 0), reverse=True)
+        # Keep a deep sticky buffer (beyond UI limit) so older fills are not discarded.
+        sticky_cap = max(lim, 200)
+        deals_for_sticky = deals[:sticky_cap]
+        deals = deals[:lim]
+        if deals_for_sticky:
+            self._note_deal_symbols({str(d.get("symbol") or "").upper() for d in deals_for_sticky})
+            self._last_good_deals = list(deals_for_sticky)
+            self._last_good_deals_ts = time.time()
+            return deals
+        # Never clear previous history — empty fetch keeps sticky forever.
+        return list(self._last_good_deals[:lim])
 
     def is_symbol_prepared(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
         """True when symbol/leverage was prepared recently (skip redundant REST)."""
@@ -945,6 +1164,30 @@ class BinanceConnector:
             log.warning("symbol_leverage: %s", e)
         return int(self.cfg.leverage)
 
+    def _remember_account(self, acct: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(acct, dict):
+            return acct
+        # Only cache rows that carry real balances — never sticky a cool-path stub.
+        if "balance" in acct or "equity" in acct or "profit" in acct:
+            self._last_good_account = dict(acct)
+            self._last_good_account_ts = time.time()
+        return acct
+
+    def _sticky_account(self, *, warning: str | None = None) -> dict[str, Any]:
+        if self._last_good_account:
+            out = dict(self._last_good_account)
+            out["stale"] = True
+            if warning:
+                out["warning"] = warning
+            return out
+        return {
+            "trade_allowed": True,
+            "server": "testnet" if self.cfg.testnet else "mainnet",
+            "currency": "USDT",
+            "stale": True,
+            **({"warning": warning} if warning else {}),
+        }
+
     def account_info_light(self) -> dict[str, Any] | None:
         """Single Binance account call — for login/status hot paths."""
         if self.cfg.paper:
@@ -954,7 +1197,7 @@ class BinanceConnector:
         upnl = float(data.get("totalUnrealizedProfit", 0))
         margin = float(data.get("totalPositionInitialMargin", 0))
         free = float(data.get("availableBalance", 0))
-        return {
+        acct = {
             "login": self.cfg.api_key[:8] + "…",
             "server": "testnet" if self.cfg.testnet else "mainnet",
             "balance": total,
@@ -967,6 +1210,7 @@ class BinanceConnector:
             "leverage": int(self.cfg.leverage),
             "margin_type": self.cfg.margin_type,
         }
+        return self._remember_account(acct)
 
     def status_snapshot(self, *, skip_ping: bool = False, light: bool = False) -> dict[str, Any]:
         if self.cfg.paper:
@@ -978,6 +1222,18 @@ class BinanceConnector:
             }
         if not self.cfg.api_key or not self.cfg.api_secret:
             return {"connected": False, "mode": "unconfigured", "testnet": self.cfg.testnet}
+        # Already cooling — never wipe floating/balance; skip REST hammering.
+        cool_left = self.rest_cooling_left()
+        if cool_left > 0.25 and self._last_good_account:
+            return {
+                "connected": True,
+                "mode": "testnet" if self.cfg.testnet else "live",
+                "testnet": self.cfg.testnet,
+                "account": self._sticky_account(warning=self._rest_cool_reason or "REST cooling"),
+                "warning": self._rest_cool_reason or f"REST cooling ({cool_left:.0f}s)",
+                "stale": True,
+                "rest_cool_s": cool_left,
+            }
         try:
             if not skip_ping and not self.ping():
                 env = "testnet.binancefuture.com" if self.cfg.testnet else "fapi.binance.com"
@@ -998,18 +1254,16 @@ class BinanceConnector:
         except Exception as e:
             log.error("status_snapshot: %s", e)
             msg = str(e)
-            # Fail soft while REST is cooling — do not flip connected off for forward-bot.
+            # Fail soft while REST is cooling — keep last-known balance/floating, never wipe to $0.
             if self._connected and ("cooling" in msg.lower() or "418" in msg or "429" in msg):
                 return {
                     "connected": True,
                     "mode": "testnet" if self.cfg.testnet else "live",
                     "testnet": self.cfg.testnet,
-                    "account": {
-                        "trade_allowed": True,
-                        "server": "testnet" if self.cfg.testnet else "mainnet",
-                        "currency": "USDT",
-                    },
+                    "account": self._sticky_account(warning=msg),
                     "warning": msg,
+                    "stale": True,
+                    "rest_cool_s": self.rest_cooling_left(),
                 }
             if self.cfg.testnet and re.search(r"invalid api-key|api-key format|signature", msg, re.I):
                 msg = (
@@ -1018,6 +1272,16 @@ class BinanceConnector:
                 )
             elif not self.cfg.testnet and re.search(r"invalid api-key|api-key format|signature", msg, re.I):
                 msg = f"{msg} — use mainnet Futures keys from binance.com (not testnet keys)"
+            # Prefer sticky account over hard offline flash when we still have a session.
+            if self._connected and self._last_good_account:
+                return {
+                    "connected": True,
+                    "mode": "testnet" if self.cfg.testnet else "live",
+                    "testnet": self.cfg.testnet,
+                    "account": self._sticky_account(warning=msg),
+                    "warning": msg,
+                    "stale": True,
+                }
             return {
                 "connected": False,
                 "mode": "testnet" if self.cfg.testnet else "live",
@@ -1046,7 +1310,7 @@ class BinanceConnector:
         margin = float(data.get("totalPositionInitialMargin", 0))
         free = float(data.get("availableBalance", 0))
         margin_type = self._account_margin_type_from_positions()
-        return {
+        acct = {
             "login": self.cfg.api_key[:8] + "…",
             "server": "testnet" if self.cfg.testnet else "mainnet",
             "balance": total,
@@ -1059,6 +1323,7 @@ class BinanceConnector:
             "leverage": self.symbol_leverage(),
             "margin_type": margin_type,
         }
+        return self._remember_account(acct)
 
     def _account_margin_type_from_positions(self) -> str:
         """Reflect Binance — ISOLATED unless any open position is CROSS."""
@@ -1300,77 +1565,6 @@ class BinanceConnector:
         )
         return est
 
-    def _deal_symbols_for_logs(self, symbol: str | None = None) -> list[str]:
-        sym_u = symbol.upper() if symbol else ""
-        if sym_u:
-            return [sym_u]
-        symbols: set[str] = set()
-        try:
-            for p in self.positions(force=True):
-                s = str(p.get("symbol") or "").upper()
-                if s:
-                    symbols.add(s)
-        except Exception:
-            pass
-        try:
-            income = self._request("GET", "/fapi/v1/income", {"limit": 100}, signed=True)
-            for row in income or []:
-                s = str(row.get("symbol") or "").upper()
-                if s:
-                    symbols.add(s)
-        except Exception as e:
-            log.debug("income symbols: %s", e)
-        if not symbols:
-            symbols.add(self.cfg.symbol.upper())
-        return sorted(symbols)
-
-    def recent_deals(self, limit: int = 50, symbol: str | None = None) -> list[dict[str, Any]]:
-        """User trades across active/recent symbols — not only cfg.symbol."""
-        if self.cfg.paper:
-            from paper_simulator import paper_store
-
-            return paper_store.recent_deals(limit)
-        if not self.cfg.api_key:
-            return []
-        lim = max(1, min(200, int(limit)))
-        symbols = self._deal_symbols_for_logs(symbol)
-        per_sym = max(15, lim // max(len(symbols), 1) + 10)
-        deals: list[dict[str, Any]] = []
-        for sym in symbols:
-            try:
-                rows = self._request(
-                    "GET",
-                    "/fapi/v1/userTrades",
-                    {"symbol": sym, "limit": per_sym},
-                    signed=True,
-                )
-            except Exception as e:
-                log.warning("userTrades %s: %s", sym, e)
-                continue
-            for t in rows or []:
-                side = "BUY" if t.get("buyer") else "SELL"
-                deals.append(
-                    {
-                        "ticket": t.get("id"),
-                        "order_id": t.get("orderId"),
-                        "symbol": t.get("symbol"),
-                        "type": side,
-                        "volume": float(t.get("qty", 0)),
-                        "price": float(t.get("price", 0)),
-                        "quote_qty": float(t.get("quoteQty", 0)),
-                        "profit": float(t.get("realizedPnl", 0)),
-                        "commission": float(t.get("commission", 0)),
-                        "position_side": str(t.get("positionSide") or ""),
-                        "time": int(t.get("time", 0)),
-                    }
-                )
-        from deal_pnl import normalize_user_trades
-        from trade_history import include_trade_time
-
-        deals = normalize_user_trades(deals)
-        deals = [d for d in deals if include_trade_time(d.get("time"))]
-        return deals[:lim]
-
     def ensure_exchange_leverage(self, symbol: str, leverage: int | None = None) -> bool:
         """Set symbol leverage on Binance (primary Short 5x / recovery Longs 10x)."""
         from leverage_policy import ALLOWED_LEVERAGES, SHORT_LEVERAGE
@@ -1491,7 +1685,7 @@ class BinanceConnector:
             self._positions_cache = None
             self._positions_cache_ts = 0.0
 
-    def positions(self, symbol: str | None = None, *, force: bool = False) -> list[dict[str, Any]]:
+    def positions(self, symbol: str | None = None, *, force: bool = False, bypass_rest_cool: bool = False) -> list[dict[str, Any]]:
         if self.cfg.paper:
             from paper_simulator import paper_store
 
@@ -1510,7 +1704,13 @@ class BinanceConnector:
             params: dict[str, Any] = {}
             if symbol:
                 params["symbol"] = symbol.upper()
-            data = self._request("GET", "/fapi/v2/positionRisk", params or None, signed=True)
+            data = self._request(
+                "GET",
+                "/fapi/v2/positionRisk",
+                params or None,
+                signed=True,
+                bypass_rest_cool=bypass_rest_cool,
+            )
         except Exception as e:
             log.warning("positions: %s", e)
             if symbol is None:
@@ -1573,10 +1773,16 @@ class BinanceConnector:
         sym = (symbol or self.cfg.symbol).upper()
         return self._request("GET", "/fapi/v1/openOrders", {"symbol": sym}, signed=True)
 
-    def cancel_all_orders(self, symbol: str | None = None) -> None:
+    def cancel_all_orders(self, symbol: str | None = None, *, bypass_rest_cool: bool = False) -> None:
         sym = (symbol or self.cfg.symbol).upper()
         try:
-            self._request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": sym}, signed=True)
+            self._request(
+                "DELETE",
+                "/fapi/v1/allOpenOrders",
+                {"symbol": sym},
+                signed=True,
+                bypass_rest_cool=bypass_rest_cool,
+            )
         except RuntimeError as e:
             log.warning("cancel_all: %s", e)
 
@@ -1971,9 +2177,11 @@ class BinanceConnector:
         if not self.cfg.api_key:
             return {"ok": False, "error": "api_key_missing"}
 
+        self._wait_or_clear_cool_for_close()
+
         targets = [
             p
-            for p in self.positions(sym, force=True)
+            for p in self.positions(sym, force=True, bypass_rest_cool=True)
             if str(p.get("positionSide") or "").upper() == ps
             or (
                 ps == "SHORT"
@@ -1987,7 +2195,7 @@ class BinanceConnector:
 
         # Cancel resting TP/SL first — otherwise async TP can fire after flatten.
         try:
-            self.cancel_all_orders(sym)
+            self.cancel_all_orders(sym, bypass_rest_cool=True)
         except Exception as e:
             log.warning("close_by_position_side cancel orders %s: %s", sym, e)
 
@@ -2025,7 +2233,9 @@ class BinanceConnector:
         )
         t0 = _time.perf_counter()
         try:
-            resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
+            resp = self._request_keepalive(
+                "POST", "/fapi/v1/order", params, signed=True, timeout=8.0, bypass_rest_cool=True
+            )
         except RuntimeError as e:
             if _is_percent_price_error(e):
                 log.warning(
@@ -2073,7 +2283,7 @@ class BinanceConnector:
         if volume is None and not _dust_retry:
             leftover = [
                 x
-                for x in self.positions(sym, force=True)
+                for x in self.positions(sym, force=True, bypass_rest_cool=True)
                 if str(x.get("positionSide") or "").upper() == ps
                 or (ps == "LONG" and str(x.get("type", "")).upper() == "BUY")
                 or (
@@ -2089,7 +2299,9 @@ class BinanceConnector:
                 if retry.get("ok") and retry.get("closed"):
                     closed = [leg_row] + list(retry.get("closed") or [])
                     latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
-                    return {"ok": True, "closed": closed, **leg_row, "latency_ms": latency_ms, "broker": "binance"}
+                    out = {"ok": True, "closed": closed, **leg_row, "latency_ms": latency_ms, "broker": "binance"}
+                    self.remember_close_deals(closed)
+                    return out
                 if not retry.get("ok") and retry.get("error") != f"no_{ps.lower()}_leg":
                     return {
                         "ok": False,
@@ -2097,7 +2309,9 @@ class BinanceConnector:
                         "closed": [leg_row],
                     }
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
-        return {"ok": True, "closed": [leg_row], **leg_row, "latency_ms": latency_ms, "broker": "binance"}
+        out = {"ok": True, "closed": [leg_row], **leg_row, "latency_ms": latency_ms, "broker": "binance"}
+        self.remember_close_deals(out.get("closed"))
+        return out
 
     def trade_pnl_calendar(self, days: int = 400) -> dict[str, Any]:
         """
@@ -2135,8 +2349,29 @@ class BinanceConnector:
         if not self.cfg.api_key:
             return {"ok": False, "total_pnl": 0.0, "days": [], "tz": tz_name}
 
+        from calendar_pnl import merge_calendar_day_buckets
+
+        sticky_map: dict[str, dict[str, float]] = {}
+        if isinstance(self._last_good_calendar, dict):
+            for row in self._last_good_calendar.get("days") or []:
+                dk = str(row.get("date") or "")
+                if not dk:
+                    continue
+                sticky_map[dk] = {
+                    "pnl": float(row.get("pnl") or 0),
+                    "trades": float(row.get("trades") or 0),
+                }
+
+        cool_left = self.rest_cooling_left()
+        if cool_left > 0.25 and sticky_map:
+            sticky = dict(self._last_good_calendar or {})
+            sticky["stale"] = True
+            sticky["ok"] = True
+            return sticky
+
         by_day: dict[str, dict[str, float]] = {}
         source = "income"
+        income_ok = False
 
         try:
             params: dict[str, Any] = {"incomeType": "REALIZED_PNL", "limit": 1000}
@@ -2149,27 +2384,36 @@ class BinanceConnector:
                 since_ms = 0
             if since_ms > 0:
                 params["startTime"] = since_ms
+            # UI calendar — one lightweight income read; bypass cool so history survives restarts.
             income = self._request(
                 "GET",
                 "/fapi/v1/income",
                 params,
                 signed=True,
+                bypass_rest_cool=True,
             )
             by_day = aggregate_income_days(income or [], include_trade_time=include_trade_time)
+            income_ok = bool(by_day)
         except Exception as e:
             log.warning("trade_pnl_calendar income: %s", e)
             by_day = {}
 
-        if not by_day:
+        if not by_day and not income_ok:
             source = "deals"
-            try:
-                by_day = aggregate_deal_days(
-                    self.recent_deals(min(500, max(100, lim_days * 3))),
-                    include_trade_time=include_trade_time,
-                )
-            except Exception as e:
-                log.warning("trade_pnl_calendar deals: %s", e)
-                by_day = {}
+            # Symbol-scoped deals are incomplete — skip during REST cool; serve sticky instead.
+            if cool_left <= 0.25:
+                try:
+                    by_day = aggregate_deal_days(
+                        self.recent_deals(min(500, max(100, lim_days * 3))),
+                        include_trade_time=include_trade_time,
+                    )
+                except Exception as e:
+                    log.warning("trade_pnl_calendar deals: %s", e)
+                    by_day = {}
+
+        # Union with sticky — partial income/deals polls must not wipe yesterday.
+        fresh_wins = income_ok or source == "income"
+        by_day = merge_calendar_day_buckets(sticky_map, by_day, fresh_wins=fresh_wins)
 
         days_out, total = finalize_calendar_days(by_day, days=lim_days, since_date=since_date)
         out = {
@@ -2181,6 +2425,15 @@ class BinanceConnector:
         }
         if since_date:
             out["since"] = since_date
+        if days_out:
+            self._last_good_calendar = dict(out)
+            self._last_good_calendar_ts = time.time()
+            return out
+        if self._last_good_calendar and sticky_map:
+            sticky = dict(self._last_good_calendar)
+            sticky["stale"] = True
+            sticky["ok"] = True
+            return sticky
         return out
 
     def close_position(self, symbol: str | None = None, volume: float | None = None) -> dict[str, Any]:
@@ -2195,7 +2448,8 @@ class BinanceConnector:
             return paper_store.close_position(symbol, volume)
 
         sym = (symbol or self.cfg.symbol).upper()
-        positions = self.positions(sym, force=True)
+        self._wait_or_clear_cool_for_close()
+        positions = self.positions(sym, force=True, bypass_rest_cool=True)
         if not positions:
             return {"ok": False, "error": "no_open_position"}
 
@@ -2203,7 +2457,7 @@ class BinanceConnector:
             return {"ok": False, "error": "api_key_missing"}
 
         try:
-            self.cancel_all_orders(sym)
+            self.cancel_all_orders(sym, bypass_rest_cool=True)
         except Exception as e:
             log.warning("close_position cancel orders %s: %s", sym, e)
 
@@ -2240,7 +2494,9 @@ class BinanceConnector:
                 entry_side_for_reduce=pos_side,
             )
             try:
-                resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
+                resp = self._request_keepalive(
+                    "POST", "/fapi/v1/order", params, signed=True, timeout=8.0, bypass_rest_cool=True
+                )
             except RuntimeError as e:
                 if _is_percent_price_error(e):
                     log.warning(
@@ -2294,17 +2550,17 @@ class BinanceConnector:
             _close_one(p, attempt=i)
 
         # Second pass: close any remaining hedge legs (first pass may have partially failed).
-        leftover = self.positions(sym, force=True)
+        leftover = self.positions(sym, force=True, bypass_rest_cool=True)
         if leftover:
             log.warning("close_position %s retrying %s leftover leg(s)", sym, len(leftover))
             try:
-                self.cancel_all_orders(sym)
+                self.cancel_all_orders(sym, bypass_rest_cool=True)
             except Exception:
                 pass
             for j, p in enumerate(leftover):
                 _close_one(p, attempt=100 + j)
 
-        remaining = self.positions(sym, force=True)
+        remaining = self.positions(sym, force=True, bypass_rest_cool=True)
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         self.invalidate_positions_cache()
         ok = len(remaining) == 0 and len(closed) > 0
@@ -2328,6 +2584,8 @@ class BinanceConnector:
             ]
         elif not closed:
             out["error"] = (errors[0]["error"] if errors else "close_failed")
+        if closed:
+            self.remember_close_deals(closed)
         return out
 
     def close_all_positions(self) -> dict[str, Any]:
@@ -2342,9 +2600,10 @@ class BinanceConnector:
         errors: list[dict[str, str]] = []
         total_latency = 0.0
         symbols: list[str] = []
+        self._wait_or_clear_cool_for_close()
         # Multi-pass: MARKET(+IOC) per symbol, then retry leftovers after brief settle.
         for attempt in range(3):
-            positions = self.positions(force=True)
+            positions = self.positions(force=True, bypass_rest_cool=True)
             if not positions:
                 break
             symbols = sorted({str(p.get("symbol") or "").upper() for p in positions if p.get("symbol")})
@@ -2358,14 +2617,14 @@ class BinanceConnector:
                     # Keep last error per symbol; continue retries.
                     errors = [e for e in errors if e.get("symbol") != sym]
                     errors.append({"symbol": sym, "error": err})
-            leftover = self.positions(force=True)
+            leftover = self.positions(force=True, bypass_rest_cool=True)
             if not leftover:
                 errors = []
                 break
             if attempt < 2:
                 time.sleep(1.2)
         self.invalidate_positions_cache()
-        remaining = self.positions(force=True)
+        remaining = self.positions(force=True, bypass_rest_cool=True)
         return {
             "ok": len(remaining) == 0,
             "closed": all_closed,
@@ -2614,7 +2873,9 @@ class BinanceConnector:
             hedge_position_side=hedge_side,
         )
         try:
-            resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
+            resp = self._request_keepalive(
+                "POST", "/fapi/v1/order", params, signed=True, timeout=8.0, bypass_rest_cool=True
+            )
             order_id = resp.get("orderId")
             fill = float(resp.get("avgPrice") or tick["bid"])
             rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)

@@ -10,6 +10,7 @@ import { PilotCard, PilotHeroBalance, PilotSectionTitle } from '../components/pi
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
 import { useDiagnostics } from '../hooks/useDiagnostics';
+import { liveFloatingTotal } from '../lib/liveFloatingPnl';
 import { pickPrimaryExecutionCandidate } from '../lib/scannerExecution';
 import { spacing } from '../theme/designTokens';
 
@@ -23,6 +24,7 @@ function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
   });
 
   const account = useBrokerSession ? brokerFeed.account : null;
+  const positions = useBrokerSession ? brokerFeed.positions || [] : [];
 
   const executionLead = useMemo(
     () => pickPrimaryExecutionCandidate(scanner?.rows, scanner?.scannerMeta),
@@ -30,7 +32,18 @@ function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
   );
 
   const positionSymbol =
-    useBrokerSession && brokerFeed.positions?.length === 1 ? brokerFeed.positions[0]?.symbol : null;
+    positions.length === 1
+      ? positions[0]?.symbol
+      : positions.find((p) => String(p.symbol || '').toUpperCase() === String(executionLead?.symbol || '').toUpperCase())
+          ?.symbol || positions[0]?.symbol || null;
+
+  const liveMark = executionLead?.price ?? brokerFeed.price;
+  const floating = useMemo(() => {
+    if (positions.length) {
+      return liveFloatingTotal(positions, liveMark, positionSymbol);
+    }
+    return Number(account?.profit ?? 0);
+  }, [positions, liveMark, positionSymbol, account?.profit]);
 
   return (
     <ScrollView
@@ -41,7 +54,7 @@ function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
       removeClippedSubviews>
       <PilotHeroBalance
         balance={account?.balance}
-        floating={account?.profit}
+        floating={floating}
         connected={connected}
         onConnect={onOpenProfile}
       />
@@ -86,17 +99,17 @@ function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
       {executionLead ? <ScannerQuoteStrip candidate={executionLead} /> : null}
 
       <OpenPositionsPanel
-        positions={brokerFeed.positions || []}
+        positions={positions}
         positionsStale={!!brokerFeed.positionsStale}
         positionsCoolS={brokerFeed.positionsCoolS || 0}
         brokerDeals={brokerFeed.brokerDeals || []}
-        livePrice={executionLead?.price ?? brokerFeed.price}
+        livePrice={liveMark}
         bid={brokerFeed.bid}
         ask={brokerFeed.ask}
         quoteSymbol={positionSymbol}
         hideQuote
         binanceBaseUrl={baseUrl}
-        brokerConnected={connected || (brokerFeed.positions?.length > 0)}
+        brokerConnected={connected || positions.length > 0}
         onRefresh={brokerFeed.refreshBrokerSnapshot}
         onRefreshAfterClose={brokerFeed.refreshAfterClose}
         onOptimisticClose={brokerFeed.applyOptimisticClose}
@@ -110,7 +123,12 @@ function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
         brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : []}
         active={active}
       />
-      <TradeHistoryPanel brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : []} />
+      <TradeHistoryPanel
+        brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : []}
+        binanceBaseUrl={baseUrl}
+        brokerConnected={connected && useBrokerSession}
+        active={active}
+      />
     </ScrollView>
   );
 }

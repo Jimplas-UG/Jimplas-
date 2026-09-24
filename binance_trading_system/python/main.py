@@ -1362,6 +1362,11 @@ def api_close(body: CloseBody):
         return {**cached, "close_operation_id": op_id, "idempotent_replay": True}
 
     t0 = time.perf_counter()
+    # Manual close is emergency — never refuse solely because of our REST cool timer.
+    try:
+        connector._wait_or_clear_cool_for_close()
+    except Exception as e:
+        log.warning("close cool wait: %s", e)
     pair_gate.begin_close(sym)
     r: dict[str, Any] = {"ok": False, "broker": "binance"}
     try:
@@ -1501,6 +1506,16 @@ def api_close(body: CloseBody):
             r["verify_error"] = "position_query_failed"
 
         connector.invalidate_positions_cache()
+        if r.get("ok"):
+            if r.get("closed"):
+                try:
+                    connector.remember_close_deals(list(r.get("closed") or []))
+                except Exception as e:
+                    log.warning("remember_close_deals: %s", e)
+            # Echo sticky history head so the app can paint Trade history immediately.
+            head = list(getattr(connector, "_last_good_deals", None) or [])[:30]
+            if head:
+                r["deals_head"] = head
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         r["latency_ms"] = r.get("latency_ms") or latency_ms
         r["close_operation_id"] = op_id
@@ -1644,6 +1659,12 @@ def api_close_all():
             log.warning("post-close-all reconcile: %s", e)
 
     threading.Thread(target=_bg_after_close_all, daemon=True, name="close-all-reconcile").start()
+    if r.get("closed"):
+        try:
+            connector.remember_close_deals(list(r.get("closed") or []))
+        except Exception as e:
+            log.warning("close-all remember_close_deals: %s", e)
+        r["deals_head"] = list(getattr(connector, "_last_good_deals", None) or [])[:30]
     return r
 
 
@@ -1682,6 +1703,13 @@ def api_trade_calendar(days: int = 400):
         return connector.trade_pnl_calendar(lim)
     except Exception as e:
         log.warning("trade_calendar: %s", e)
+        sticky = getattr(connector, "_last_good_calendar", None)
+        if isinstance(sticky, dict) and sticky.get("days"):
+            out = dict(sticky)
+            out["stale"] = True
+            out["ok"] = True
+            out["error"] = str(e)
+            return out
         return {"ok": False, "total_pnl": 0.0, "days": [], "error": str(e)}
 
 
@@ -1692,15 +1720,35 @@ def api_logs(limit: int = 50, symbol: str | None = None):
     if connector.cfg.paper:
         from paper_simulator import paper_store
 
-        return {"deals": paper_store.recent_deals(lim)}
+        return {"deals": paper_store.recent_deals(lim), "ok": True}
+    sticky = list(getattr(connector, "_last_good_deals", None) or [])[:lim]
     if not connector.cfg.api_key:
-        return {"deals": [], "note": "not connected"}
+        return {"deals": sticky, "ok": bool(sticky), "note": "not connected", "stale": bool(sticky)}
     try:
+        cool = connector.rest_cooling_left()
         deals = connector.recent_deals(lim, sym)
-        return {"deals": deals, "limit": lim, "symbol": sym}
+        # Always prefer union: if fetch is shorter than sticky, sticky wins as base.
+        if sticky and len(deals or []) < len(sticky):
+            # recent_deals already unions into sticky store; re-read for response.
+            deals = list(getattr(connector, "_last_good_deals", None) or [])[:lim] or deals or sticky
+        if not deals and sticky:
+            deals = sticky
+        return {
+            "deals": deals or sticky,
+            "limit": lim,
+            "symbol": sym,
+            "ok": True,
+            "stale": cool > 0.25,
+        }
     except Exception as e:
         log.warning("recent_deals: %s", e)
-        return {"deals": [], "error": str(e), "limit": lim}
+        return {
+            "deals": sticky,
+            "error": str(e),
+            "limit": lim,
+            "ok": False,
+            "stale": True,
+        }
 
 
 if __name__ == "__main__":

@@ -1,8 +1,31 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
+import { fetchBinanceDeals } from '../broker/binanceFuturesApi';
 import { displayDealPnl, isCloseDeal } from '../lib/dealPnl';
 import { formatFuturesPrice } from '../lib/futuresPrice';
+
+function dealRowKey(d) {
+  return String(d?.order_id ?? d?.orderId ?? d?.ticket ?? d?.order ?? '');
+}
+
+function mergeDealRows(prev, incoming, maxLen = 200) {
+  const out = [];
+  const seen = new Set();
+  const push = (row) => {
+    if (!row || typeof row !== 'object') return;
+    const key = dealRowKey(row);
+    if (key) {
+      if (seen.has(key)) return;
+      seen.add(key);
+    }
+    out.push(row);
+  };
+  for (const row of incoming || []) push(row);
+  for (const row of prev || []) push(row);
+  out.sort((a, b) => (Number(b.time) || 0) - (Number(a.time) || 0));
+  return out.slice(0, maxLen);
+}
 
 const FILTERS = [
   { id: 'all', label: 'All' },
@@ -47,18 +70,50 @@ function startOfUtcDay() {
 /**
  * Clear exchange-reconciled fill/close history (from bridge /api/logs deals).
  */
-export default function TradeHistoryPanel({ brokerDeals = [], limit = 40 }) {
+export default function TradeHistoryPanel({
+  brokerDeals = [],
+  binanceBaseUrl,
+  brokerConnected = false,
+  active = true,
+  limit = 40,
+}) {
   const { colors: C } = useBilshenzTheme();
   const [filter, setFilter] = useState('all');
+  const [polledDeals, setPolledDeals] = useState([]);
+
+  useEffect(() => {
+    if (!active || !brokerConnected || !binanceBaseUrl?.trim()) return undefined;
+    let cancelled = false;
+    const pull = async () => {
+      const res = await fetchBinanceDeals(binanceBaseUrl, Math.min(200, limit * 3));
+      if (cancelled || !res?.deals?.length) return;
+      setPolledDeals((prev) => mergeDealRows(prev, res.deals));
+    };
+    void pull();
+    const id = setInterval(pull, 25000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [active, brokerConnected, binanceBaseUrl, limit]);
+
+  const allDeals = useMemo(
+    () => mergeDealRows(polledDeals, brokerDeals),
+    [polledDeals, brokerDeals],
+  );
 
   const rows = useMemo(() => {
     const day0 = startOfUtcDay();
-    let list = Array.isArray(brokerDeals) ? [...brokerDeals] : [];
+    let list = Array.isArray(allDeals) ? [...allDeals] : [];
     list.sort((a, b) => (b.time ?? 0) - (a.time ?? 0));
     list = list.filter((d) => {
       const pnl = displayDealPnl(d);
       const side = sideOf(d);
-      const closed = isCloseDeal(d) || d?.realized_pnl != null || d?.profit != null;
+      const closed =
+        d?.is_close === true ||
+        isCloseDeal(d) ||
+        d?.realized_pnl != null ||
+        d?.profit != null;
       if (filter === 'closed') return closed;
       if (filter === 'long') return side === 'LONG';
       if (filter === 'short') return side === 'SHORT';
@@ -68,7 +123,7 @@ export default function TradeHistoryPanel({ brokerDeals = [], limit = 40 }) {
       return true;
     });
     return list.slice(0, limit);
-  }, [brokerDeals, filter, limit]);
+  }, [allDeals, filter, limit]);
 
   return (
     <View style={[st.wrap, { borderColor: C.border, backgroundColor: C.panel }]}>

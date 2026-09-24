@@ -5,6 +5,7 @@ import { formatFuturesPrice } from '../lib/futuresPrice';
 import { displayDealPnl, isCloseDeal } from '../lib/dealPnl';
 import { postBinanceClosePosition, postBinanceCloseAllPositions } from '../broker/binanceFuturesApi';
 import { formatPairLabel } from '../lib/futuresSymbol';
+import { liveFloatingTotal, liveLegProfit } from '../lib/liveFloatingPnl';
 
 function fmtPx(n) {
   return formatFuturesPrice(n);
@@ -78,8 +79,8 @@ export default function OpenPositionsPanel({
   }, [brokerDeals]);
 
   const totalFloating = useMemo(
-    () => positions.reduce((sum, p) => sum + Number(p.profit ?? 0), 0),
-    [positions],
+    () => liveFloatingTotal(positions, livePrice, quoteSymbol || null),
+    [positions, livePrice, quoteSymbol],
   );
 
   const legSide = (pos) =>
@@ -105,8 +106,14 @@ export default function OpenPositionsPanel({
           closeOperationId,
         });
         if (r.ok) {
-          // Immediate UI — do not wait for poll; sticky last-good used to resurrect closed legs.
-          onOptimisticClose?.({ symbol, positionSide, closePair });
+          // Immediate UI — positions + trade history (do not wait for poll).
+          onOptimisticClose?.({
+            symbol,
+            positionSide,
+            closePair,
+            closed: Array.isArray(r.closed) ? r.closed : [],
+            dealsHead: Array.isArray(r.dealsHead) ? r.dealsHead : [],
+          });
           const closedLegs = Array.isArray(r.closed) ? r.closed : [];
           const closed = closedLegs[0];
           let msg;
@@ -221,7 +228,12 @@ export default function OpenPositionsPanel({
               try {
                 const r = await postBinanceCloseAllPositions(binanceBaseUrl);
                 if (r.ok) {
-                  onOptimisticClose?.({ closePair: true, symbol: '*' });
+                  onOptimisticClose?.({
+                    closePair: true,
+                    symbol: '*',
+                    closed: Array.isArray(r.closed) ? r.closed : [],
+                    dealsHead: Array.isArray(r.dealsHead) ? r.dealsHead : [],
+                  });
                   onCloseMessage?.(`Closed ${r.closed?.length ?? 0} leg(s)`);
                   if (onRefreshAfterClose) {
                     await onRefreshAfterClose();
@@ -319,13 +331,18 @@ export default function OpenPositionsPanel({
                 ) : null}
                 {legs.map((p, i) => {
                   const key = `${p.symbol}-${legSide(p)}-${p.price_open}-${i}`;
-                  const profit = Number(p.profit ?? 0);
+                  const markForLeg =
+                    Number.isFinite(Number(livePrice)) &&
+                    (!quoteSymbol || String(p.symbol || '').toUpperCase() === String(quoteSymbol).toUpperCase())
+                      ? livePrice
+                      : p.price_current;
+                  const profit = liveLegProfit(p, markForLeg);
                   const entry = Number(p.price_open ?? 0);
                   const sideCol = p.type === 'BUY' ? C.green : C.red;
                   const label = legLabel(p);
                   const dist =
-                    Number.isFinite(livePrice) && entry > 0
-                      ? formatFuturesPrice(p.type === 'BUY' ? livePrice - entry : entry - livePrice)
+                    Number.isFinite(Number(markForLeg)) && entry > 0
+                      ? formatFuturesPrice(p.type === 'BUY' ? markForLeg - entry : entry - markForLeg)
                       : '—';
                   const busy = closingKey === `${p.symbol}-${legSide(p)}`;
                   return (

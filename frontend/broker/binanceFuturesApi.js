@@ -263,11 +263,23 @@ export async function fetchBinanceDeals(apiBaseUrl, limit = 100) {
   const b = base(apiBaseUrl);
   try {
     const res = await binanceFetch(b, `/api/logs?limit=${limit}`, {}, 15000);
-    if (!res.ok) return [];
-    const j = await res.json();
-    return Array.isArray(j.deals) ? j.deals : [];
-  } catch {
-    return [];
+    const j = await res.json().catch(() => ({}));
+    const deals = Array.isArray(j.deals) ? j.deals : [];
+    const stale = !!j.stale;
+    const okFlag = j.ok !== undefined ? !!j.ok : res.ok && !j.error;
+    return {
+      ok: okFlag && (deals.length > 0 || !stale),
+      deals,
+      stale,
+      error: j.error || (!res.ok ? `HTTP ${res.status}` : null),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      deals: [],
+      stale: true,
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
 }
 
@@ -473,13 +485,13 @@ export async function postBinanceClosePosition(
   if (closePair) body.close_pair = true;
   if (volume != null) body.volume = volume;
   if (closeOperationId) body.close_operation_id = String(closeOperationId).slice(0, 64);
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await binanceFetch(
         b,
         '/api/close',
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
-        45000,
+        60000,
       );
       const text = await res.text();
       let j = {};
@@ -490,8 +502,15 @@ export async function postBinanceClosePosition(
       }
       let snippet = trimSnippet(text || (res.ok ? 'OK' : 'Empty body'));
       if (!res.ok) {
-        if (res.status === 429 && attempt < 1) {
-          await new Promise((r) => setTimeout(r, 200));
+        if (res.status === 429 && attempt < 2) {
+          await new Promise((r) => setTimeout(r, 400));
+          continue;
+        }
+        const coolMsg = String(j.detail?.error || j.error || snippet || '');
+        if (/REST cooling|418|IP banned/i.test(coolMsg) && attempt < 2) {
+          const m = coolMsg.match(/(\d+)\s*s/);
+          const waitS = Math.min(Math.max(Number(m?.[1]) || 3, 1), 12);
+          await new Promise((r) => setTimeout(r, waitS * 1000 + 250));
           continue;
         }
         if (res.status === 409 && (j.detail?.error === 'close_in_progress' || j.error === 'close_in_progress')) {
@@ -517,6 +536,7 @@ export async function postBinanceClosePosition(
         bodySnippet: snippet,
         connected: true,
         closed: Array.isArray(j.closed) ? j.closed : j.detail?.closed || [],
+        dealsHead: Array.isArray(j.deals_head) ? j.deals_head : j.detail?.deals_head || [],
         latencyMs: j.latency_ms ?? j.detail?.latency_ms,
         error: j.error ?? j.detail?.error,
         verifiedFlat: j.verified_flat === true || j.detail?.verified_flat === true,
@@ -526,8 +546,8 @@ export async function postBinanceClosePosition(
         closeOperationId: j.close_operation_id || j.detail?.close_operation_id || closeOperationId,
       };
     } catch (e) {
-      if (attempt < 1) {
-        await new Promise((r) => setTimeout(r, 120));
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 400));
         continue;
       }
       return { ok: false, status: 0, bodySnippet: trimSnippet(e instanceof Error ? e.message : String(e)), connected: false };
@@ -565,6 +585,7 @@ export async function postBinanceCloseAllPositions(apiBaseUrl) {
       bodySnippet: snippet,
       connected: true,
       closed: Array.isArray(j.closed) ? j.closed : j.detail?.closed || [],
+      dealsHead: Array.isArray(j.deals_head) ? j.deals_head : j.detail?.deals_head || [],
       symbols: j.symbols || j.detail?.symbols || [],
       latencyMs: j.latency_ms ?? j.detail?.latency_ms,
       error: j.error ?? j.detail?.error,

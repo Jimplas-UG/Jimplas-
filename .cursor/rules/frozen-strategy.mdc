@@ -1,0 +1,35 @@
+---
+description: Never modify the live short-first trading strategy — it is the frozen production contract.
+alwaysApply: true
+---
+
+# Frozen trading strategy — DO NOT TOUCH
+
+The live Binance bot strategy is the **real deal**. Do not change it unless the user explicitly and clearly orders a strategy change.
+
+## Locked strategy
+
+- ID: `short_first_v1`
+- Name: Short → Long 1 → Long 2
+- Contract: `binance_trading_system/python/frozen_strategy.py`
+
+## Never modify (unless user explicitly requests a strategy change)
+
+- Entry / exit / signal thresholds
+- Leverage (Short 5x, Long1/Long2 10x)
+- Partition sizing (50% / 40% / 40%)
+- TP / SL / trailing / pullback / rescue / invalidation
+- Leg order (SHORT primary, LONG1/LONG2 recovery hedges)
+- Paired-hold / orphan-long rules
+- `frozen_strategy.py`, strategy defaults in `momentum_scanner.py`, `leverage_policy.py`, `strategy_guards.py`
+
+## Allowed without strategy change
+
+- Performance, UI, tabs, WebSockets
+- Manual close reliability / REST cool / idempotency
+- Connection health / observability / deploy scripts
+- Bugfixes that restore the frozen contract (do not invent new rules)
+
+## If a strategy issue is found
+
+Document it. Do **not** silently change trading logic.

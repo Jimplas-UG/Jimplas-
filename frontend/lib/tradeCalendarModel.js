@@ -31,6 +31,22 @@ export function indexDaysByDate(days) {
   return map;
 }
 
+/** Union daily rows — never drop prior days when a poll returns only today. */
+export function mergeCalendarDayRows(prev, incoming) {
+  const map = new Map();
+  for (const row of prev ?? []) {
+    if (row?.date) map.set(row.date, row);
+  }
+  for (const row of incoming ?? []) {
+    if (!row?.date) continue;
+    const old = map.get(row.date);
+    if (!old || Number(row.trades ?? 0) >= Number(old.trades ?? 0)) {
+      map.set(row.date, row);
+    }
+  }
+  return [...map.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+}
+
 /**
  * Full Sunday→Saturday month matrix with leading/trailing blanks so day 1
  * aligns under the correct weekday and end-of-month days stay on-grid.

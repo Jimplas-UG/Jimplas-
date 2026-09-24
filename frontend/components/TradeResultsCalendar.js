@@ -7,6 +7,7 @@ import {
   aggregateDealsToDays,
   fmtCalendarMoney,
   indexDaysByDate,
+  mergeCalendarDayRows,
   monthGrid,
   weekCells,
   yearMonths,
@@ -85,14 +86,18 @@ export default function TradeResultsCalendar({
 
   const applyLocalDays = useCallback((deals) => {
     const local = aggregateDealsToDays(deals);
-    setServerDays(local);
-    setTotalPnl(local.reduce((s, d) => s + d.pnl, 0));
+    if (!local.length) return; // keep last-known calendar — never flash blank
+    setServerDays((prev) => {
+      const merged = mergeCalendarDayRows(prev, local);
+      setTotalPnl(merged.reduce((s, d) => s + Number(d.pnl ?? 0), 0));
+      return merged;
+    });
   }, []);
 
   useEffect(() => {
     if (!active) return undefined;
     if (!brokerConnected || !binanceBaseUrl?.trim()) {
-      applyLocalDays(brokerDeals);
+      if (brokerDeals?.length) applyLocalDays(brokerDeals);
       return undefined;
     }
 
@@ -104,18 +109,23 @@ export default function TradeResultsCalendar({
         if (cancelled) return;
         if (j?.days?.length) {
           const clean = sanitizeCalendarDays(j.days);
-          setServerDays(clean);
-          const sum = clean.reduce((s, d) => s + Number(d.pnl ?? 0), 0);
-          // Period total always from days — ignore poisoned j.total_pnl
-          setTotalPnl(Number.isFinite(sum) ? sum : 0);
-          setCalendarMeta({
-            tz: j.tz || 'Africa/Nairobi',
-            since: j.since || '',
-            source: j.source || 'income',
-          });
-        } else {
-          applyLocalDays(brokerDeals);
+          if (clean.length) {
+            setServerDays((prev) => {
+              const merged = mergeCalendarDayRows(prev, clean);
+              const sum = merged.reduce((s, d) => s + Number(d.pnl ?? 0), 0);
+              setTotalPnl(Number.isFinite(sum) ? sum : 0);
+              return merged;
+            });
+            setCalendarMeta({
+              tz: j.tz || 'Africa/Nairobi',
+              since: j.since || '',
+              source: j.source || 'income',
+            });
+            return;
+          }
         }
+        // Failed/empty fetch — keep previous days; fall back to local deals only if we have none yet.
+        if (brokerDeals?.length) applyLocalDays(brokerDeals);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -124,7 +134,7 @@ export default function TradeResultsCalendar({
     return () => {
       cancelled = true;
     };
-  }, [active, binanceBaseUrl, brokerConnected, dealsSignature, applyLocalDays]);
+  }, [active, brokerConnected, binanceBaseUrl, dealsSignature, applyLocalDays, brokerDeals]);
 
   const dayMap = useMemo(() => indexDaysByDate(serverDays), [serverDays]);
   const y = cursor.getFullYear();

@@ -4,6 +4,7 @@ import { buildBundleFromM30Bars } from '../lib/marketBundle';
 import { DEFAULT_CHART_SYMBOL, sanitizeFuturesSymbol } from '../lib/futuresSymbol';
 import { roundFuturesMid } from '../lib/futuresPrice';
 import { DISPLAY_PIP_SIZE } from '../security/deskConstants';
+import { liveFloatingTotal, liveLegProfit, mergeStickyAccount } from '../lib/liveFloatingPnl';
 import {
   fetchBinanceBarsM30,
   fetchBinanceDeals,
@@ -23,20 +24,55 @@ const STARTUP_BARS = 48;
 /** Deeper history loaded in background after UI is interactive. */
 const FULL_BARS = 240;
 const CACHE_KEY = '@bilshenz_v1/binanceFeedCache';
+const DEALS_CACHE_KEY = '@bilshenz_v1/brokerDealsCache';
+const ACCOUNT_CACHE_KEY = '@bilshenz_v1/brokerAccountCache';
 const CACHE_TTL_MS = 20 * 60 * 1000;
 const STALE_CACHE_MS = 24 * 60 * 60 * 1000;
 const MIN_CACHE_BARS = 12;
 const STARTUP_TIMEOUT_MS = 4500;
 const STARTUP_RETRIES = 1;
+const BROKER_DEALS_MAX = 200;
+
+function dealRowKey(d) {
+  return String(d?.order_id ?? d?.orderId ?? d?.ticket ?? d?.order ?? '');
+}
+
+/** Merge poll results with last-known rows — never drop seeded close fills on partial /api/logs. */
+function mergeBrokerDeals(prev, incoming, { stale = false, maxLen = BROKER_DEALS_MAX } = {}) {
+  // Permanent union — never drop prior history when a poll returns a partial snapshot.
+  const out = [];
+  const seen = new Set();
+  const push = (row) => {
+    if (!row || typeof row !== 'object') return;
+    const key = dealRowKey(row);
+    if (key) {
+      if (seen.has(key)) return;
+      seen.add(key);
+    }
+    out.push(row);
+  };
+  // Prefer freshest incoming rows first, then keep every previous row not already seen.
+  for (const row of incoming || []) push(row);
+  for (const row of prev || []) push(row);
+  out.sort((a, b) => (Number(b.time) || 0) - (Number(a.time) || 0));
+  return out.slice(0, maxLen);
+}
 
 async function fetchStatusAccount(base) {
   try {
     const res = await binanceFetch(base, '/api/status', {}, 12000);
-    if (!res.ok) return { connected: false, account: null };
+    if (!res.ok) return { connected: false, account: null, stale: true };
     const j = await res.json();
-    return { connected: !!j.connected, account: j.connected && j.account ? j.account : null };
+    const acct = j.account && typeof j.account === 'object' ? j.account : null;
+    return {
+      connected: !!j.connected,
+      account: acct,
+      stale: !!j.stale || !!acct?.stale,
+      restCoolS: Number(j.rest_cool_s) || 0,
+      warning: j.warning || acct?.warning || null,
+    };
   } catch {
-    return { connected: false, account: null };
+    return { connected: false, account: null, stale: true };
   }
 }
 
@@ -114,10 +150,103 @@ export function useBinanceLiveFeed({
   const bgLoadRef = useRef(false);
   const everReadyRef = useRef(false);
   const positionsRef = useRef([]);
+  const accountRef = useRef(null);
+  const dealsRef = useRef([]);
   const emptyPosStreakRef = useRef(0);
   const pauseFeedUiRef = useRef(pauseFeedUi);
   pauseFeedUiRef.current = pauseFeedUi;
   const lastTickUiAtRef = useRef(0);
+
+  const commitAccount = useCallback((next) => {
+    const merged = mergeStickyAccount(accountRef.current, next);
+    if (merged === accountRef.current && next && !next.stale) {
+      // Still refresh profit from live positions when present.
+    }
+    accountRef.current = merged;
+    setAccount(merged);
+    if (merged && (merged.balance != null || merged.equity != null)) {
+      void AsyncStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(merged)).catch(() => {});
+    }
+  }, []);
+
+  const commitDeals = useCallback((result) => {
+    const incoming = Array.isArray(result?.deals) ? result.deals : Array.isArray(result) ? result : [];
+    const stale = !!(result && typeof result === 'object' && result.stale);
+    const prev = dealsRef.current || [];
+    // Never clear previous history — empty/failed polls keep what we already show.
+    if (!incoming.length) {
+      if (prev.length > 0) return;
+      return;
+    }
+    const merged = mergeBrokerDeals(prev, incoming, { stale });
+    dealsRef.current = merged;
+    setBrokerDeals(merged);
+    void AsyncStorage.setItem(DEALS_CACHE_KEY, JSON.stringify(merged)).catch(() => {});
+  }, []);
+
+  const applyLiveMarkToPositions = useCallback((mark, symbolHint) => {
+    const markN = Number(mark);
+    if (!(markN > 0)) return;
+    const sym = String(symbolHint || symRef.current || '').toUpperCase();
+    const prev = positionsRef.current || [];
+    if (!prev.length) return;
+    let changed = false;
+    const next = prev.map((p) => {
+      if (sym && String(p.symbol || '').toUpperCase() !== sym) return p;
+      const profit = liveLegProfit(p, markN);
+      if (
+        Math.abs(profit - Number(p.profit ?? 0)) < 1e-6 &&
+        Number(p.price_current) === markN
+      ) {
+        return p;
+      }
+      changed = true;
+      return { ...p, profit, price_current: markN };
+    });
+    if (!changed) return;
+    positionsRef.current = next;
+    setPositions(next);
+    const floatSum = liveFloatingTotal(next, markN, sym);
+    const acct = accountRef.current;
+    if (acct) {
+      const patched = { ...acct, profit: floatSum, stale: !!acct.stale };
+      accountRef.current = patched;
+      setAccount(patched);
+    }
+  }, []);
+
+  // Instant paint: restore last-known floating + history while REST reconnects.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [acctRaw, dealsRaw] = await Promise.all([
+          AsyncStorage.getItem(ACCOUNT_CACHE_KEY),
+          AsyncStorage.getItem(DEALS_CACHE_KEY),
+        ]);
+        if (cancelled) return;
+        if (acctRaw && !accountRef.current) {
+          const acct = JSON.parse(acctRaw);
+          if (acct && typeof acct === 'object') {
+            accountRef.current = acct;
+            setAccount(acct);
+          }
+        }
+        if (dealsRaw && !dealsRef.current.length) {
+          const deals = JSON.parse(dealsRaw);
+          if (Array.isArray(deals) && deals.length) {
+            dealsRef.current = deals;
+            setBrokerDeals(deals);
+          }
+        }
+      } catch {
+        /* ignore cache */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const sessionActive = !!connected;
   const bridgeActive = enabled && !!baseUrl?.trim() && (publicQuotes || sessionActive);
@@ -156,7 +285,7 @@ export function useBinanceLiveFeed({
         void writeBarCache(sym, result.bars);
         if (sessionActive) {
           const st = await fetchStatusAccount(b);
-          if (st.account) setAccount(st.account);
+          if (st.account) commitAccount(st.account);
         }
         return true;
       } catch (e) {
@@ -180,7 +309,7 @@ export function useBinanceLiveFeed({
         setFeedReady(false);
         everReadyRef.current = false;
         if (!sessionActive) {
-          setBrokerDeals([]);
+          // Keep trade history permanently — never clear prior fills on disconnect.
           setPositions([]);
           positionsRef.current = [];
           setPositionsStale(false);
@@ -207,7 +336,7 @@ export function useBinanceLiveFeed({
         }
         if (sessionActive) {
           const st = await fetchStatusAccount(b);
-          if (!cancelled && st.account) setAccount(st.account);
+          if (!cancelled && st.account) commitAccount(st.account);
         }
         const spec = await fetchBinanceSymbolSpec(b, sym);
         if (!cancelled && spec?.symbol) {
@@ -297,7 +426,7 @@ export function useBinanceLiveFeed({
         }
         if (sessionActive) {
           const st = await fetchStatusAccount(b);
-          if (!cancelled && st.account) setAccount(st.account);
+          if (!cancelled && st.account) commitAccount(st.account);
         }
         if (!cancelled && barsResult.ok && barsResult.bars.length) {
           void loadM30Bars(FULL_BARS, { background: true });
@@ -325,14 +454,14 @@ export function useBinanceLiveFeed({
     const refreshAccount = async () => {
       const st = await fetchStatusAccount(b);
       if (!cancelled) {
-        if (st.account) setAccount(st.account);
-        else if (!st.connected) setAccount(null);
+        if (st.account) commitAccount(st.account);
+        else if (!st.connected && !accountRef.current) commitAccount(null);
       }
     };
 
     const refreshDeals = async () => {
       const d = await fetchBinanceDeals(b, 100);
-      if (!cancelled) setBrokerDeals(d);
+      if (!cancelled) commitDeals(d);
     };
 
     const applyPositionsResult = (result) => {
@@ -406,7 +535,7 @@ export function useBinanceLiveFeed({
       clearInterval(dealsId);
       clearInterval(posId);
     };
-  }, [sessionActive, enabled, baseUrl, pauseFeedUi]);
+  }, [sessionActive, enabled, baseUrl, pauseFeedUi, commitAccount, commitDeals]);
 
   const refreshBrokerSnapshot = useCallback(async () => {
     if (!sessionActive || !enabled || !baseUrl?.trim()) return;
@@ -416,9 +545,9 @@ export function useBinanceLiveFeed({
       fetchBinanceDeals(b, 100),
       fetchBinancePositions(b),
     ]);
-    if (st.account) setAccount(st.account);
-    else if (!st.connected) setAccount(null);
-    setBrokerDeals(d);
+    if (st.account) commitAccount(st.account);
+    else if (!st.connected && !accountRef.current) commitAccount(null);
+    commitDeals(d);
     const next = Array.isArray(posResult?.positions) ? posResult.positions : [];
     const cool = Number(posResult?.restCoolS) || 0;
     setPositionsCoolS(cool);
@@ -438,9 +567,47 @@ export function useBinanceLiveFeed({
     } else {
       setPositionsStale(!!posResult?.stale || posResult?.ok === false);
     }
-  }, [sessionActive, enabled, baseUrl]);
+  }, [sessionActive, enabled, baseUrl, commitAccount, commitDeals]);
 
-  const applyOptimisticClose = useCallback(({ symbol, positionSide = null, closePair = false } = {}) => {
+  const applyOptimisticClose = useCallback(({ symbol, positionSide = null, closePair = false, closed = null, dealsHead = null } = {}) => {
+    // Paint trade history immediately from close fills (do not wait for /api/logs poll).
+    if (Array.isArray(dealsHead) && dealsHead.length) {
+      commitDeals({ ok: true, deals: dealsHead, stale: false });
+    } else if (Array.isArray(closed) && closed.length) {
+      const nowMs = Date.now();
+      const rows = closed
+        .map((leg) => {
+          if (!leg || typeof leg !== 'object') return null;
+          const sym = String(leg.symbol || symbol || '').toUpperCase();
+          if (!sym) return null;
+          const posSide = String(leg.position_side || leg.side || positionSide || '').toUpperCase();
+          const exitType = posSide === 'SHORT' || posSide === 'SELL' ? 'BUY' : 'SELL';
+          const vol = Number(leg.volume ?? 0);
+          const px = Number(leg.fill_price ?? leg.price ?? 0);
+          const rpnl = Number(leg.realized_pnl ?? leg.profit ?? 0);
+          return {
+            ticket: leg.order || `close-${sym}-${nowMs}`,
+            order_id: leg.order,
+            symbol: sym,
+            type: exitType,
+            volume: vol,
+            price: px,
+            quote_qty: vol * px,
+            profit: rpnl,
+            realized_pnl: rpnl,
+            commission: Number(leg.commission ?? 0),
+            position_side: posSide,
+            time: nowMs,
+            is_close: true,
+          };
+        })
+        .filter(Boolean);
+      if (rows.length) {
+        const merged = mergeBrokerDeals(dealsRef.current || [], rows, { stale: false });
+        commitDeals({ ok: true, deals: merged, stale: false });
+      }
+    }
+
     if (symbol === '*') {
       positionsRef.current = [];
       setPositions([]);
@@ -471,7 +638,7 @@ export function useBinanceLiveFeed({
     setPositions(next);
     setPositionsStale(false);
     emptyPosStreakRef.current = next.length === 0 ? 2 : 0;
-  }, []);
+  }, [commitDeals]);
 
   const refreshAfterClose = useCallback(async () => {
     if (!sessionActive || !enabled || !baseUrl?.trim()) return;
@@ -495,7 +662,11 @@ export function useBinanceLiveFeed({
       const wsFresh = lastWsAt > 0 && Date.now() - lastWsAt < WS_STALE_MS;
       if (wsFresh) return;
       const tk = await fetchBinanceTick(baseUrl, symRef.current);
-      if (!cancelled) applyTickState(tk, tickSetters);
+      if (!cancelled) {
+        applyTickState(tk, tickSetters);
+        const mid = tk?.bid != null && tk?.ask != null ? (Number(tk.bid) + Number(tk.ask)) / 2 : Number(tk?.price);
+        if (mid > 0) applyLiveMarkToPositions(mid, tk?.symbol || symRef.current);
+      }
     };
 
     const stopWs = subscribeBinanceTickStream(
@@ -510,6 +681,8 @@ export function useBinanceLiveFeed({
           lastTickUiAtRef.current = Date.now();
         }
         applyTickState(tk, tickSetters);
+        const mid = tk?.bid != null && tk?.ask != null ? (Number(tk.bid) + Number(tk.ask)) / 2 : Number(tk?.price);
+        if (mid > 0) applyLiveMarkToPositions(mid, tk?.symbol || symRef.current);
       },
       {
         onOpen: () => {
@@ -539,7 +712,7 @@ export function useBinanceLiveFeed({
       clearInterval(id);
       clearInterval(slowId);
     };
-  }, [quotesActive, pollTicks, baseUrl, reloadNonce]);
+  }, [quotesActive, pollTicks, baseUrl, reloadNonce, applyLiveMarkToPositions]);
 
   return {
     price,

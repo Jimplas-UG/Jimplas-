@@ -1042,7 +1042,16 @@ class MomentumScanner:
         elif self._user_exec_halted:
             result = (False, "EMERGENCY_STOP")
         else:
-            result = self._session_connected()
+            cool = 0.0
+            try:
+                cool = float(getattr(self._connector, "rest_cooling_left", lambda: 0.0)() or 0.0)
+            except Exception:
+                cool = 0.0
+            if cool > 0.25:
+                reason_cool = getattr(self._connector, "_rest_cool_reason", "") or "418"
+                result = (False, f"REST cooling ({reason_cool}) {cool:.0f}s")
+            else:
+                result = self._session_connected()
         self._session_ok_cache = (now, result)
         return result
 

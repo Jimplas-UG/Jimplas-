@@ -102,6 +102,35 @@ def aggregate_deal_days(
     return by_day
 
 
+def merge_calendar_day_buckets(
+    sticky: dict[str, dict[str, float]],
+    fresh: dict[str, dict[str, float]],
+    *,
+    fresh_wins: bool = True,
+) -> dict[str, dict[str, float]]:
+    """Union day buckets — never drop sticky days when fresh poll is partial."""
+    out = {k: dict(v) for k, v in (sticky or {}).items()}
+    for k, v in (fresh or {}).items():
+        if k not in out or fresh_wins:
+            out[k] = dict(v)
+    return out
+
+
+def merge_calendar_day_lists(
+    sticky_days: list[dict[str, Any]],
+    fresh_days: list[dict[str, Any]],
+    *,
+    fresh_wins: bool = True,
+) -> list[dict[str, Any]]:
+    sticky_map = {str(d["date"]): d for d in sticky_days or [] if d.get("date")}
+    fresh_map = {str(d["date"]): d for d in fresh_days or [] if d.get("date")}
+    merged = merge_calendar_day_buckets(sticky_map, fresh_map, fresh_wins=fresh_wins)
+    return [
+        {"date": k, "pnl": round(v["pnl"], 2), "trades": int(v["trades"])}
+        for k, v in sorted(merged.items())
+    ]
+
+
 def finalize_calendar_days(
     by_day: dict[str, dict[str, float]],
     *,

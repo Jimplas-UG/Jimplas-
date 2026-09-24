@@ -10,6 +10,7 @@ from calendar_pnl import (  # noqa: E402
     aggregate_deal_days,
     aggregate_income_days,
     finalize_calendar_days,
+    merge_calendar_day_buckets,
 )
 
 
@@ -44,6 +45,13 @@ def test_deals_skip_opens() -> None:
     assert abs(by["2026-07-16"]["pnl"] - (-9.5)) < 0.01
 
 
+def test_merge_keeps_sticky_days() -> None:
+    sticky = {"2026-09-23": {"pnl": -3.5, "trades": 4}}
+    fresh = {"2026-09-24": {"pnl": 14.88, "trades": 6}}
+    merged = merge_calendar_day_buckets(sticky, fresh, fresh_wins=True)
+    assert set(merged.keys()) == {"2026-09-23", "2026-09-24"}
+
+
 def test_finalize_respects_since() -> None:
     by = {
         "2026-07-10": {"pnl": -10.0, "trades": 1},
@@ -57,6 +65,7 @@ def test_finalize_respects_since() -> None:
 if __name__ == "__main__":
     test_income_is_complete_source()
     test_deals_skip_opens()
+    test_merge_keeps_sticky_days()
     test_finalize_respects_since()
     print("test_calendar_pnl: ALL OK")
-
+

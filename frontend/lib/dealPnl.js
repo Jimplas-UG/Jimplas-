@@ -30,6 +30,8 @@ export function displayDealPnl(deal) {
 
 export function isCloseDeal(deal) {
   if (deal?.is_close === true) return true;
+  const key = String(deal?.order_id ?? deal?.ticket ?? deal?.order ?? '');
+  if (key.startsWith('close-')) return true;
   const pl = displayDealPnl(deal);
   return Math.abs(pl) > 1e-9;
 }

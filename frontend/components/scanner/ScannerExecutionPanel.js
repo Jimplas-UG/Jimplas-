@@ -101,10 +101,43 @@ export default function ScannerExecutionPanel({ rows, scannerMeta, ready, execut
   const { colors: C } = useBilshenzTheme();
 
   const candidates = useMemo(() => pickExecutionCandidates(rows), [rows]);
-  const visibleEvents = useMemo(
-    () => (executionEvents || []).filter((e) => e.stage !== 'duplicate' && e.stage !== 'in_flight').slice(0, 6),
-    [executionEvents],
-  );
+  const visibleEvents = useMemo(() => {
+    const raw = (executionEvents || []).filter(
+      (e) => e.stage !== 'duplicate' && e.stage !== 'in_flight',
+    );
+    // Collapse REST-cool spam: keep only the newest cooling notice.
+    const out = [];
+    let sawCool = false;
+    for (const e of raw) {
+      const cool =
+        e.stage === 'rest_cooling' ||
+        /rest_cooling|REST cooling|418/i.test(String(e.error || ''));
+      if (cool) {
+        if (sawCool) continue;
+        sawCool = true;
+        out.push({
+          ...e,
+          stage: 'rest_cooling',
+          error: String(e.error || 'Binance REST cooling — entries paused'),
+        });
+        continue;
+      }
+      // Drop mislabeled invalid_symbol cool leftovers from older bridge builds.
+      if (/invalid_symbol:.*cooling|invalid_symbol:.*418/i.test(String(e.error || ''))) {
+        if (sawCool) continue;
+        sawCool = true;
+        out.push({
+          ...e,
+          stage: 'rest_cooling',
+          error: String(e.error).replace(/^invalid_symbol:\s*/i, ''),
+        });
+        continue;
+      }
+      out.push(e);
+      if (out.length >= 6) break;
+    }
+    return out.slice(0, 6);
+  }, [executionEvents]);
 
   return (
     <PilotCard style={{ marginBottom: spacing.md, padding: spacing.md }}>
@@ -153,7 +186,12 @@ export default function ScannerExecutionPanel({ rows, scannerMeta, ready, execut
                 borderRadius: radius.md,
                 padding: spacing.sm,
                 marginBottom: spacing.xs,
-                backgroundColor: evt.stage === 'filled' ? 'rgba(0,230,118,0.06)' : C.panel2,
+                backgroundColor:
+                  evt.stage === 'filled'
+                    ? 'rgba(0,230,118,0.06)'
+                    : evt.stage === 'rest_cooling'
+                      ? 'rgba(255,176,32,0.08)'
+                      : C.panel2,
               }}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
                 <Text style={{ color: C.text, fontSize: 11, fontWeight: '800' }}>
@@ -164,7 +202,7 @@ export default function ScannerExecutionPanel({ rows, scannerMeta, ready, execut
                     color:
                       evt.stage === 'filled'
                         ? C.green
-                        : evt.stage === 'sending'
+                        : evt.stage === 'sending' || evt.stage === 'rest_cooling'
                           ? C.amber
                           : evt.error
                             ? C.red
@@ -183,7 +221,13 @@ export default function ScannerExecutionPanel({ rows, scannerMeta, ready, execut
                 </Text>
               ) : null}
               {evt.error ? (
-                <Text style={{ color: C.red, fontSize: 10, marginTop: 4 }} numberOfLines={2}>
+                <Text
+                  style={{
+                    color: evt.stage === 'rest_cooling' ? C.amber : C.red,
+                    fontSize: 10,
+                    marginTop: 4,
+                  }}
+                  numberOfLines={2}>
                   {evt.error}
                 </Text>
               ) : null}

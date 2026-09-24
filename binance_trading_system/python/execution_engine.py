@@ -151,6 +151,8 @@ class ExecutionEngine:
         self._filled_client_ids: set[str] = set()
         self._inflight_client_ids: set[str] = set()
         self._duplicate_emitted: set[str] = set()
+        self._cool_emit_ts: float = 0.0
+        self._cool_emit_key: str = ""
         self._last_error: str | None = None
         self._account_cache: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._account_cache_ts = 0.0
@@ -363,6 +365,25 @@ class ExecutionEngine:
             self._emit(signal, "validation_failed", error=result.error)
             return result
 
+        # Do not spam validation_failed/invalid_symbol while Binance REST is cooling.
+        cool_left = 0.0
+        try:
+            cool_left = float(getattr(self._connector, "rest_cooling_left", lambda: 0.0)() or 0.0)
+        except Exception:
+            cool_left = 0.0
+        if cool_left > 0.25 and not manual:
+            reason = getattr(self._connector, "_rest_cool_reason", "") or "418"
+            result.error = f"rest_cooling ({reason}) {cool_left:.0f}s left"
+            result.stage = "rest_cooling"
+            key = f"{sym}:{side}:{int(cool_left // 5)}"
+            now = time.time()
+            if key != self._cool_emit_key or now - self._cool_emit_ts >= 8.0:
+                self._cool_emit_key = key
+                self._cool_emit_ts = now
+                self._log_failure(signal, reason=result.error, retry_decision="retry_after_cool")
+                self._emit(signal, "rest_cooling", error=result.error)
+            return result
+
         # Manual desk path already gated in /api/order — skip duplicate isolation/close REST.
         if not manual:
             if self._close_pending_check and self._close_pending_check(sym):
@@ -401,6 +422,18 @@ class ExecutionEngine:
         try:
             info = self._connector.get_symbol_spec(sym)
         except Exception as e:
+            msg = str(e)
+            if "cooling" in msg.lower() or "418" in msg or "429" in msg:
+                result.error = f"rest_cooling: {msg}"
+                result.stage = "rest_cooling"
+                key = f"{sym}:cool_spec"
+                now = time.time()
+                if key != self._cool_emit_key or now - self._cool_emit_ts >= 8.0:
+                    self._cool_emit_key = key
+                    self._cool_emit_ts = now
+                    self._log_failure(signal, reason=msg, retry_decision="retry_after_cool")
+                    self._emit(signal, "rest_cooling", error=result.error)
+                return result
             result.error = f"invalid_symbol: {e}"
             result.stage = "validation_failed"
             self._log_failure(signal, reason=str(e))
