@@ -116,7 +116,7 @@ export default function OpenPositionsPanel({
       markBusy(key, true);
       const closeOperationId = `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-      // Instant UI — remove leg(s) on tap, don't wait for REST.
+      // Optimistic only after confirm — keep UI snappy without skipping the lock confirm.
       onOptimisticClose?.({
         symbol,
         positionSide,
@@ -164,7 +164,6 @@ export default function OpenPositionsPanel({
           onCloseMessage?.('Close already in progress…');
           void onRefreshAfterClose?.();
         } else {
-          // Restore from exchange if optimistic remove was wrong.
           void onRefreshAfterClose?.();
           Alert.alert('Close failed', parseCloseError(r));
         }
@@ -185,20 +184,52 @@ export default function OpenPositionsPanel({
     ],
   );
 
-  const fireCloseLeg = useCallback(
+  // Frozen manual path (Sep 23–25 normal): confirm before interrupt — never one-tap naked closes.
+  const confirmCloseLeg = useCallback(
     (pos) => {
+      if (!brokerConnected || !binanceBaseUrl?.trim()) {
+        Alert.alert('Not connected', 'Connect Binance in Profile first.');
+        return;
+      }
       const ps = legSide(pos);
+      const profit = Number(pos.profit ?? 0);
       const label = legLabel(pos);
-      void runClose({ symbol: pos.symbol, positionSide: ps, closePair: false, label });
+      const shortFlattens = ps === 'SHORT';
+      Alert.alert(
+        shortFlattens ? 'Close SHORT (full pair)?' : `Close ${label} only?`,
+        shortFlattens
+          ? `${label} ${fmtVol(pos.volume)} ${pos.symbol}\nEntry ${fmtPx(pos.price_open)} · Floating ${fmtUsd(profit)}\n\nClosing SHORT market-flattens this symbol (short + any recovery longs).`
+          : `${label} ${fmtVol(pos.volume)} ${pos.symbol}\nEntry ${fmtPx(pos.price_open)} · Floating ${fmtUsd(profit)}\n\nOther legs on this symbol will stay open — this interrupts the paired cycle.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: shortFlattens ? 'Close pair via SHORT' : `Close ${label}`,
+            style: profit >= 0 ? 'default' : 'destructive',
+            onPress: () => void runClose({ symbol: pos.symbol, positionSide: ps, closePair: false, label }),
+          },
+        ],
+      );
     },
-    [runClose],
+    [brokerConnected, binanceBaseUrl, runClose],
   );
 
-  const fireClosePair = useCallback(
-    (symbol) => {
-      void runClose({ symbol, closePair: true, label: 'Pair' });
+  const confirmClosePair = useCallback(
+    (symbol, legCount) => {
+      if (!brokerConnected || !binanceBaseUrl?.trim()) return;
+      Alert.alert(
+        'Close full pair?',
+        `Market-close all ${legCount} leg(s) on ${symbol} (short + longs).`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Close pair',
+            style: 'destructive',
+            onPress: () => void runClose({ symbol, closePair: true, label: 'Pair' }),
+          },
+        ],
+      );
     },
-    [runClose],
+    [brokerConnected, binanceBaseUrl, runClose],
   );
 
   const positionsBySymbol = useMemo(() => {
@@ -211,44 +242,65 @@ export default function OpenPositionsPanel({
     return map;
   }, [positions]);
 
-  const fireCloseAll = useCallback(() => {
+  const confirmCloseAll = useCallback(() => {
     if (!brokerConnected || !binanceBaseUrl?.trim()) {
       Alert.alert('Not connected', 'Connect Binance in Profile first.');
       return;
     }
-    if (closingKeysRef.current.has('__all__')) return;
-    markBusy('__all__', true);
-    onOptimisticClose?.({
-      closePair: true,
-      symbol: '*',
-      closed: [],
-      dealsHead: [],
-    });
-    onCloseMessage?.('Closing all…');
-    void (async () => {
-      try {
-        const r = await postBinanceCloseAllPositions(binanceBaseUrl);
-        if (r.ok) {
-          onOptimisticClose?.({
-            closePair: true,
-            symbol: '*',
-            closed: Array.isArray(r.closed) ? r.closed : [],
-            dealsHead: Array.isArray(r.dealsHead) ? r.dealsHead : [],
-          });
-          onCloseMessage?.(`Closed ${r.closed?.length ?? 0} leg(s)`);
-          void onRefreshAfterClose?.();
-        } else {
-          void onRefreshAfterClose?.();
-          Alert.alert('Close all failed', parseCloseError(r));
-        }
-      } catch (e) {
-        void onRefreshAfterClose?.();
-        Alert.alert('Close all failed', e instanceof Error ? e.message : String(e));
-      } finally {
-        markBusy('__all__', false);
-      }
-    })();
-  }, [brokerConnected, binanceBaseUrl, markBusy, onRefreshAfterClose, onCloseMessage, onOptimisticClose]);
+    Alert.alert(
+      'Close all positions?',
+      `This will market-close all ${positions.length} open position(s) on Binance.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Close all',
+          style: 'destructive',
+          onPress: () => {
+            if (closingKeysRef.current.has('__all__')) return;
+            markBusy('__all__', true);
+            onOptimisticClose?.({
+              closePair: true,
+              symbol: '*',
+              closed: [],
+              dealsHead: [],
+            });
+            onCloseMessage?.('Closing all…');
+            void (async () => {
+              try {
+                const r = await postBinanceCloseAllPositions(binanceBaseUrl);
+                if (r.ok) {
+                  onOptimisticClose?.({
+                    closePair: true,
+                    symbol: '*',
+                    closed: Array.isArray(r.closed) ? r.closed : [],
+                    dealsHead: Array.isArray(r.dealsHead) ? r.dealsHead : [],
+                  });
+                  onCloseMessage?.(`Closed ${r.closed?.length ?? 0} leg(s)`);
+                  void onRefreshAfterClose?.();
+                } else {
+                  void onRefreshAfterClose?.();
+                  Alert.alert('Close all failed', parseCloseError(r));
+                }
+              } catch (e) {
+                void onRefreshAfterClose?.();
+                Alert.alert('Close all failed', e instanceof Error ? e.message : String(e));
+              } finally {
+                markBusy('__all__', false);
+              }
+            })();
+          },
+        },
+      ],
+    );
+  }, [
+    brokerConnected,
+    binanceBaseUrl,
+    positions.length,
+    markBusy,
+    onRefreshAfterClose,
+    onCloseMessage,
+    onOptimisticClose,
+  ]);
 
   return (
     <View style={st.wrap}>
@@ -274,11 +326,7 @@ export default function OpenPositionsPanel({
           <Text style={[st.title, { color: C.text }]}>Open positions</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             {positions.length > 1 ? (
-              <Pressable
-                onPressIn={fireCloseAll}
-                disabled={isBusy('__all__')}
-                hitSlop={8}
-                unstable_pressDelay={0}>
+              <Pressable onPress={confirmCloseAll} disabled={isBusy('__all__')} hitSlop={8}>
                 <Text style={{ color: C.red, fontSize: 10, fontWeight: '800' }}>
                   {isBusy('__all__') ? '…' : 'CLOSE ALL'}
                 </Text>
@@ -320,9 +368,8 @@ export default function OpenPositionsPanel({
               <View key={sym}>
                 {legs.length > 1 ? (
                   <Pressable
-                    onPressIn={() => fireClosePair(sym)}
+                    onPress={() => confirmClosePair(sym, legs.length)}
                     disabled={isBusy(`pair-${sym}`)}
-                    unstable_pressDelay={0}
                     style={[st.pairBar, { borderColor: C.border }]}>
                     <Text style={{ color: C.amber, fontSize: 10, fontWeight: '800' }}>
                       {isBusy(`pair-${sym}`) ? 'Closing pair…' : `CLOSE PAIR · ${sym}`}
@@ -362,9 +409,8 @@ export default function OpenPositionsPanel({
                         ) : null}
                       </View>
                       <Pressable
-                        onPressIn={() => fireCloseLeg(p)}
+                        onPress={() => confirmCloseLeg(p)}
                         disabled={busy}
-                        unstable_pressDelay={0}
                         style={({ pressed }) => [
                           st.closeBtn,
                           {

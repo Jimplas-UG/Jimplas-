@@ -290,23 +290,26 @@ class BinanceConnector:
                 f"Binance REST cooling ({self._rest_cool_reason or 'rate'}) {left:.0f}s left"
             )
 
-    def _wait_or_clear_cool_for_close(self, *, max_wait_s: float = 0.0) -> float:
-        """Manual/emergency close must fire immediately — never sleep on our cool timer."""
+    def _wait_or_clear_cool_for_close(self, *, max_wait_s: float = 12.0) -> float:
+        """Frozen close cool path (Sep 23–25 normal): wait briefly, then clear residual and try.
+
+        Do not set max_wait_s=0 by default — instant clear hammered Binance and starved entries.
+        Locked by frozen_strategy.CLOSE_REST_COOL_MAX_WAIT_S.
+        """
         left = self.rest_cooling_left()
         if left <= 0:
             return 0.0
-        # Prefer clear-and-go: waiting here made CLOSE buttons feel stuck for many seconds.
-        if max_wait_s <= 0 or left > max_wait_s:
+        wait = min(left + 0.2, max(0.0, float(max_wait_s)))
+        if wait <= 0:
             log.warning(
-                "close: clearing REST cool %.1fs (%s) for immediate flatten",
+                "close: clearing REST cool %.1fs (%s) with no wait",
                 left,
                 self._rest_cool_reason or "rate",
             )
             self.clear_rest_cool()
             return 0.0
-        wait = min(left + 0.05, max_wait_s)
         log.warning(
-            "close: REST cool %.1fs (%s) — brief wait %.1fs then attempt",
+            "close: REST cool %.1fs (%s) — waiting %.1fs then attempting",
             left,
             self._rest_cool_reason or "rate",
             wait,
@@ -314,6 +317,7 @@ class BinanceConnector:
         time.sleep(wait)
         still = self.rest_cooling_left()
         if still > 0:
+            log.warning("close: clearing residual cool %.1fs for emergency order", still)
             self.clear_rest_cool()
         return wait
 

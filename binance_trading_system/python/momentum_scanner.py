@@ -2532,15 +2532,22 @@ class MomentumScanner:
             )
             # Naked short still eligible for Long 1 — let the hard TP (-2.5%) handle winners;
             # smart-exit was closing small moves before any +2% recovery pump.
+            hedges_open = bool(coin.long1 or coin.long2)
+            # Locked Sep 23–25 discipline: with hedges open, only SMART_EXIT when primary short
+            # is already in profit. Stops mark-green / fill-red flattens while short is underwater.
+            short_ok_for_smart = (not hedges_open) or (not self._short_underwater(coin))
             if (
                 coin.unrealized_pnl >= smart_target
+                and short_ok_for_smart
                 and not (self._recovery_still_eligible(coin) and coin.long1 is None and coin.long2 is None)
             ):
                 log.info(
-                    "scanner %s SMART_EXIT pnl=%.4f target=%.4f",
+                    "scanner %s SMART_EXIT pnl=%.4f target=%.4f hedges=%s short_underwater=%s",
                     sym,
                     coin.unrealized_pnl,
                     smart_target,
+                    hedges_open,
+                    self._short_underwater(coin) if coin.short else False,
                 )
                 self._close_all(coin, "SMART_EXIT")
                 return

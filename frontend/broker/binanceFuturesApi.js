@@ -503,13 +503,15 @@ export async function postBinanceClosePosition(
       let snippet = trimSnippet(text || (res.ok ? 'OK' : 'Empty body'));
       if (!res.ok) {
         if (res.status === 429 && attempt < 2) {
-          await new Promise((r) => setTimeout(r, 200));
+          await new Promise((r) => setTimeout(r, 400));
           continue;
         }
         const coolMsg = String(j.detail?.error || j.error || snippet || '');
-        // Bridge clears cool on close — only a tiny retry, never sleep 12s on the UI path.
+        // Frozen Sep 23–25 close cool: wait the reported cool window (capped), then retry.
         if (/REST cooling|418|IP banned/i.test(coolMsg) && attempt < 2) {
-          await new Promise((r) => setTimeout(r, 350));
+          const m = coolMsg.match(/(\d+)\s*s/);
+          const waitS = Math.min(Math.max(Number(m?.[1]) || 3, 1), 12);
+          await new Promise((r) => setTimeout(r, waitS * 1000 + 250));
           continue;
         }
         if (res.status === 409 && (j.detail?.error === 'close_in_progress' || j.error === 'close_in_progress')) {

@@ -13,6 +13,8 @@ the live modules still match the working contract:
   Short TP −2.5%; never leave orphan longs without the primary short
   Shared LONG close must never wipe/retire the sibling recovery leg
   (Long1 close must not permanently kill Long2, and vice versa)
+  Smart exit: 6% of partition net — with hedges open, only when short is in profit
+  Manual closes require confirm; REST cool on close waits up to 12s then clears
 
 If assert_frozen_contract() fails, the bridge must not silently trade a drifted policy.
 """
@@ -49,6 +51,12 @@ LONG_HEDGE_PULLBACK_PCT = 0.5
 SHORT_TRAIL_PULLBACK_FLOOR_PCT = 1.5
 PAIR_INVALIDATION_PCT = 6.5
 HEDGE_RESCUE_BUFFER_PCT = 1.0
+
+# Locked exit/ops discipline (profitable Sep 23–25 baseline) — do not weaken.
+SMART_EXIT_NET_PCT = 6.0
+SMART_EXIT_REQUIRES_SHORT_PROFIT_IF_HEDGED = True
+CLOSE_REST_COOL_MAX_WAIT_S = 12.0
+MANUAL_CLOSE_CONFIRM_REQUIRED = True
 
 STATUS_SHORT = "Short"
 STATUS_LONG1 = "Long 1"
@@ -92,6 +100,12 @@ def frozen_contract_snapshot() -> dict[str, Any]:
             "retrace_pct": RETRACE_ENTRY_PCT,
         },
         "tp": {"short_pct": SHORT_TP_PCT, "long_pct": LONG_TP_PCT},
+        "ops": {
+            "smart_exit_net_pct": SMART_EXIT_NET_PCT,
+            "smart_exit_requires_short_profit_if_hedged": SMART_EXIT_REQUIRES_SHORT_PROFIT_IF_HEDGED,
+            "close_rest_cool_max_wait_s": CLOSE_REST_COOL_MAX_WAIT_S,
+            "manual_close_confirm_required": MANUAL_CLOSE_CONFIRM_REQUIRED,
+        },
     }
 
 
@@ -171,6 +185,19 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "preserve sibling" in src, "safe recovery close qty guard missing"
     assert "def _safe_recovery_close_qty" in src
     assert "paired hold" in src.lower() or "PAIRED" in src or "_short_underwater" in src
+
+    # Smart exit + close cool + hedged short-profit guard (Sep 23–25 baseline).
+    assert abs(float(ms.SMART_EXIT_NET_PCT) - SMART_EXIT_NET_PCT) < 1e-9
+    assert "short_ok_for_smart" in src, "SMART_EXIT hedged short-profit guard missing"
+    assert SMART_EXIT_REQUIRES_SHORT_PROFIT_IF_HEDGED is True
+    assert MANUAL_CLOSE_CONFIRM_REQUIRED is True
+
+    import inspect
+    import binance_connector as bc
+
+    cool_src = inspect.getsource(bc.BinanceConnector._wait_or_clear_cool_for_close)
+    assert "max_wait_s: float = 12.0" in cool_src, "close REST cool default must stay 12s"
+    assert "waiting" in cool_src and "clearing residual cool" in cool_src
 
     return frozen_contract_snapshot()
 

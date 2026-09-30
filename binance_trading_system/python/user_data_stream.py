@@ -75,12 +75,16 @@ class BinanceUserDataStream:
         key = self._listen_key
         self._listen_key = None
         try:
-            await asyncio.to_thread(
-                self._connector._request,
-                "DELETE",
-                "/fapi/v1/listenKey",
-                {"listenKey": key},
-                signed=True,
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._connector._request,
+                    "DELETE",
+                    "/fapi/v1/listenKey",
+                    {"listenKey": key},
+                    True,  # signed
+                    4.0,  # timeout — never stall login/reconnect path
+                ),
+                timeout=5.0,
             )
         except Exception as e:
             log.debug("listenKey close: %s", e)

@@ -924,27 +924,47 @@ def _attempt_binance_login(api_key: str, api_secret: str, testnet: bool) -> tupl
         return None, str(e)
 
 
+_login_stream_refresh_task: asyncio.Task | None = None
+
+
+async def _post_login_stream_refresh(mode_changed: bool) -> None:
+    """WS / listenKey refresh must never block the /api/login HTTP response."""
+    try:
+        if mode_changed:
+            await _restart_streams_for_mode("login")
+        else:
+            await user_data_stream.stop()
+            await user_data_stream.start()
+    except Exception as e:
+        log.warning("post-login stream refresh: %s", e)
+
+
 @app.post("/api/login")
 async def api_login(body: LoginBody):
     """Fast login — time sync + account verify; auto-detects testnet vs mainnet when enabled."""
+    global _login_stream_refresh_task
     t0 = time.perf_counter()
     prev_tn = bool(connector.cfg.testnet)
+    prev_key = connector.cfg.api_key or ""
+    prev_secret = connector.cfg.api_secret or ""
     resolved_testnet = bool(body.testnet)
     auto_detected = False
     allow_auto = bool(body.auto_detect_env)
+    key = (body.api_key or "").strip()
+    secret = (body.api_secret or "").strip()
     log.info(
         "login attempt key=%s… testnet=%s auto_detect=%s",
-        (body.api_key or "")[:6],
+        key[:6],
         resolved_testnet,
         allow_auto,
     )
     acct, err = await asyncio.to_thread(
-        _attempt_binance_login, body.api_key, body.api_secret, resolved_testnet
+        _attempt_binance_login, key, secret, resolved_testnet
     )
 
     if acct is None and allow_auto and _is_key_env_mismatch(err or ""):
         alt_acct, alt_err = await asyncio.to_thread(
-            _attempt_binance_login, body.api_key, body.api_secret, not resolved_testnet
+            _attempt_binance_login, key, secret, not resolved_testnet
         )
         if alt_acct is not None:
             acct = alt_acct
@@ -962,18 +982,25 @@ async def api_login(body: LoginBody):
     threading.Thread(target=connector.warm_order_cache, daemon=True).start()
     threading.Thread(
         target=save_binance_session,
-        args=(body.api_key, body.api_secret, resolved_testnet),
+        args=(key, secret, resolved_testnet),
         daemon=True,
     ).start()
 
-    if resolved_testnet != prev_tn:
-        await _restart_streams_for_mode("login")
-    else:
-        try:
-            await user_data_stream.stop()
-            await user_data_stream.start()
-        except Exception as e:
-            log.warning("user stream refresh on login: %s", e)
+    mode_changed = resolved_testnet != prev_tn
+    same_session = (
+        prev_key == key
+        and prev_secret == secret
+        and not mode_changed
+        and bool(prev_key)
+    )
+    # Never await stream stop/start here — listenKey DELETE + WS reopen was taking
+    # 20–70s and aborting the phone client (35s timeout → CONNECTION FAILED).
+    if not same_session:
+        if _login_stream_refresh_task and not _login_stream_refresh_task.done():
+            _login_stream_refresh_task.cancel()
+        _login_stream_refresh_task = asyncio.create_task(
+            _post_login_stream_refresh(mode_changed)
+        )
 
     def _post_login_seed() -> None:
         try:
@@ -991,12 +1018,13 @@ async def api_login(body: LoginBody):
     _flush_scanner_snapshot()
     st = momentum_scanner.status()
     log.info(
-        "login success total_ms=%.0f can_execute=%s block=%s mode=%s auto=%s",
+        "login success total_ms=%.0f can_execute=%s block=%s mode=%s auto=%s bg_stream=%s",
         (time.perf_counter() - t0) * 1000,
         st.get("can_execute"),
         st.get("exec_block"),
         "testnet" if resolved_testnet else "live",
         auto_detected,
+        not same_session,
     )
     return {
         "ok": True,
