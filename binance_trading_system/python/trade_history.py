@@ -28,7 +28,12 @@ def trade_history_since_date() -> str | None:
     ms = trade_history_since_ms()
     if ms <= 0:
         return None
-    return time.strftime("%Y-%m-%d", time.gmtime(ms / 1000))
+    try:
+        from calendar_pnl import day_key_from_ms
+
+        return day_key_from_ms(ms)
+    except Exception:
+        return time.strftime("%Y-%m-%d", time.gmtime(ms / 1000))
 
 
 def include_trade_time(ts_ms: int | float | None) -> bool:

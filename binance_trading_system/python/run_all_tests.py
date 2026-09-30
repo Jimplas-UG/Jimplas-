@@ -21,6 +21,7 @@ TESTS = [
     "test_deal_pnl.py",
     "test_calendar_pnl.py",
     "test_trade_history.py",
+    "test_history_cache.py",
 ]
 
 

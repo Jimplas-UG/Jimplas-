@@ -1,0 +1,24 @@
+---
+description: Never apply wrong-symbol marks to floating PnL (phantom P&L beyond exposure)
+globs: frontend/**/*.{js,jsx,ts,tsx}
+alwaysApply: true
+---
+
+# Floating PnL — same-symbol marks only
+
+## Incident
+
+Scanner/chart lead price (e.g. QNT @ 248 or SOON @ 0.33) was applied to open **USUSDT** legs → Move ≈ −248, floating ≈ −$973k, far beyond notional/exposure.
+
+## Locked rules
+
+1. **Never** use `executionLead.price`, chart mid, or `brokerFeed.price` for open-position PnL unless `tick.symbol === position.symbol`.
+2. All floating PnL MUST go through `frontend/lib/liveFloatingPnl.js` (`liveLegProfit`, `liveFloatingTotal`, `resolveLegMark`, `isPlausibleMark`).
+3. A numeric mark without `quoteSymbol` / `livePriceSymbol` must **not** paint every open leg.
+4. Reject marks where `|mark − entry| / entry > MAX_MARK_REL_MOVE` (0.45). Cap `|PnL|` to ~`1.25 × entry notional`.
+5. `OpenPositionsPanel` requires `livePriceSymbol` with `livePrice`. Do not reintroduce `quoteSymbol`-only mark application.
+6. Do **not** change frozen strategy (`short_first_v1`) to “fix” display bugs.
+
+## Regression
+
+Run: `node frontend/lib/liveFloatingPnl.test.js`

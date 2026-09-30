@@ -148,7 +148,8 @@ export async function postScannerRiskConfig(baseUrl, config) {
       8000,
     );
     const data = await res.json().catch(() => ({}));
-    return { ok: res.ok && data.ok !== false, ...data, status: res.status };
+    const payload = data?.detail && typeof data.detail === 'object' ? data.detail : data;
+    return { ok: res.ok && payload.ok !== false, ...payload, status: res.status };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }

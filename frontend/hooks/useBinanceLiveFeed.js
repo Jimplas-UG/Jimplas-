@@ -4,7 +4,7 @@ import { buildBundleFromM30Bars } from '../lib/marketBundle';
 import { DEFAULT_CHART_SYMBOL, sanitizeFuturesSymbol } from '../lib/futuresSymbol';
 import { roundFuturesMid } from '../lib/futuresPrice';
 import { DISPLAY_PIP_SIZE } from '../security/deskConstants';
-import { liveFloatingTotal, liveLegProfit, mergeStickyAccount } from '../lib/liveFloatingPnl';
+import { liveFloatingTotal, liveLegProfit, mergeStickyAccount, MAX_MARK_REL_MOVE } from '../lib/liveFloatingPnl';
 import {
   fetchBinanceBarsM30,
   fetchBinanceDeals,
@@ -187,13 +187,18 @@ export function useBinanceLiveFeed({
   const applyLiveMarkToPositions = useCallback((mark, symbolHint) => {
     const markN = Number(mark);
     if (!(markN > 0)) return;
-    const sym = String(symbolHint || symRef.current || '').toUpperCase();
+    const sym = String(symbolHint || '').toUpperCase();
+    // Refuse unmarked ticks — never paint chart/scanner mid onto every open leg.
+    if (!sym) return;
     const prev = positionsRef.current || [];
     if (!prev.length) return;
     let changed = false;
     const next = prev.map((p) => {
-      if (sym && String(p.symbol || '').toUpperCase() !== sym) return p;
-      const profit = liveLegProfit(p, markN);
+      if (String(p.symbol || '').toUpperCase() !== sym) return p;
+      const entry = Number(p.price_open ?? p.entryPrice ?? 0);
+      // Hard reject cross-instrument marks (e.g. QNT mid on USUSDT entry).
+      if (entry > 0 && Math.abs(markN - entry) / entry > MAX_MARK_REL_MOVE) return p;
+      const profit = liveLegProfit(p, markN, sym);
       if (
         Math.abs(profit - Number(p.profit ?? 0)) < 1e-6 &&
         Number(p.price_current) === markN
@@ -642,10 +647,11 @@ export function useBinanceLiveFeed({
 
   const refreshAfterClose = useCallback(async () => {
     if (!sessionActive || !enabled || !baseUrl?.trim()) return;
-    // Immediate refresh + one quick follow-up (positions/user stream usually settle in <200ms).
-    await refreshBrokerSnapshot();
-    await new Promise((r) => setTimeout(r, 180));
-    await refreshBrokerSnapshot();
+    // Don't block UI — one quick snapshot is enough; follow-up is fire-and-forget.
+    void refreshBrokerSnapshot();
+    setTimeout(() => {
+      void refreshBrokerSnapshot();
+    }, 220);
   }, [sessionActive, enabled, baseUrl, refreshBrokerSnapshot]);
 
   useEffect(() => {

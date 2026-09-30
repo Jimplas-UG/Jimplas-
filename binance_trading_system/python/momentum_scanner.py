@@ -1259,16 +1259,27 @@ class MomentumScanner:
                 self._risk_locked = False
                 self._persist_risk_config()
             else:
-                changed = (
-                    (partition_usd is not None and float(partition_usd) != self._partition_usd)
-                    or (short_pct is not None and float(short_pct) != self._short_pct)
+                pct_changed = (
+                    (short_pct is not None and float(short_pct) != self._short_pct)
                     or (long1_pct is not None and float(long1_pct) != self._long1_pct)
                     or (long2_pct is not None and float(long2_pct) != self._long2_pct)
                 )
-                if changed:
+                usd_changed = partition_usd is not None and float(partition_usd) != self._partition_usd
+                # Locked desk: allow re-subscribing a different partition USD from the app.
+                # Never allow silent changes to the 50/40/40 leg splits while locked.
+                if pct_changed:
                     return {
                         "ok": False,
                         "error": "partition_locked",
+                        "partition_usd": self._partition_usd,
+                        "short_pct": self._short_pct,
+                        "long1_pct": self._long1_pct,
+                        "long2_pct": self._long2_pct,
+                        "locked": True,
+                    }
+                if not usd_changed:
+                    return {
+                        "ok": True,
                         "partition_usd": self._partition_usd,
                         "short_pct": self._short_pct,
                         "long1_pct": self._long1_pct,

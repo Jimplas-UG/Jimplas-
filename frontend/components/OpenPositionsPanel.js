@@ -5,7 +5,7 @@ import { formatFuturesPrice } from '../lib/futuresPrice';
 import { displayDealPnl, isCloseDeal } from '../lib/dealPnl';
 import { postBinanceClosePosition, postBinanceCloseAllPositions } from '../broker/binanceFuturesApi';
 import { formatPairLabel } from '../lib/futuresSymbol';
-import { liveFloatingTotal, liveLegProfit } from '../lib/liveFloatingPnl';
+import { liveFloatingTotal, liveLegProfit, resolveLegMark } from '../lib/liveFloatingPnl';
 
 function fmtPx(n) {
   return formatFuturesPrice(n);
@@ -55,6 +55,7 @@ export default function OpenPositionsPanel({
   positionsCoolS = 0,
   brokerDeals = [],
   livePrice,
+  livePriceSymbol,
   bid,
   ask,
   binanceBaseUrl,
@@ -67,11 +68,14 @@ export default function OpenPositionsPanel({
   onCloseMessage,
 }) {
   const { colors: C, styles: appStyles } = useBilshenzTheme();
-  const [closingKey, setClosingKey] = useState(null);
-  const closingRef = useRef(false);
+  const [closingKeys, setClosingKeys] = useState(() => new Set());
+  const closingKeysRef = useRef(new Set());
   const pairLabel = formatPairLabel(
     quoteSymbol || (positions.length === 1 ? positions[0]?.symbol : null) || 'BTCUSDT',
   );
+  // Only overlay a live tick when we know which symbol it belongs to.
+  const markSym = String(livePriceSymbol || '').toUpperCase() || null;
+  const markPx = Number.isFinite(Number(livePrice)) && Number(livePrice) > 0 ? Number(livePrice) : null;
 
   const watchDeals = useMemo(() => {
     const rows = Array.isArray(brokerDeals) ? [...brokerDeals] : [];
@@ -79,9 +83,19 @@ export default function OpenPositionsPanel({
   }, [brokerDeals]);
 
   const totalFloating = useMemo(
-    () => liveFloatingTotal(positions, livePrice, quoteSymbol || null),
-    [positions, livePrice, quoteSymbol],
+    () => liveFloatingTotal(positions, markSym ? markPx : null, markSym),
+    [positions, markPx, markSym],
   );
+
+  const isBusy = useCallback((key) => closingKeys.has(key), [closingKeys]);
+
+  const markBusy = useCallback((key, on) => {
+    const next = new Set(closingKeysRef.current);
+    if (on) next.add(key);
+    else next.delete(key);
+    closingKeysRef.current = next;
+    setClosingKeys(next);
+  }, []);
 
   const legSide = (pos) =>
     String(pos.positionSide || pos.leg || (pos.type === 'SELL' ? 'SHORT' : 'LONG')).toUpperCase();
@@ -93,11 +107,25 @@ export default function OpenPositionsPanel({
 
   const runClose = useCallback(
     async ({ symbol, positionSide, closePair, label }) => {
+      if (!brokerConnected || !binanceBaseUrl?.trim()) {
+        Alert.alert('Not connected', 'Connect Binance in Profile first.');
+        return;
+      }
       const key = closePair ? `pair-${symbol}` : `${symbol}-${positionSide}`;
-      if (closingRef.current) return; // duplicate-click guard
-      closingRef.current = true;
-      setClosingKey(key);
+      if (closingKeysRef.current.has(key) || closingKeysRef.current.has('__all__')) return;
+      markBusy(key, true);
       const closeOperationId = `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+      // Instant UI — remove leg(s) on tap, don't wait for REST.
+      onOptimisticClose?.({
+        symbol,
+        positionSide,
+        closePair,
+        closed: [],
+        dealsHead: [],
+      });
+      onCloseMessage?.(`Closing ${label}…`);
+
       try {
         const r = await postBinanceClosePosition(binanceBaseUrl, {
           symbol,
@@ -106,7 +134,6 @@ export default function OpenPositionsPanel({
           closeOperationId,
         });
         if (r.ok) {
-          // Immediate UI — positions + trade history (do not wait for poll).
           onOptimisticClose?.({
             symbol,
             positionSide,
@@ -132,72 +159,47 @@ export default function OpenPositionsPanel({
           }
           if (r.latencyMs != null) msg += ` · ${Math.round(r.latencyMs)}ms`;
           onCloseMessage?.(msg);
-          if (onRefreshAfterClose) void onRefreshAfterClose();
-          else if (onRefresh) void onRefresh();
+          void onRefreshAfterClose?.();
         } else if (r.error === 'close_in_progress') {
           onCloseMessage?.('Close already in progress…');
+          void onRefreshAfterClose?.();
         } else {
+          // Restore from exchange if optimistic remove was wrong.
+          void onRefreshAfterClose?.();
           Alert.alert('Close failed', parseCloseError(r));
         }
       } catch (e) {
+        void onRefreshAfterClose?.();
         Alert.alert('Close failed', e instanceof Error ? e.message : String(e));
       } finally {
-        closingRef.current = false;
-        setClosingKey(null);
+        markBusy(key, false);
       }
     },
-    [binanceBaseUrl, onRefresh, onRefreshAfterClose, onCloseMessage, onOptimisticClose],
+    [
+      brokerConnected,
+      binanceBaseUrl,
+      markBusy,
+      onRefreshAfterClose,
+      onCloseMessage,
+      onOptimisticClose,
+    ],
   );
 
-  const confirmCloseLeg = useCallback(
+  const fireCloseLeg = useCallback(
     (pos) => {
-      if (!brokerConnected || !binanceBaseUrl?.trim()) {
-        Alert.alert('Not connected', 'Connect Binance in Profile first.');
-        return;
-      }
       const ps = legSide(pos);
-      const profit = Number(pos.profit ?? 0);
       const label = legLabel(pos);
-      // SHORT manual close flattens the full pair on the bridge (no orphan longs).
-      const shortFlattens = ps === 'SHORT';
-      Alert.alert(
-        shortFlattens ? `Close SHORT (full pair)?` : `Close ${label} only?`,
-        shortFlattens
-          ? `${label} ${fmtVol(pos.volume)} ${pos.symbol}\nEntry ${fmtPx(pos.price_open)} · Floating ${fmtUsd(profit)}\n\nClosing SHORT market-flattens this symbol (short + any recovery longs).`
-          : `${label} ${fmtVol(pos.volume)} ${pos.symbol}\nEntry ${fmtPx(pos.price_open)} · Floating ${fmtUsd(profit)}\n\nOther legs on this symbol will stay open.`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: shortFlattens ? 'Close pair via SHORT' : `Close ${label}`,
-            style: profit >= 0 ? 'default' : 'destructive',
-            onPress: () => void runClose({ symbol: pos.symbol, positionSide: ps, closePair: false, label }),
-          },
-        ],
-      );
+      void runClose({ symbol: pos.symbol, positionSide: ps, closePair: false, label });
     },
-    [brokerConnected, binanceBaseUrl, livePrice, runClose],
+    [runClose],
   );
 
-  const confirmClosePair = useCallback(
-    (symbol, legCount) => {
-      if (!brokerConnected || !binanceBaseUrl?.trim()) return;
-      Alert.alert(
-        'Close full pair?',
-        `Market-close all ${legCount} leg(s) on ${symbol} (short + longs).`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Close pair',
-            style: 'destructive',
-            onPress: () => void runClose({ symbol, closePair: true, label: 'Pair' }),
-          },
-        ],
-      );
+  const fireClosePair = useCallback(
+    (symbol) => {
+      void runClose({ symbol, closePair: true, label: 'Pair' });
     },
-    [brokerConnected, binanceBaseUrl, runClose],
+    [runClose],
   );
-
-  const confirmClose = confirmCloseLeg;
 
   const positionsBySymbol = useMemo(() => {
     const map = new Map();
@@ -209,51 +211,44 @@ export default function OpenPositionsPanel({
     return map;
   }, [positions]);
 
-  const confirmCloseAll = useCallback(() => {
+  const fireCloseAll = useCallback(() => {
     if (!brokerConnected || !binanceBaseUrl?.trim()) {
       Alert.alert('Not connected', 'Connect Binance in Profile first.');
       return;
     }
-    Alert.alert(
-      'Close all positions?',
-      `This will market-close all ${positions.length} open position(s) on Binance.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Close all',
-          style: 'destructive',
-          onPress: () => {
-            void (async () => {
-              setClosingKey('__all__');
-              try {
-                const r = await postBinanceCloseAllPositions(binanceBaseUrl);
-                if (r.ok) {
-                  onOptimisticClose?.({
-                    closePair: true,
-                    symbol: '*',
-                    closed: Array.isArray(r.closed) ? r.closed : [],
-                    dealsHead: Array.isArray(r.dealsHead) ? r.dealsHead : [],
-                  });
-                  onCloseMessage?.(`Closed ${r.closed?.length ?? 0} leg(s)`);
-                  if (onRefreshAfterClose) {
-                    await onRefreshAfterClose();
-                  } else {
-                    await onRefresh?.();
-                  }
-                } else {
-                  Alert.alert('Close all failed', parseCloseError(r));
-                }
-              } catch (e) {
-                Alert.alert('Close all failed', e instanceof Error ? e.message : String(e));
-              } finally {
-                setClosingKey(null);
-              }
-            })();
-          },
-        },
-      ],
-    );
-  }, [brokerConnected, binanceBaseUrl, positions.length, onRefresh, onRefreshAfterClose, onCloseMessage, onOptimisticClose]);
+    if (closingKeysRef.current.has('__all__')) return;
+    markBusy('__all__', true);
+    onOptimisticClose?.({
+      closePair: true,
+      symbol: '*',
+      closed: [],
+      dealsHead: [],
+    });
+    onCloseMessage?.('Closing all…');
+    void (async () => {
+      try {
+        const r = await postBinanceCloseAllPositions(binanceBaseUrl);
+        if (r.ok) {
+          onOptimisticClose?.({
+            closePair: true,
+            symbol: '*',
+            closed: Array.isArray(r.closed) ? r.closed : [],
+            dealsHead: Array.isArray(r.dealsHead) ? r.dealsHead : [],
+          });
+          onCloseMessage?.(`Closed ${r.closed?.length ?? 0} leg(s)`);
+          void onRefreshAfterClose?.();
+        } else {
+          void onRefreshAfterClose?.();
+          Alert.alert('Close all failed', parseCloseError(r));
+        }
+      } catch (e) {
+        void onRefreshAfterClose?.();
+        Alert.alert('Close all failed', e instanceof Error ? e.message : String(e));
+      } finally {
+        markBusy('__all__', false);
+      }
+    })();
+  }, [brokerConnected, binanceBaseUrl, markBusy, onRefreshAfterClose, onCloseMessage, onOptimisticClose]);
 
   return (
     <View style={st.wrap}>
@@ -279,9 +274,13 @@ export default function OpenPositionsPanel({
           <Text style={[st.title, { color: C.text }]}>Open positions</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             {positions.length > 1 ? (
-              <Pressable onPress={confirmCloseAll} disabled={closingKey === '__all__'} hitSlop={8}>
+              <Pressable
+                onPressIn={fireCloseAll}
+                disabled={isBusy('__all__')}
+                hitSlop={8}
+                unstable_pressDelay={0}>
                 <Text style={{ color: C.red, fontSize: 10, fontWeight: '800' }}>
-                  {closingKey === '__all__' ? '…' : 'CLOSE ALL'}
+                  {isBusy('__all__') ? '…' : 'CLOSE ALL'}
                 </Text>
               </Pressable>
             ) : null}
@@ -321,30 +320,27 @@ export default function OpenPositionsPanel({
               <View key={sym}>
                 {legs.length > 1 ? (
                   <Pressable
-                    onPress={() => confirmClosePair(sym, legs.length)}
-                    disabled={closingKey === `pair-${sym}`}
+                    onPressIn={() => fireClosePair(sym)}
+                    disabled={isBusy(`pair-${sym}`)}
+                    unstable_pressDelay={0}
                     style={[st.pairBar, { borderColor: C.border }]}>
                     <Text style={{ color: C.amber, fontSize: 10, fontWeight: '800' }}>
-                      {closingKey === `pair-${sym}` ? 'Closing pair…' : `CLOSE PAIR · ${sym}`}
+                      {isBusy(`pair-${sym}`) ? 'Closing pair…' : `CLOSE PAIR · ${sym}`}
                     </Text>
                   </Pressable>
                 ) : null}
                 {legs.map((p, i) => {
                   const key = `${p.symbol}-${legSide(p)}-${p.price_open}-${i}`;
-                  const markForLeg =
-                    Number.isFinite(Number(livePrice)) &&
-                    (!quoteSymbol || String(p.symbol || '').toUpperCase() === String(quoteSymbol).toUpperCase())
-                      ? livePrice
-                      : p.price_current;
-                  const profit = liveLegProfit(p, markForLeg);
+                  const markForLeg = resolveLegMark(p, markPx, markSym);
+                  const profit = liveLegProfit(p, markForLeg, markSym);
                   const entry = Number(p.price_open ?? 0);
                   const sideCol = p.type === 'BUY' ? C.green : C.red;
                   const label = legLabel(p);
                   const dist =
-                    Number.isFinite(Number(markForLeg)) && entry > 0
+                    markForLeg != null && entry > 0
                       ? formatFuturesPrice(p.type === 'BUY' ? markForLeg - entry : entry - markForLeg)
                       : '—';
-                  const busy = closingKey === `${p.symbol}-${legSide(p)}`;
+                  const busy = isBusy(`${p.symbol}-${legSide(p)}`);
                   return (
                     <View key={key} style={[st.posCard, { borderColor: C.border, backgroundColor: C.panel2 }]}>
                       <View style={st.posTop}>
@@ -366,8 +362,9 @@ export default function OpenPositionsPanel({
                         ) : null}
                       </View>
                       <Pressable
-                        onPress={() => confirmCloseLeg(p)}
+                        onPressIn={() => fireCloseLeg(p)}
                         disabled={busy}
+                        unstable_pressDelay={0}
                         style={({ pressed }) => [
                           st.closeBtn,
                           {

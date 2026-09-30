@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -49,16 +50,15 @@ function PresetChipRow({ label, hint, options, value, onChange, format, locked, 
           return (
             <Pressable
               key={String(opt)}
-              onPress={() => !locked && onChange(opt)}
-              disabled={locked && !on}
+              onPress={() => onChange(opt)}
               style={({ pressed }) => [
                 st.chip,
                 {
                   borderColor: on ? C.accent : C.border,
                   backgroundColor: on ? C.accentDim : C.panel2,
-                  opacity: locked && !on ? 0.45 : 1,
+                  opacity: 1,
                 },
-                pressed && !locked && { opacity: 0.85 },
+                pressed && { opacity: 0.85 },
               ]}>
               <Text style={[st.chipTxt, { color: on ? C.accentLight : C.text }]}>{format(opt)}</Text>
             </Pressable>
@@ -86,6 +86,7 @@ export default function InstitutionalRiskDesk({
   brokerDeals,
   binanceBaseUrl,
   livePrice,
+  livePriceSymbol,
   bid,
   ask,
   onRefreshBroker,
@@ -187,25 +188,31 @@ export default function InstitutionalRiskDesk({
         </View>
         <PresetChipRow
           label="Subscribe partition"
-          hint={
-            config.partitionLocked
-              ? 'Partition locked — this amount is fixed for all scanner trades until you reset risk desk.'
-              : 'Pick what you are ready to lose — only this slice is used for new trades.'
-          }
+          hint="Tap an amount to subscribe — that slice is used for all new scanner trades (50% short · 40% long 1 · 40% long 2)."
           options={PARTITION_PRESETS_USD}
           value={config.partitionUsd}
           onChange={(v) => {
-            if (config.partitionLocked) return;
-            onConfigChange({ partitionUsd: v, partitionLocked: true });
+            if (v === config.partitionUsd) return;
+            Alert.alert(
+              'Subscribe partition',
+              `Switch scanner partition to $${v}? Only this slice is used for new trades.`,
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: `Use $${v}`,
+                  onPress: () => onConfigChange({ partitionUsd: v, partitionLocked: true }),
+                },
+              ],
+            );
           }}
-          locked={config.partitionLocked}
+          locked={false}
           format={(v) => `$${v}`}
           C={C}
         />
         {config.partitionLocked ? (
           <Text style={[st.ruleNote, { color: C.amber }]}>
-            Partition ${config.partitionUsd} subscribed and locked ({config.shortPartitionPct}% short ·{' '}
-            {config.long1PartitionPct}% long 1 · {config.long2PartitionPct}% long 2).
+            Partition ${config.partitionUsd} active ({config.shortPartitionPct}% short ·{' '}
+            {config.long1PartitionPct}% long 1 · {config.long2PartitionPct}% long 2). Tap another amount to switch.
           </Text>
         ) : null}
         <Text style={[st.ruleNote, { color: C.dim }]}>
@@ -268,6 +275,7 @@ export default function InstitutionalRiskDesk({
             positionsCoolS={brokerPositionsCoolS}
             brokerDeals={brokerDeals ?? []}
             livePrice={livePrice}
+            livePriceSymbol={livePriceSymbol}
             bid={bid}
             ask={ask}
             quoteSymbol={brokerPositions?.length === 1 ? brokerPositions[0]?.symbol : null}

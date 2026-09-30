@@ -22,9 +22,12 @@ function AppBottomNav({ tab, onChange, bottomInset, pad = 16 }) {
               key={it.id}
               accessibilityRole="tab"
               accessibilityState={{ selected: active }}
-              onPress={() => onChange(it.id)}
-              hitSlop={6}
-              style={({ pressed }) => [st.item, pressed && { opacity: 0.85 }]}>
+              // Press-in switches instantly — no waiting for press-out / transition.
+              onPressIn={() => onChange(it.id)}
+              hitSlop={8}
+              unstable_pressDelay={0}
+              android_disableSound
+              style={({ pressed }) => [st.item, pressed && { opacity: 0.9 }]}>
               <View
                 style={[
                   st.itemInner,

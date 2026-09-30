@@ -37,6 +37,7 @@ function RiskScreen({ pad, desk, onOpenProfile, active = true }) {
         brokerDeals={brokerFeed.brokerDeals || []}
         binanceBaseUrl={baseUrl}
         livePrice={brokerFeed.price}
+        livePriceSymbol={brokerFeed.resolvedSymbol}
         bid={brokerFeed.bid}
         ask={brokerFeed.ask}
         onRefreshBroker={brokerFeed.refreshBrokerSnapshot}
@@ -51,4 +52,13 @@ function RiskScreen({ pad, desk, onOpenProfile, active = true }) {
   );
 }
 
-export default memo(RiskScreen);
+function riskPropsEqual(prev, next) {
+  if (prev.active !== next.active || prev.pad !== next.pad || prev.onOpenProfile !== next.onOpenProfile) {
+    return false;
+  }
+  // Hidden Risk tab: ignore live feed / mark churn so tab switches stay instant.
+  if (!next.active) return true;
+  return prev.desk === next.desk;
+}
+
+export default memo(RiskScreen, riskPropsEqual);

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState, startTransition } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { hideBootSplash } from './lib/bootSplash';
@@ -28,7 +28,7 @@ function AppContent() {
   const insets = useSafeAreaInsets();
   const { baseUrl, connected, sessionEpoch } = useBinanceBridge();
   const [tab, setTab] = useState('scanner');
-  // Mount tabs on first visit only — shell/header/nav/feeds stay alive; no remount on return.
+  // Mount tabs once; keep them alive with display toggles so taps never remount.
   const [mounted, setMounted] = useState({
     scanner: true,
     risk: false,
@@ -37,12 +37,27 @@ function AppContent() {
   });
   const [tradeVisited, setTradeVisited] = useState(false);
 
+  // Instant tab switch — never wrap setTab in startTransition (that deferred the highlight).
   const onTabChange = useCallback((name) => {
-    startTransition(() => {
-      setTab(name);
-      if (name === 'trade') setTradeVisited(true);
-      setMounted((m) => (m[name] ? m : { ...m, [name]: true }));
-    });
+    setTab(name);
+    if (name === 'trade') setTradeVisited(true);
+    setMounted((m) => (m[name] ? m : { ...m, [name]: true }));
+  }, []);
+
+  // After first paint, warm-mount other tabs so Risk/Trade/Settings are one-tap instant.
+  useEffect(() => {
+    let cancelled = false;
+    const warm = () => {
+      if (cancelled) return;
+      setMounted({ scanner: true, risk: true, trade: true, profile: true });
+      setTradeVisited(true);
+    };
+    // Immediate warm — 350ms delay left first Risk/Trade taps cold.
+    const t = setTimeout(warm, 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
   }, []);
 
   const hasApi = !!baseUrl?.trim();

@@ -75,12 +75,29 @@ export function useDeskSession({ enabled = true, loadBars = true, pollTicks = tr
     const r = await syncScannerBridgeState(baseUrl, { config: cfg }, { retries: 3, delayMs: 700 });
     if (!r.ok) {
       lastSyncKeyRef.current = '';
-      console.warn('[desk] scanner risk sync failed', r.risk?.error || r);
+      const serverUsd = Number(r.risk?.partition_usd);
+      // Phone was on a stale locked $50 while bridge already has $100 — adopt server.
+      if (
+        serverUsd > 0 &&
+        serverUsd !== Number(cfg.partitionUsd) &&
+        (r.risk?.error === 'partition_locked' || r.risk?.locked === true)
+      ) {
+        riskDesk.updateConfig({
+          partitionUsd: serverUsd,
+          partitionLocked: true,
+          shortPartitionPct: Number(r.risk?.short_pct) || cfg.shortPartitionPct,
+          long1PartitionPct: Number(r.risk?.long1_pct) || cfg.long1PartitionPct,
+          long2PartitionPct: Number(r.risk?.long2_pct) || cfg.long2PartitionPct,
+        });
+      } else {
+        console.warn('[desk] scanner risk sync failed', r.risk?.error || r);
+      }
     }
   }, [
     baseUrl,
     connected,
     riskDesk.hydrated,
+    riskDesk.updateConfig,
     partitionUsd,
     shortPartitionPct,
     long1PartitionPct,

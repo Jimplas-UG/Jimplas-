@@ -37,13 +37,25 @@ function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
       : positions.find((p) => String(p.symbol || '').toUpperCase() === String(executionLead?.symbol || '').toUpperCase())
           ?.symbol || positions[0]?.symbol || null;
 
-  const liveMark = executionLead?.price ?? brokerFeed.price;
+  // Never apply scanner-lead / chart tick to a different open symbol (QNT mark on USUSDT → -$973k).
+  const matchedLive = useMemo(() => {
+    if (!positions.length) return { price: null, symbol: null };
+    const open = new Set(positions.map((p) => String(p.symbol || '').toUpperCase()).filter(Boolean));
+    const leadSym = String(executionLead?.symbol || '').toUpperCase();
+    const leadPx = Number(executionLead?.price);
+    if (leadSym && open.has(leadSym) && leadPx > 0) return { price: leadPx, symbol: leadSym };
+    const feedSym = String(brokerFeed.resolvedSymbol || '').toUpperCase();
+    const feedPx = Number(brokerFeed.price);
+    if (feedSym && open.has(feedSym) && feedPx > 0) return { price: feedPx, symbol: feedSym };
+    return { price: null, symbol: null };
+  }, [positions, executionLead?.symbol, executionLead?.price, brokerFeed.resolvedSymbol, brokerFeed.price]);
+
   const floating = useMemo(() => {
     if (positions.length) {
-      return liveFloatingTotal(positions, liveMark, positionSymbol);
+      return liveFloatingTotal(positions, matchedLive.price, matchedLive.symbol);
     }
     return Number(account?.profit ?? 0);
-  }, [positions, liveMark, positionSymbol, account?.profit]);
+  }, [positions, matchedLive.price, matchedLive.symbol, account?.profit]);
 
   return (
     <ScrollView
@@ -103,7 +115,8 @@ function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
         positionsStale={!!brokerFeed.positionsStale}
         positionsCoolS={brokerFeed.positionsCoolS || 0}
         brokerDeals={brokerFeed.brokerDeals || []}
-        livePrice={liveMark}
+        livePrice={matchedLive.price}
+        livePriceSymbol={matchedLive.symbol}
         bid={brokerFeed.bid}
         ask={brokerFeed.ask}
         quoteSymbol={positionSymbol}
@@ -133,4 +146,13 @@ function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
   );
 }
 
-export default memo(TradeScreen);
+export default memo(TradeScreen, tradePropsEqual);
+
+function tradePropsEqual(prev, next) {
+  if (prev.active !== next.active || prev.pad !== next.pad || prev.onOpenProfile !== next.onOpenProfile) {
+    return false;
+  }
+  // Hidden Trade tab: skip desk/scanner tick storms while user is on Home/Risk.
+  if (!next.active) return true;
+  return prev.desk === next.desk && prev.scanner === next.scanner;
+}

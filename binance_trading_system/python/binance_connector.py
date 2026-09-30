@@ -201,8 +201,10 @@ class BinanceConnector:
         self._last_good_deals_ts = 0.0
         self._last_good_calendar: dict[str, Any] | None = None
         self._last_good_calendar_ts = 0.0
+        self._history_cache_hydrated = False
         # Symbols recently traded/closed — survives flatten so /api/logs still queries them.
         self._deal_symbol_history: set[str] = set()
+        self._hydrate_history_cache_from_disk()
         # Fail-fast cool-down after 418/429 — never time.sleep(60+) on the request path
         # (that froze /health + WS accept under threadpool saturation).
         self._rest_cool_until = 0.0
@@ -288,14 +290,23 @@ class BinanceConnector:
                 f"Binance REST cooling ({self._rest_cool_reason or 'rate'}) {left:.0f}s left"
             )
 
-    def _wait_or_clear_cool_for_close(self, *, max_wait_s: float = 12.0) -> float:
-        """Emergency flatten must not die on our own cool timer — wait briefly or clear and try."""
+    def _wait_or_clear_cool_for_close(self, *, max_wait_s: float = 0.0) -> float:
+        """Manual/emergency close must fire immediately — never sleep on our cool timer."""
         left = self.rest_cooling_left()
         if left <= 0:
             return 0.0
-        wait = min(left + 0.2, max_wait_s)
+        # Prefer clear-and-go: waiting here made CLOSE buttons feel stuck for many seconds.
+        if max_wait_s <= 0 or left > max_wait_s:
+            log.warning(
+                "close: clearing REST cool %.1fs (%s) for immediate flatten",
+                left,
+                self._rest_cool_reason or "rate",
+            )
+            self.clear_rest_cool()
+            return 0.0
+        wait = min(left + 0.05, max_wait_s)
         log.warning(
-            "close: REST cool %.1fs (%s) — waiting %.1fs then attempting",
+            "close: REST cool %.1fs (%s) — brief wait %.1fs then attempt",
             left,
             self._rest_cool_reason or "rate",
             wait,
@@ -303,7 +314,6 @@ class BinanceConnector:
         time.sleep(wait)
         still = self.rest_cooling_left()
         if still > 0:
-            log.warning("close: clearing residual cool %.1fs for emergency order", still)
             self.clear_rest_cool()
         return wait
 
@@ -582,6 +592,87 @@ class BinanceConnector:
             out.append(d)
         self._last_good_deals = out[:200]
         self._last_good_deals_ts = time.time()
+        self._persist_history_cache()
+
+    def _hydrate_history_cache_from_disk(self) -> None:
+        if self._history_cache_hydrated:
+            return
+        self._history_cache_hydrated = True
+        try:
+            from history_cache import load_history_cache
+
+            cached = load_history_cache()
+        except Exception as e:
+            log.debug("history cache hydrate skipped: %s", e)
+            return
+        cal = cached.get("calendar")
+        if isinstance(cal, dict) and cal.get("days"):
+            from calendar_pnl import merge_calendar_day_lists
+
+            prev_days = (self._last_good_calendar or {}).get("days") or []
+            merged_days = merge_calendar_day_lists(prev_days, cal.get("days") or [], fresh_wins=False)
+            base = dict(self._last_good_calendar or cal)
+            base["days"] = merged_days
+            base["total_pnl"] = round(sum(float(d.get("pnl") or 0) for d in merged_days), 2)
+            base["ok"] = True
+            self._last_good_calendar = base
+            self._last_good_calendar_ts = time.time()
+        deals = cached.get("deals")
+        if isinstance(deals, list) and deals:
+            seen: set[str] = set()
+            merged: list[dict[str, Any]] = []
+            for row in list(deals) + list(self._last_good_deals):
+                key = str(row.get("order_id") or row.get("ticket") or "")
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                merged.append(row)
+            merged.sort(key=lambda d: int(d.get("time") or 0), reverse=True)
+            self._last_good_deals = merged[:200]
+            self._last_good_deals_ts = time.time()
+        for s in cached.get("deal_symbols") or []:
+            u = str(s or "").upper()
+            if u:
+                self._deal_symbol_history.add(u)
+
+    def _persist_history_cache(self) -> None:
+        try:
+            from history_cache import save_history_cache
+
+            save_history_cache(
+                calendar=self._last_good_calendar,
+                deals=self._last_good_deals,
+                deal_symbols=sorted(self._deal_symbol_history),
+            )
+        except Exception as e:
+            log.debug("persist history cache: %s", e)
+
+    def _fetch_realized_income_rows(self, since_ms: int = 0) -> list[dict[str, Any]]:
+        """Paginate REALIZED_PNL income — calendar must not miss days beyond 1000 legs."""
+        rows: list[dict[str, Any]] = []
+        cursor = max(0, int(since_ms or 0))
+        for _ in range(32):
+            params: dict[str, Any] = {"incomeType": "REALIZED_PNL", "limit": 1000}
+            if cursor > 0:
+                params["startTime"] = cursor
+            batch = self._request(
+                "GET",
+                "/fapi/v1/income",
+                params,
+                signed=True,
+                bypass_rest_cool=True,
+            )
+            if not batch:
+                break
+            rows.extend(batch)
+            if len(batch) < 1000:
+                break
+            last_ts = int(batch[-1].get("time") or 0)
+            if last_ts <= 0 or last_ts < cursor:
+                break
+            cursor = last_ts + 1
+        return rows
 
     def _note_deal_symbols(self, symbols: list[str] | set[str] | None) -> None:
         for s in symbols or []:
@@ -634,6 +725,7 @@ class BinanceConnector:
 
     def recent_deals(self, limit: int = 50, symbol: str | None = None) -> list[dict[str, Any]]:
         """User trades across active/recent symbols — not only cfg.symbol."""
+        self._hydrate_history_cache_from_disk()
         if self.cfg.paper:
             from paper_simulator import paper_store
 
@@ -705,6 +797,7 @@ class BinanceConnector:
             self._note_deal_symbols({str(d.get("symbol") or "").upper() for d in deals_for_sticky})
             self._last_good_deals = list(deals_for_sticky)
             self._last_good_deals_ts = time.time()
+            self._persist_history_cache()
             return deals
         # Never clear previous history — empty fetch keeps sticky forever.
         return list(self._last_good_deals[:lim])
@@ -2351,6 +2444,8 @@ class BinanceConnector:
 
         from calendar_pnl import merge_calendar_day_buckets
 
+        self._hydrate_history_cache_from_disk()
+
         sticky_map: dict[str, dict[str, float]] = {}
         if isinstance(self._last_good_calendar, dict):
             for row in self._last_good_calendar.get("days") or []:
@@ -2363,18 +2458,12 @@ class BinanceConnector:
                 }
 
         cool_left = self.rest_cooling_left()
-        if cool_left > 0.25 and sticky_map:
-            sticky = dict(self._last_good_calendar or {})
-            sticky["stale"] = True
-            sticky["ok"] = True
-            return sticky
 
         by_day: dict[str, dict[str, float]] = {}
         source = "income"
         income_ok = False
 
         try:
-            params: dict[str, Any] = {"incomeType": "REALIZED_PNL", "limit": 1000}
             since_ms = 0
             try:
                 from trade_history import trade_history_since_ms
@@ -2382,23 +2471,15 @@ class BinanceConnector:
                 since_ms = int(trade_history_since_ms() or 0)
             except Exception:
                 since_ms = 0
-            if since_ms > 0:
-                params["startTime"] = since_ms
-            # UI calendar — one lightweight income read; bypass cool so history survives restarts.
-            income = self._request(
-                "GET",
-                "/fapi/v1/income",
-                params,
-                signed=True,
-                bypass_rest_cool=True,
-            )
+            # UI calendar — paginated income; always bypass REST cool (never serve stale while trading).
+            income = self._fetch_realized_income_rows(since_ms)
             by_day = aggregate_income_days(income or [], include_trade_time=include_trade_time)
-            income_ok = bool(by_day)
+            income_ok = True
         except Exception as e:
             log.warning("trade_pnl_calendar income: %s", e)
             by_day = {}
 
-        if not by_day and not income_ok:
+        if not income_ok:
             source = "deals"
             # Symbol-scoped deals are incomplete — skip during REST cool; serve sticky instead.
             if cool_left <= 0.25:
@@ -2425,9 +2506,12 @@ class BinanceConnector:
         }
         if since_date:
             out["since"] = since_date
+        if cool_left > 0.25:
+            out["stale"] = True
         if days_out:
             self._last_good_calendar = dict(out)
             self._last_good_calendar_ts = time.time()
+            self._persist_history_cache()
             return out
         if self._last_good_calendar and sticky_map:
             sticky = dict(self._last_good_calendar)
