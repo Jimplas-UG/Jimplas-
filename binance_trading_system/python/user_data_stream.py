@@ -15,8 +15,15 @@ from websockets.exceptions import ConnectionClosed
 
 log = logging.getLogger("user_data_stream")
 
-MAINNET_WS = "wss://fstream.binance.com/ws"
-TESTNET_WS = "wss://stream.binancefuture.com/ws"
+# Binance USD-M split (2026-03-06); legacy /ws/{listenKey} retired 2026-04-23.
+# Private: /private/ws?listenKey=...&events=E1/E2/... (slash-separated; commas → HTTP 400).
+MAINNET_WS = "wss://fstream.binance.com/private/ws"
+TESTNET_WS = "wss://stream.binancefuture.com/private/ws"
+USER_STREAM_EVENTS = (
+    "ORDER_TRADE_UPDATE/ACCOUNT_UPDATE/MARGIN_CALL/TRADE_LITE/"
+    "ACCOUNT_CONFIG_UPDATE/STRATEGY_UPDATE/GRID_UPDATE/"
+    "CONDITIONAL_ORDER_TRIGGER_REJECT/ALGO_ORDER_UPDATE/listenKeyExpired"
+)
 RECONNECT_MIN_SEC = 0.02
 RECONNECT_MAX_SEC = 0.6
 
@@ -140,6 +147,9 @@ class BinanceUserDataStream:
             if hasattr(self._connector, "invalidate_positions_cache"):
                 self._connector.invalidate_positions_cache()
             self._last_sync_ms = int(time.time() * 1000)
+        elif et == "listenKeyExpired":
+            log.warning("listenKeyExpired — forcing reconnect")
+            self._listen_key = None
         if self._on_event:
             try:
                 self._on_event(payload)
@@ -160,7 +170,7 @@ class BinanceUserDataStream:
                 continue
             self._listen_key = listen_key
             base = TESTNET_WS if self._get_testnet() else MAINNET_WS
-            url = f"{base}/{listen_key}"
+            url = f"{base}?listenKey={listen_key}&events={USER_STREAM_EVENTS}"
             if keepalive_task:
                 keepalive_task.cancel()
             keepalive_task = asyncio.create_task(self._keepalive_loop())

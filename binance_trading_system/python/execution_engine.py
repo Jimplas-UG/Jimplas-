@@ -245,6 +245,11 @@ class ExecutionEngine:
         return True, ""
 
     def _validate_session(self) -> tuple[bool, str]:
+        if getattr(self._connector, "api_auth_blocked", False):
+            reason = getattr(self._connector, "_api_auth_reason", "") or "Invalid API-key / IP / permissions"
+            return False, f"API_AUTH_BLOCKED:{reason[:80]}"
+        if not getattr(self._connector, "signed_ready", True) and not getattr(self._connector.cfg, "paper", False):
+            return False, "awaiting_account_verify"
         if self._session_ok:
             return self._session_ok()
         cfg = self._connector.cfg
@@ -542,6 +547,8 @@ class ExecutionEngine:
                             result.error = err
                             result.binance_code = code
                             result.http_code = http
+                            if hasattr(self._connector, "note_api_auth_failure"):
+                                self._connector.note_api_auth_failure(err, http_code=http, binance_code=code)
                             if retryable and attempt < MAX_RETRIES:
                                 wait = RETRY_BACKOFF_MS[min(attempt, len(RETRY_BACKOFF_MS) - 1)] / 1000.0
                                 result.retry_decision = f"retry_{attempt + 1}_in_{wait}s"

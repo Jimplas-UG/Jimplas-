@@ -37,21 +37,36 @@ function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
       : positions.find((p) => String(p.symbol || '').toUpperCase() === String(executionLead?.symbol || '').toUpperCase())
           ?.symbol || positions[0]?.symbol || null;
 
-  // Never apply scanner-lead / chart tick to a different open symbol (QNT mark on USUSDT → -$973k).
+  // Prefer Binance mark on open legs — scanner/chart lead caused PnL mismatch vs Binance.
   const matchedLive = useMemo(() => {
     if (!positions.length) return { price: null, symbol: null };
     const open = new Set(positions.map((p) => String(p.symbol || '').toUpperCase()).filter(Boolean));
-    const leadSym = String(executionLead?.symbol || '').toUpperCase();
-    const leadPx = Number(executionLead?.price);
-    if (leadSym && open.has(leadSym) && leadPx > 0) return { price: leadPx, symbol: leadSym };
+
+    if (positions.length === 1) {
+      const p = positions[0];
+      const sym = String(p?.symbol || '').toUpperCase();
+      const mark = Number(p?.markPrice ?? p?.price_current);
+      if (sym && mark > 0) return { price: mark, symbol: sym };
+    }
+
     const feedSym = String(brokerFeed.resolvedSymbol || '').toUpperCase();
     const feedPx = Number(brokerFeed.price);
     if (feedSym && open.has(feedSym) && feedPx > 0) return { price: feedPx, symbol: feedSym };
+
+    // Same-symbol scanner lead only as last resort (never cross-symbol).
+    const leadSym = String(executionLead?.symbol || '').toUpperCase();
+    const leadPx = Number(executionLead?.price);
+    if (leadSym && open.has(leadSym) && leadPx > 0) return { price: leadPx, symbol: leadSym };
+
     return { price: null, symbol: null };
   }, [positions, executionLead?.symbol, executionLead?.price, brokerFeed.resolvedSymbol, brokerFeed.price]);
 
   const floating = useMemo(() => {
     if (positions.length) {
+      // Prefer exchange sticky when no trustworthy same-symbol mark.
+      if (matchedLive.price == null) {
+        return positions.reduce((s, p) => s + (Number(p?.profit) || 0), 0);
+      }
       return liveFloatingTotal(positions, matchedLive.price, matchedLive.symbol);
     }
     return Number(account?.profit ?? 0);
@@ -129,19 +144,23 @@ function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
         onCloseMessage={(msg) => setLastBrokerMsg(msg)}
       />
 
-      <PilotSectionTitle title="Performance" />
-      <TradeResultsCalendar
-        binanceBaseUrl={baseUrl}
-        brokerConnected={connected && useBrokerSession}
-        brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : []}
-        active={active}
-      />
-      <TradeHistoryPanel
-        brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : []}
-        binanceBaseUrl={baseUrl}
-        brokerConnected={connected && useBrokerSession}
-        active={active}
-      />
+      {active ? (
+        <>
+          <PilotSectionTitle title="Performance" />
+          <TradeResultsCalendar
+            binanceBaseUrl={baseUrl}
+            brokerConnected={connected && useBrokerSession}
+            brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : []}
+            active={active}
+          />
+          <TradeHistoryPanel
+            brokerDeals={useBrokerSession ? brokerFeed.brokerDeals : []}
+            binanceBaseUrl={baseUrl}
+            brokerConnected={connected && useBrokerSession}
+            active={active}
+          />
+        </>
+      ) : null}
     </ScrollView>
   );
 }

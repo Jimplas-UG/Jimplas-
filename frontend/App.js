@@ -28,7 +28,7 @@ function AppContent() {
   const insets = useSafeAreaInsets();
   const { baseUrl, connected, sessionEpoch } = useBinanceBridge();
   const [tab, setTab] = useState('scanner');
-  // Mount tabs once; keep them alive with display toggles so taps never remount.
+  // Mount tabs on first visit only — eager warm of all four blocked the JS thread.
   const [mounted, setMounted] = useState({
     scanner: true,
     risk: false,
@@ -44,20 +44,12 @@ function AppContent() {
     setMounted((m) => (m[name] ? m : { ...m, [name]: true }));
   }, []);
 
-  // After first paint, warm-mount other tabs so Risk/Trade/Settings are one-tap instant.
+  // Idle-warm Risk only (light). Trade/Settings mount on first tap so Home stays snappy.
   useEffect(() => {
-    let cancelled = false;
-    const warm = () => {
-      if (cancelled) return;
-      setMounted({ scanner: true, risk: true, trade: true, profile: true });
-      setTradeVisited(true);
-    };
-    // Immediate warm — 350ms delay left first Risk/Trade taps cold.
-    const t = setTimeout(warm, 0);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
+    const t = setTimeout(() => {
+      setMounted((m) => (m.risk ? m : { ...m, risk: true }));
+    }, 2500);
+    return () => clearTimeout(t);
   }, []);
 
   const hasApi = !!baseUrl?.trim();
@@ -65,12 +57,12 @@ function AppContent() {
   const scannerEnabled = hasApi;
 
   // Keep quote WS + desk feeds alive across ALL tabs — navigation must not tear Binance down.
-  // pauseFeedUi slows REST churn on Profile without disconnecting streams.
+  // Slow REST when not on Trade/Risk so tab switches are not fighting position storms.
   const desk = useDeskSession({
     enabled: deskEnabled,
     loadBars: tradeVisited || tab === 'trade',
     pollTicks: true,
-    pauseFeedUi: tab === 'profile',
+    pauseFeedUi: tab !== 'trade' && tab !== 'risk',
   });
   const tickScanner = useTickScanner(baseUrl, {
     enabled: scannerEnabled,

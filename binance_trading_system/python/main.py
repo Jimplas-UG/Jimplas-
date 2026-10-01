@@ -753,7 +753,8 @@ def api_diagnostics():
         "user_data_stream": user_data_stream.status(),
         "pair_isolation": pair_gate.status(
             momentum_scanner._global_active_symbol,
-            lambda: connector.positions(),
+            # Same as /health — never block diagnostics on live positionRisk (429/418).
+            connector.cached_positions,
         ),
         "execution": {
             "last_latency_ms": momentum_scanner.status().get("last_exec_latency_ms"),

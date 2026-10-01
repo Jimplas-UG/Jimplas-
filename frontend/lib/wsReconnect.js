@@ -5,8 +5,11 @@
 export const WS_RECONNECT_MIN_MS = 40;
 export const WS_RECONNECT_MAX_MS = 750;
 export const WS_RECONNECT_FACTOR = 1.35;
-/** Force-close + reconnect if no frames (incl. hb) arrive within this window. */
-export const WS_SILENCE_MS = 3500;
+/**
+ * Force-close + reconnect if no frames (incl. hb) arrive within this window.
+ * Keep well above server CLIENT_HB (~1s) so mobile jitter does not flap sockets.
+ */
+export const WS_SILENCE_MS = 8000;
 
 export function jitterMs(ms) {
   if (ms <= 0) return 0;

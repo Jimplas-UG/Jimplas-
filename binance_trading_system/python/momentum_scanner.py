@@ -1046,6 +1046,11 @@ class MomentumScanner:
             result = (False, reason)
         elif self._user_exec_halted:
             result = (False, "EMERGENCY_STOP")
+        elif getattr(self._connector, "api_auth_blocked", False):
+            auth_reason = getattr(self._connector, "_api_auth_reason", "") or "Invalid API-key / IP / permissions"
+            result = (False, f"API_AUTH_BLOCKED:{auth_reason[:80]}")
+        elif not getattr(self._connector, "signed_ready", True) and not getattr(self._connector.cfg, "paper", False):
+            result = (False, "awaiting_account_verify")
         else:
             cool = 0.0
             try:
@@ -1885,6 +1890,7 @@ class MomentumScanner:
             "exec_block": block_reason or None,
             "user_exec_halted": self._user_exec_halted,
             "exec_env_controlled": env_blocked,
+            "api_auth": getattr(self._connector, "api_auth_status", lambda: {})(),
             "last_exec_error": self._last_exec_error,
             "one_trade_at_a_time": self._one_at_a_time,
             "daily_limit": None,
@@ -2380,6 +2386,10 @@ class MomentumScanner:
                 err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym}: {err}"
                 log.warning("scanner SHORT failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
+                if getattr(self._connector, "is_api_auth_error", None) and self._connector.is_api_auth_error(err):
+                    self._connector.note_api_auth_failure(err, http_code=r.http_code, binance_code=r.binance_code)
+                    self.invalidate_session_cache()
+                    self._arm_entry_cooldown(sym, reason="api_auth")
                 if not coin.short:
                     coin.status = STATUS_PENDING
         finally:
@@ -2445,6 +2455,10 @@ class MomentumScanner:
                 err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym} LONG1: {err}"
                 log.warning("scanner LONG1 failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
+                if getattr(self._connector, "is_api_auth_error", None) and self._connector.is_api_auth_error(err):
+                    self._connector.note_api_auth_failure(err, http_code=r.http_code, binance_code=r.binance_code)
+                    self.invalidate_session_cache()
+                    self._arm_entry_cooldown(sym, reason="api_auth")
         finally:
             self._in_flight.discard(sym)
 
@@ -2508,6 +2522,10 @@ class MomentumScanner:
                 err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym} LONG2: {err}"
                 log.warning("scanner LONG2 failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
+                if getattr(self._connector, "is_api_auth_error", None) and self._connector.is_api_auth_error(err):
+                    self._connector.note_api_auth_failure(err, http_code=r.http_code, binance_code=r.binance_code)
+                    self.invalidate_session_cache()
+                    self._arm_entry_cooldown(sym, reason="api_auth")
         finally:
             self._in_flight.discard(sym)
 

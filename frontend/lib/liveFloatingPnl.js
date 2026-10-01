@@ -65,6 +65,17 @@ export function resolveLegMark(pos, livePrice = null, livePriceSymbol = null) {
   const tickSym = String(livePriceSymbol || '').toUpperCase();
   const tickPx = Number(livePrice);
 
+  // Prefer exchange mark from positionRisk — matches Binance app floating.
+  const exchMark = Number(pos?.markPrice);
+  if (exchMark > 0 && isPlausibleMark(entry, exchMark)) {
+    // Live same-symbol tick only if it stays near exchange mark (avoid scanner lead skew).
+    if (tickSym && posSym && tickSym === posSym && tickPx > 0 && isPlausibleMark(entry, tickPx)) {
+      const rel = Math.abs(tickPx - exchMark) / exchMark;
+      if (rel <= 0.01) return tickPx;
+    }
+    return exchMark;
+  }
+
   if (tickSym && posSym && tickSym === posSym && tickPx > 0 && isPlausibleMark(entry, tickPx)) {
     return tickPx;
   }

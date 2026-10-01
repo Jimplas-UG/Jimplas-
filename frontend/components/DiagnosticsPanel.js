@@ -20,7 +20,16 @@ function Row({ label, value, color }) {
 export default function DiagnosticsPanel({ diagnostics, loading, onRefresh, style }) {
   const { colors: C } = useBilshenzTheme();
   const d = diagnostics || {};
-  const wsOk = d.user_data_stream?.ws_connected || d.scanner_stream?.ws_connected;
+  const wsOk =
+    d.user_data_stream?.ws_connected ||
+    d.scanner_stream?.ws_connected ||
+    d.tick_stream?.ws_connected;
+  const wsLabel = !d.ok && d.error
+    ? 'Unreachable'
+    : wsOk
+      ? 'Connected'
+      : 'Reconnecting…';
+  const wsColor = !d.ok && d.error ? C.amber : wsOk ? C.green : C.amber;
   const execMs = d.execution?.last_latency_ms ?? d.scanner?.last_exec_latency_ms;
 
   return (
@@ -46,7 +55,7 @@ export default function DiagnosticsPanel({ diagnostics, loading, onRefresh, styl
             : '—'
         }
       />
-      <Row label="WebSocket" value={wsOk ? 'Connected' : 'Reconnecting…'} color={wsOk ? C.green : C.amber} />
+      <Row label="WebSocket" value={wsLabel} color={wsColor} />
       <Row label="Active pair" value={d.pair_isolation?.active_symbol || 'None'} />
       <Row label="Last exec" value={execMs != null ? `${execMs} ms` : '—'} />
       <Row

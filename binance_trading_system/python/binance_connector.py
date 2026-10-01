@@ -209,9 +209,73 @@ class BinanceConnector:
         # (that froze /health + WS accept under threadpool saturation).
         self._rest_cool_until = 0.0
         self._rest_cool_reason = ""
+        # Hard block new orders after Binance -2015/401 until a successful signed call.
+        self._api_auth_blocked = False
+        self._api_auth_reason = ""
+        self._api_auth_blocked_at = 0.0
+        # False until first successful signed account call this process — stops boot-race -2015.
+        self._signed_ready = False
         if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper:
             self._connected = True
             self.sync_server_time(force=True)
+
+    @staticmethod
+    def is_api_auth_error(msg: str | None = None, *, http_code: int | None = None, binance_code: int | None = None) -> bool:
+        text = str(msg or "")
+        if http_code == 401 or binance_code == -2015:
+            return True
+        low = text.lower()
+        return (
+            "-2015" in text
+            or "invalid api-key" in low
+            or "invalid api key" in low
+            or ("permissions for action" in low and ("401" in text or "api" in low))
+        )
+
+    def note_api_auth_failure(self, msg: str | None = None, *, http_code: int | None = None, binance_code: int | None = None) -> bool:
+        if not self.is_api_auth_error(msg, http_code=http_code, binance_code=binance_code):
+            return False
+        reason = str(msg or f"binance={binance_code} http={http_code}")[:200]
+        first = not self._api_auth_blocked
+        self._api_auth_blocked = True
+        self._api_auth_reason = reason
+        self._api_auth_blocked_at = time.time()
+        self._signed_ready = False
+        if first:
+            log.error("API_AUTH_BLOCKED — pausing new orders until re-login (%s)", reason)
+        return True
+
+    def clear_api_auth_block(self, *, reason: str = "") -> None:
+        if self._api_auth_blocked:
+            log.info("API_AUTH_BLOCK cleared %s", reason or "")
+        self._api_auth_blocked = False
+        self._api_auth_reason = ""
+        self._api_auth_blocked_at = 0.0
+
+    def mark_signed_ready(self, *, reason: str = "") -> None:
+        was = self._signed_ready
+        self._signed_ready = True
+        self._api_auth_blocked = False
+        self._api_auth_reason = ""
+        self._api_auth_blocked_at = 0.0
+        if not was:
+            log.info("signed session ready %s", reason or "")
+
+    @property
+    def signed_ready(self) -> bool:
+        return bool(self._signed_ready) or bool(self.cfg.paper)
+
+    @property
+    def api_auth_blocked(self) -> bool:
+        return bool(self._api_auth_blocked)
+
+    def api_auth_status(self) -> dict[str, Any]:
+        return {
+            "blocked": bool(self._api_auth_blocked),
+            "reason": self._api_auth_reason or None,
+            "blocked_at_ms": int(self._api_auth_blocked_at * 1000) if self._api_auth_blocked_at else None,
+            "signed_ready": bool(self._signed_ready),
+        }
 
     @property
     def base_url(self) -> str:
@@ -240,6 +304,8 @@ class BinanceConnector:
             self._close_http()
         self._connected = bool(self.cfg.api_key and self.cfg.api_secret) or self.cfg.paper
         if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper and not same_creds:
+            self._signed_ready = False
+            self.clear_api_auth_block(reason="configure")
             self.sync_server_time(force=True)
 
     def sync_server_time(self, force: bool = False) -> None:
@@ -854,12 +920,17 @@ class BinanceConnector:
         code_m = re.search(r"code=(-?\d+)", msg)
         http_code = int(http_m.group(1)) if http_m else None
         binance_code = int(code_m.group(1)) if code_m else None
-        retryable = (
-            http_code in (408, 429, 500, 502, 503, 504)
-            or binance_code in (-1001, -1003, -1021)
-            or "timeout" in msg.lower()
-            or "timed out" in msg.lower()
-        )
+        # Auth failures must never retry — keeps strategy from spamming Binance -2015.
+        if self.is_api_auth_error(msg, http_code=http_code, binance_code=binance_code):
+            self.note_api_auth_failure(msg, http_code=http_code, binance_code=binance_code)
+            retryable = False
+        else:
+            retryable = (
+                http_code in (408, 429, 500, 502, 503, 504)
+                or binance_code in (-1001, -1003, -1021)
+                or "timeout" in msg.lower()
+                or "timed out" in msg.lower()
+            )
         return {
             "error": msg,
             "http_code": http_code,
@@ -1315,6 +1386,7 @@ class BinanceConnector:
             "leverage": int(self.cfg.leverage),
             "margin_type": self.cfg.margin_type,
         }
+        self.mark_signed_ready(reason="account_ok")
         return self._remember_account(acct)
 
     def status_snapshot(self, *, skip_ping: bool = False, light: bool = False) -> dict[str, Any]:
@@ -1428,6 +1500,7 @@ class BinanceConnector:
             "leverage": self.symbol_leverage(),
             "margin_type": margin_type,
         }
+        self.mark_signed_ready(reason="account_ok")
         return self._remember_account(acct)
 
     def _account_margin_type_from_positions(self) -> str:
@@ -1842,6 +1915,9 @@ class BinanceConnector:
 
             policy_lev = policy_display_leverage(side=side, position_side=pos_side)
             leg_label = "SHORT" if pos_side == "SHORT" else "LONG"
+            entry = float(p.get("entryPrice", 0) or 0)
+            mark = float(p.get("markPrice", 0) or 0)
+            ex_lev = int(float(p.get("leverage") or self.cfg.leverage or 1))
             out.append(
                 {
                     "ticket": p.get("symbol"),
@@ -1850,15 +1926,22 @@ class BinanceConnector:
                     "positionSide": pos_side,
                     "leg": leg_label,
                     "volume": abs(amt),
-                    "price_open": float(p.get("entryPrice", 0)),
+                    "price_open": entry,
+                    "entryPrice": entry,
+                    "markPrice": mark,
+                    "price_current": mark,
                     "sl": 0.0,
                     "tp": 0.0,
-                    "profit": float(p.get("unRealizedProfit", 0)),
+                    "profit": float(p.get("unRealizedProfit", 0) or 0),
                     "magic": DEFAULT_MAGIC,
-                    "liquidationPrice": float(p.get("liquidationPrice", 0)),
-                    "leverage": policy_lev,
-                    "exchange_leverage": int(float(p.get("leverage", self.cfg.leverage))),
+                    "liquidationPrice": float(p.get("liquidationPrice", 0) or 0),
+                    # UI must match Binance — show exchange leverage; keep policy separately.
+                    "leverage": ex_lev,
+                    "policy_leverage": policy_lev,
+                    "exchange_leverage": ex_lev,
                     "margin_type": str(p.get("marginType") or "ISOLATED").upper(),
+                    "notional": float(p.get("notional", 0) or 0),
+                    "updateTime": int(p.get("updateTime") or 0),
                 }
             )
         if symbol is None:
@@ -2831,6 +2914,7 @@ class BinanceConnector:
         except RuntimeError as e:
             if "No need to change" not in str(e):
                 log.warning("prepare_symbol marginType %s: %s", sym, e)
+                self.note_api_auth_failure(str(e))
         try:
             self._request(
                 "POST",
@@ -2840,6 +2924,7 @@ class BinanceConnector:
             )
         except RuntimeError as e:
             log.warning("prepare_symbol leverage %s: %s", sym, e)
+            self.note_api_auth_failure(str(e))
 
     def order_market_leg(
         self,

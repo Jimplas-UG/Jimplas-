@@ -399,8 +399,10 @@ export default function OpenPositionsPanel({
                       <View style={st.posMeta}>
                         <Text style={[st.metaTxt, { color: C.dim }]}>Entry {fmtPx(entry)}</Text>
                         <Text style={[st.metaTxt, { color: C.dim }]}>Move {dist}</Text>
-                        {p.leverage > 0 ? (
-                          <Text style={[st.metaTxt, { color: C.amber }]}>{p.leverage}x lev</Text>
+                        {Number(p.exchange_leverage ?? p.leverage) > 0 ? (
+                          <Text style={[st.metaTxt, { color: C.amber }]}>
+                            {Number(p.exchange_leverage ?? p.leverage)}x lev
+                          </Text>
                         ) : null}
                         {p.margin_type ? (
                           <Text style={[st.metaTxt, { color: p.margin_type === 'ISOLATED' ? C.green : C.red }]}>
