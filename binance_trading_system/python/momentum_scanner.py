@@ -71,7 +71,10 @@ LONG_ENTRY_DELAY_MS = int(os.environ.get("SCANNER_LONG_DELAY_MS", "3000"))
 SMART_EXIT_NET_PCT = clamp_smart_exit_pct(float(os.environ.get("SCANNER_SMART_EXIT_PCT", "6.0")))
 EXIT_COST_BUFFER_PCT = clamp_exit_cost_pct(float(os.environ.get("SCANNER_EXIT_COST_PCT", "0.8")))
 # Leverage fixed in leverage_policy.py — primary Short 5x, Long 1 / Long 2 10x sizing.
-DEFAULT_PARTITION_USD = float(os.environ.get("SCANNER_PARTITION_USD", os.environ.get("SCANNER_RISK_USDT", "100")))
+# Sep 23–25 lock: partition USD is frozen at $100. Env / UI / login mode must never drift it.
+LOCKED_PARTITION_USD = 100.0
+PARTITION_USD_LOCKED = True
+DEFAULT_PARTITION_USD = LOCKED_PARTITION_USD
 SHORT_PARTITION_PCT = float(os.environ.get("SCANNER_SHORT_PARTITION_PCT", "50"))
 LONG1_PARTITION_PCT = float(os.environ.get("SCANNER_LONG1_PARTITION_PCT", "40"))
 LONG2_PARTITION_PCT = float(os.environ.get("SCANNER_LONG2_PARTITION_PCT", "40"))
@@ -216,9 +219,11 @@ class MomentumScanner:
         self._short_pct = SHORT_PARTITION_PCT
         self._long1_pct = LONG1_PARTITION_PCT
         self._long2_pct = LONG2_PARTITION_PCT
-        self._risk_locked = False
+        self._risk_locked = True
         self._user_exec_halted = False
         self._load_persisted_risk()
+        self._force_locked_partition_usd(persist=True)
+        self._risk_locked = True
         self._recent_signals: deque[dict[str, Any]] = deque(maxlen=48)
         self._last_exec_error: str | None = None
         self._session_ok_cache: tuple[float, tuple[bool, str]] | None = None
@@ -1187,17 +1192,33 @@ class MomentumScanner:
         self._long2_pct = l2
         return changed
 
+    def _force_locked_partition_usd(self, *, persist: bool = False) -> bool:
+        """Sep 23–25: always $100 — survive risk file, UI, and mainnet/testnet login."""
+        if abs(float(self._partition_usd) - LOCKED_PARTITION_USD) < 1e-9:
+            return False
+        log.warning(
+            "forcing locked partition $%s (was $%s) — Sep23-25 baseline",
+            LOCKED_PARTITION_USD,
+            self._partition_usd,
+        )
+        self._partition_usd = float(LOCKED_PARTITION_USD)
+        if persist:
+            self._persist_risk_config()
+        return True
+
     def _persist_risk_config(self) -> None:
         # Never write toxic values to disk.
         self._short_pct, self._long1_pct, self._long2_pct, _ = sanitize_partitions(
             self._short_pct, self._long1_pct, self._long2_pct
         )
+        self._partition_usd = float(LOCKED_PARTITION_USD)
         payload = {
             "partition_usd": self._partition_usd,
             "short_pct": self._short_pct,
             "long1_pct": self._long1_pct,
             "long2_pct": self._long2_pct,
-            "locked": self._risk_locked,
+            "locked": True,
+            "partition_usd_locked": True,
             "exec_halted": self._user_exec_halted,
         }
         try:
@@ -1213,7 +1234,10 @@ class MomentumScanner:
     def _load_persisted_risk(self) -> None:
         try:
             if not os.path.isfile(RISK_CONFIG_PATH):
+                self._partition_usd = float(LOCKED_PARTITION_USD)
+                self._risk_locked = True
                 self._apply_partition_guards(persist=False)
+                self._persist_risk_config()
                 return
             with open(RISK_CONFIG_PATH, encoding="utf-8") as fh:
                 raw = json.load(fh)
@@ -1225,12 +1249,13 @@ class MomentumScanner:
                 self._long1_pct = float(raw["long1_pct"])
             if raw.get("long2_pct") is not None:
                 self._long2_pct = float(raw["long2_pct"])
-            self._risk_locked = bool(raw.get("locked"))
+            self._risk_locked = True  # always locked to Sep23-25 desk
             if "exec_halted" in raw:
                 self._user_exec_halted = bool(raw.get("exec_halted"))
-            # Migrate out-of-policy locked sizing off disk on every boot.
-            if self._apply_partition_guards(persist=True):
-                self._risk_locked = False
+            # Migrate out-of-policy locked sizing + force $100 partition.
+            changed = self._apply_partition_guards(persist=False)
+            usd_fixed = self._force_locked_partition_usd(persist=False)
+            if changed or usd_fixed or float(raw.get("partition_usd") or 0) != LOCKED_PARTITION_USD:
                 self._persist_risk_config()
             log.info(
                 "scanner risk loaded partition=$%s short=%s%% l1=%s%% l2=%s%% locked=%s exec_halted=%s",
@@ -1243,6 +1268,8 @@ class MomentumScanner:
             )
         except Exception as e:
             log.warning("load risk config: %s", e)
+            self._partition_usd = float(LOCKED_PARTITION_USD)
+            self._risk_locked = True
             self._apply_partition_guards(persist=False)
 
     def set_risk_config(
@@ -1252,21 +1279,28 @@ class MomentumScanner:
         long1_pct: float | None = None,
         long2_pct: float | None = None,
     ) -> dict[str, Any]:
+        # Hard lock: USD partition is always $100 (Sep 23–25). Mode switch / UI cannot change it.
+        requested_usd = float(partition_usd) if partition_usd is not None else None
+        if requested_usd is not None and abs(requested_usd - LOCKED_PARTITION_USD) > 1e-9:
+            log.warning(
+                "rejecting partition_usd=$%s — locked at $%s (Sep23-25)",
+                requested_usd,
+                LOCKED_PARTITION_USD,
+            )
+
         if self._risk_locked:
             # Still migrate if locked out-of-policy config somehow remains.
             if is_toxic_legacy_sizing(self._short_pct, self._long1_pct, self._long2_pct):
                 self._apply_partition_guards(persist=True)
-                self._risk_locked = False
-                self._persist_risk_config()
+                self._force_locked_partition_usd(persist=True)
             else:
                 pct_changed = (
                     (short_pct is not None and float(short_pct) != self._short_pct)
                     or (long1_pct is not None and float(long1_pct) != self._long1_pct)
                     or (long2_pct is not None and float(long2_pct) != self._long2_pct)
                 )
-                usd_changed = partition_usd is not None and float(partition_usd) != self._partition_usd
-                # Locked desk: allow re-subscribing a different partition USD from the app.
-                # Never allow silent changes to the 50/40/40 leg splits while locked.
+                self._force_locked_partition_usd(persist=True)
+                # Locked desk: never allow leg-split drift; USD is always forced to $100.
                 if pct_changed:
                     return {
                         "ok": False,
@@ -1276,18 +1310,19 @@ class MomentumScanner:
                         "long1_pct": self._long1_pct,
                         "long2_pct": self._long2_pct,
                         "locked": True,
+                        "partition_usd_locked": True,
                     }
-                if not usd_changed:
-                    return {
-                        "ok": True,
-                        "partition_usd": self._partition_usd,
-                        "short_pct": self._short_pct,
-                        "long1_pct": self._long1_pct,
-                        "long2_pct": self._long2_pct,
-                        "locked": True,
-                    }
-        if partition_usd is not None and partition_usd > 0:
-            self._partition_usd = float(partition_usd)
+                return {
+                    "ok": True,
+                    "partition_usd": self._partition_usd,
+                    "short_pct": self._short_pct,
+                    "long1_pct": self._long1_pct,
+                    "long2_pct": self._long2_pct,
+                    "locked": True,
+                    "partition_usd_locked": True,
+                }
+        # Unlocked path still cannot leave $100.
+        self._partition_usd = float(LOCKED_PARTITION_USD)
         if short_pct is not None:
             self._short_pct = max(1.0, min(100.0, float(short_pct)))
         if long1_pct is not None:
@@ -1295,8 +1330,7 @@ class MomentumScanner:
         if long2_pct is not None:
             self._long2_pct = max(1.0, min(100.0, float(long2_pct)))
         self._apply_partition_guards(persist=False)
-        if partition_usd is not None and partition_usd > 0:
-            self._risk_locked = True
+        self._risk_locked = True
         self._persist_risk_config()
         log.info(
             "scanner risk partition=$%s short=%s%% long1=%s%% long2=%s%% locked=%s",
@@ -1309,6 +1343,7 @@ class MomentumScanner:
         return {
             "ok": True,
             "locked": self._risk_locked,
+            "partition_usd_locked": True,
             "partition_usd": self._partition_usd,
             "short_pct": self._short_pct,
             "long1_pct": self._long1_pct,
@@ -1860,7 +1895,7 @@ class MomentumScanner:
             "symbols_tracked": len(self._coins),
             "watchlist": sum(1 for c in self._coins.values() if c.active()),
             "active_strategies": active,
-            "partition_usd": self._partition_usd,
+            "partition_usd": LOCKED_PARTITION_USD,
             "short_partition_pct": self._short_pct,
             "long1_partition_pct": self._long1_pct,
             "long2_partition_pct": self._long2_pct,
@@ -1871,7 +1906,8 @@ class MomentumScanner:
             "min_live_entry_pct": MIN_LIVE_ENTRY_PCT,
             "max_retrace_entry_pct": MAX_RETRACE_ENTRY_PCT,
             "entry_timeframe": ENTRY_TIMEFRAME,
-            "risk_locked": self._risk_locked,
+            "risk_locked": True,
+            "partition_usd_locked": True,
             "last_exec_latency_ms": self._last_exec_latency_ms,
             "execution_events": self._engine.events()[:12],
             "strategy_id": "short_first_v1",

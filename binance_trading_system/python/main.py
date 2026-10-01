@@ -784,6 +784,7 @@ class ScannerExecBody(BaseModel):
 
 
 class ScannerRiskBody(BaseModel):
+    # Sep 23–25 lock: only $100 is accepted; other values are coerced server-side.
     partition_usd: float = Field(100, gt=0, le=1_000_000)
     short_pct: float = Field(50, gt=0, le=100)
     long1_pct: float = Field(40, gt=0, le=100)
@@ -813,8 +814,9 @@ def api_scanner_exec(body: ScannerExecBody | None = None):
 
 @app.post("/api/scanner/risk")
 def api_scanner_risk(body: ScannerRiskBody):
+    # Always pin $100 — mainnet/testnet login and phone UI cannot change it.
     result = momentum_scanner.set_risk_config(
-        partition_usd=body.partition_usd,
+        partition_usd=100.0,
         short_pct=body.short_pct,
         long1_pct=body.long1_pct,
         long2_pct=body.long2_pct,
@@ -829,6 +831,7 @@ def api_scanner_risk(body: ScannerRiskBody):
         "long1_partition_pct": st.get("long1_partition_pct"),
         "long2_partition_pct": st.get("long2_partition_pct"),
         "risk_locked": st.get("risk_locked"),
+        "partition_usd_locked": True,
     }
 
 

@@ -15,6 +15,7 @@ the live modules still match the working contract:
   (Long1 close must not permanently kill Long2, and vice versa)
   Smart exit: 6% of partition net — with hedges open, only when short is in profit
   Manual closes require confirm; REST cool on close waits up to 12s then clears
+  Partition USD locked at $100 (Sep 23–25) — mainnet/testnet switch must not change it
 
 If assert_frozen_contract() fails, the bridge must not silently trade a drifted policy.
 """
@@ -57,6 +58,9 @@ SMART_EXIT_NET_PCT = 6.0
 SMART_EXIT_REQUIRES_SHORT_PROFIT_IF_HEDGED = True
 CLOSE_REST_COOL_MAX_WAIT_S = 12.0
 MANUAL_CLOSE_CONFIRM_REQUIRED = True
+# Capital slice used on the winning Sep 23–25 desk — never $50 / never float with mode switch.
+LOCKED_PARTITION_USD = 100.0
+PARTITION_USD_LOCKED = True
 
 STATUS_SHORT = "Short"
 STATUS_LONG1 = "Long 1"
@@ -105,6 +109,8 @@ def frozen_contract_snapshot() -> dict[str, Any]:
             "smart_exit_requires_short_profit_if_hedged": SMART_EXIT_REQUIRES_SHORT_PROFIT_IF_HEDGED,
             "close_rest_cool_max_wait_s": CLOSE_REST_COOL_MAX_WAIT_S,
             "manual_close_confirm_required": MANUAL_CLOSE_CONFIRM_REQUIRED,
+            "partition_usd": LOCKED_PARTITION_USD,
+            "partition_usd_locked": PARTITION_USD_LOCKED,
         },
     }
 
@@ -192,12 +198,20 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert SMART_EXIT_REQUIRES_SHORT_PROFIT_IF_HEDGED is True
     assert MANUAL_CLOSE_CONFIRM_REQUIRED is True
 
+    # Partition USD lock — $100 only; must survive risk reload + mainnet/testnet login.
+    assert abs(float(ms.LOCKED_PARTITION_USD) - LOCKED_PARTITION_USD) < 1e-9
+    assert abs(float(ms.DEFAULT_PARTITION_USD) - LOCKED_PARTITION_USD) < 1e-9
+    assert "force_locked_partition_usd" in src or "_force_locked_partition_usd" in src
+    assert "PARTITION_USD_LOCKED" in src or "locked partition" in src.lower()
+
     import inspect
     import binance_connector as bc
 
     cool_src = inspect.getsource(bc.BinanceConnector._wait_or_clear_cool_for_close)
     assert "max_wait_s: float = 12.0" in cool_src, "close REST cool default must stay 12s"
     assert "waiting" in cool_src and "clearing residual cool" in cool_src
+    assert "immediate flatten" not in cool_src, "instant cool-clear must never return"
+    assert "forced to 12s" in cool_src or "ignoring max_wait_s" in cool_src
 
     return frozen_contract_snapshot()
 

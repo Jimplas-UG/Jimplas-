@@ -188,33 +188,22 @@ export default function InstitutionalRiskDesk({
         </View>
         <PresetChipRow
           label="Subscribe partition"
-          hint="Tap an amount to subscribe — that slice is used for all new scanner trades (50% short · 40% long 1 · 40% long 2)."
+          hint="Locked at $100 — Sep 23–25 baseline. Mainnet/testnet switch cannot change this."
           options={PARTITION_PRESETS_USD}
-          value={config.partitionUsd}
-          onChange={(v) => {
-            if (v === config.partitionUsd) return;
+          value={100}
+          onChange={() => {
             Alert.alert(
-              'Subscribe partition',
-              `Switch scanner partition to $${v}? Only this slice is used for new trades.`,
-              [
-                { text: 'Cancel', style: 'cancel' },
-                {
-                  text: `Use $${v}`,
-                  onPress: () => onConfigChange({ partitionUsd: v, partitionLocked: true }),
-                },
-              ],
+              'Partition locked',
+              'Scanner partition is locked at $100 (Sep 23–25 winning desk). It cannot be changed.',
             );
           }}
-          locked={false}
+          locked
           format={(v) => `$${v}`}
           C={C}
         />
-        {config.partitionLocked ? (
-          <Text style={[st.ruleNote, { color: C.amber }]}>
-            Partition ${config.partitionUsd} active ({config.shortPartitionPct}% short ·{' '}
-            {config.long1PartitionPct}% long 1 · {config.long2PartitionPct}% long 2). Tap another amount to switch.
-          </Text>
-        ) : null}
+        <Text style={[st.ruleNote, { color: C.amber }]}>
+          Partition $100 locked (50% short · 40% long 1 · 40% long 2). Survives mainnet ↔ testnet.
+        </Text>
         <Text style={[st.ruleNote, { color: C.dim }]}>
           Balance above your partition stays protected and is never allocated to new trades.
         </Text>

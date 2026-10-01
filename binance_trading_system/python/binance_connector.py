@@ -296,6 +296,14 @@ class BinanceConnector:
         Do not set max_wait_s=0 by default — instant clear hammered Binance and starved entries.
         Locked by frozen_strategy.CLOSE_REST_COOL_MAX_WAIT_S.
         """
+        # Hard floor: never re-enter the instant-clear path even if a caller passes 0.
+        try:
+            max_wait_s = float(max_wait_s)
+        except (TypeError, ValueError):
+            max_wait_s = 12.0
+        if max_wait_s <= 0:
+            log.warning("close: ignoring max_wait_s=%s — forced to 12s (Sep23-25 lock)", max_wait_s)
+            max_wait_s = 12.0
         left = self.rest_cooling_left()
         if left <= 0:
             return 0.0

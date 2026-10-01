@@ -1,7 +1,8 @@
 export const STORAGE_RISK_DESK = '@bilshenz_v1/riskDeskConfig';
 
-/** Fixed partition tiers — amount you subscribe / are ready to lose. */
-export const PARTITION_PRESETS_USD = [50, 100, 200, 500];
+/** Fixed partition — Sep 23–25 baseline locked at $100 only. */
+export const PARTITION_PRESETS_USD = [100];
+export const LOCKED_PARTITION_USD = 100;
 
 /** Fixed institutional leverage per leg — primary short 5x, recovery longs 10x. */
 export const LEG_LEVERAGE_POLICY = { short: 5, long1: 10, long2: 10 };
@@ -14,8 +15,8 @@ export const MARGIN_MODE_PRESETS = ['ISOLATED', 'CROSS'];
 
 /** Capital & risk desk — independent from strategy signal logic. */
 export const RISK_DESK_DEFAULTS = {
-  partitionUsd: 100,
-  partitionLocked: false,
+  partitionUsd: LOCKED_PARTITION_USD,
+  partitionLocked: true,
   shortPartitionPct: 50,
   long1PartitionPct: 40,
   long2PartitionPct: 40,
@@ -39,12 +40,9 @@ export const RISK_DESK_DEFAULTS = {
 };
 
 function snapPartitionUsd(v) {
-  const n = Math.round(Number(v));
-  if (PARTITION_PRESETS_USD.includes(n)) return n;
-  return PARTITION_PRESETS_USD.reduce(
-    (best, p) => (Math.abs(p - n) < Math.abs(best - n) ? p : best),
-    RISK_DESK_DEFAULTS.partitionUsd,
-  );
+  // Sep 23–25 lock — always $100 regardless of stored / server / UI value.
+  void v;
+  return LOCKED_PARTITION_USD;
 }
 
 function snapLeverage(v) {
@@ -66,8 +64,9 @@ export function normalizeRiskDeskConfig(raw) {
 
   let partitionUsd = snapPartitionUsd(raw?.partitionUsd);
   if (!raw?.partitionUsd && raw?.tradingPartitionPct != null) {
-    partitionUsd = 100;
+    partitionUsd = LOCKED_PARTITION_USD;
   }
+  partitionUsd = LOCKED_PARTITION_USD;
 
   const defaultLeverage = LEG_LEVERAGE_POLICY.short;
   const maxAllowedLeverage = LEG_LEVERAGE_POLICY.long1;
@@ -83,8 +82,8 @@ export function normalizeRiskDeskConfig(raw) {
   if (shortPartitionPct < 1) shortPartitionPct = RISK_DESK_DEFAULTS.shortPartitionPct;
 
   return {
-    partitionUsd,
-    partitionLocked: !!raw?.partitionLocked,
+    partitionUsd: LOCKED_PARTITION_USD,
+    partitionLocked: true,
     shortPartitionPct,
     long1PartitionPct,
     long2PartitionPct,

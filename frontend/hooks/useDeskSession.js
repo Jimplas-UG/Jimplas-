@@ -76,19 +76,22 @@ export function useDeskSession({ enabled = true, loadBars = true, pollTicks = tr
     if (!r.ok) {
       lastSyncKeyRef.current = '';
       const serverUsd = Number(r.risk?.partition_usd);
-      // Phone was on a stale locked $50 while bridge already has $100 — adopt server.
-      if (
-        serverUsd > 0 &&
-        serverUsd !== Number(cfg.partitionUsd) &&
-        (r.risk?.error === 'partition_locked' || r.risk?.locked === true)
-      ) {
+      // Always keep phone on locked $100 (Sep 23–25) — never adopt $50 from stale server.
+      if (Number(cfg.partitionUsd) !== 100) {
         riskDesk.updateConfig({
-          partitionUsd: serverUsd,
+          partitionUsd: 100,
           partitionLocked: true,
           shortPartitionPct: Number(r.risk?.short_pct) || cfg.shortPartitionPct,
           long1PartitionPct: Number(r.risk?.long1_pct) || cfg.long1PartitionPct,
           long2PartitionPct: Number(r.risk?.long2_pct) || cfg.long2PartitionPct,
         });
+      } else if (
+        serverUsd > 0 &&
+        serverUsd !== 100 &&
+        (r.risk?.error === 'partition_locked' || r.risk?.locked === true)
+      ) {
+        // Server drifted — keep phone at $100; next sync pushes lock.
+        riskDesk.updateConfig({ partitionUsd: 100, partitionLocked: true });
       } else {
         console.warn('[desk] scanner risk sync failed', r.risk?.error || r);
       }

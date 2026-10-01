@@ -1,18 +1,18 @@
 ---
-description: Lock Sep 23–25 smart-exit / manual-confirm / close-cool discipline
-globs: "{binance_trading_system/python/**/*.py,frontend/components/OpenPositionsPanel.js,frontend/broker/binanceFuturesApi.js}"
+description: Lock Sep 23–25 desk — $100 partition, smart-exit, confirms, 12s cool
+globs: "{binance_trading_system/python/**/*.py,frontend/components/OpenPositionsPanel.js,frontend/broker/binanceFuturesApi.js,frontend/lib/riskDeskDefaults.js,frontend/components/InstitutionalRiskDesk.js,frontend/lib/scannerRiskSync.js,frontend/hooks/useDeskSession.js}"
 alwaysApply: true
 ---
 
-# Exit ops lock — Sep 23–25 baseline
+# Sep 23–25 desk lock — never drift (incl. mainnet ↔ testnet)
 
 Do **not** change these without an explicit user order:
 
-1. **SMART_EXIT** = 6% of partition (+ cost buffer). With hedges open, only when primary short is **in profit** (`short_ok_for_smart`). Never remove that guard.
-2. **Manual close** must use **confirm dialogs** (Cancel / Close). No one-tap force-close of legs/pairs/all.
-3. **REST cool on close** waits up to **12s** then clears residual (`_wait_or_clear_cool_for_close` default `max_wait_s=12.0`). Do not default to `0` instant-clear.
-4. Client close retries wait the reported cool window (capped 12s), not a 350ms stub.
+1. **Partition USD = $100 only** (`LOCKED_PARTITION_USD`). No $50 / $200 / $500. Survive login, risk sync, and mainnet/testnet switch.
+2. **SMART_EXIT** = 6% of partition (+ cost buffer). With hedges open, only when primary short is **in profit** (`short_ok_for_smart`).
+3. **Manual close** must use **confirm dialogs** (Cancel / Close). No one-tap force-close.
+4. **REST cool on close** waits up to **12s** then clears residual. Never `max_wait_s=0` instant-clear / "immediate flatten".
+5. Client close retries wait the reported cool window (capped 12s), not a 350ms stub.
+6. Entry / leverage / 50-40-40 remain separately frozen.
 
-Locked in `frozen_strategy.py` (`SMART_EXIT_*`, `CLOSE_REST_COOL_MAX_WAIT_S`, `MANUAL_CLOSE_CONFIRM_REQUIRED`) and asserted by `assert_frozen_contract()`.
-
-Entry thresholds / leverage / 50-40-40 remain separately frozen — do not touch those either.
+Locked in `frozen_strategy.py` and asserted by `assert_frozen_contract()`.
