@@ -1244,8 +1244,19 @@ async def ws_tick(websocket: WebSocket, symbol: str):
 def api_positions(symbol: str | None = None):
     cool = connector.rest_cooling_left()
     try:
+        # While cooling, serve cache only — phone poll storms were triggering 429 loops.
+        if cool > 0.05:
+            sticky = connector.cached_positions()
+            if symbol:
+                sym_u = symbol.upper()
+                sticky = [p for p in sticky if str(p.get("symbol") or "").upper() == sym_u]
+            return {
+                "ok": True,
+                "positions": sticky,
+                "stale": True,
+                "rest_cool_s": round(cool, 1),
+            }
         pos = connector.positions(symbol)
-        # During cool, connector may serve last-good without raising — flag for UI.
         stale = cool > 0.5
         return {
             "ok": True,
@@ -1277,11 +1288,11 @@ def api_order(body: OrderBody):
     sym = body.symbol.upper()
     side_u = body.side.upper()
 
-    # Prefer cached positions (1.5s) — avoids positionRisk REST on every tap when warm.
+    # Prefer cached positions — never force positionRisk on every manual tap.
     ok_iso, iso_reason = pair_gate.can_open(
         sym,
         momentum_scanner._global_active_symbol,
-        lambda: connector.positions(),
+        connector.cached_positions,
     )
     if not ok_iso:
         raise HTTPException(status_code=400, detail={"ok": False, "error": iso_reason})
@@ -1322,12 +1333,28 @@ def api_order(body: OrderBody):
         elif side_u == "SELL" and tp >= ref:
             tp = None
 
+    # Sep23-25 lock: manual opens cannot exceed locked $100 partition leg sizing.
+    req_qty = float(body.volume)
+    capped_qty, oversize = momentum_scanner.clamp_manual_open_qty(sym, side_u, float(ref), req_qty)
+    if oversize:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "error": "manual_qty_exceeds_locked_partition",
+                "requested": req_qty,
+                "max_qty": capped_qty,
+                "partition_usd": 100.0,
+                "side": side_u,
+            },
+        )
+
     now_ms = int(time.time() * 1000)
     # Unique id every tap — old MANUAL_sym_side_magic blocked all re-orders as duplicates.
     signal = ExecutionSignal(
         symbol=sym,
         side=side_u,
-        quantity=float(body.volume),
+        quantity=float(capped_qty),
         reference_price=float(ref),
         leverage=SHORT_LEVERAGE,
         magic=int(body.magic),
@@ -1337,6 +1364,7 @@ def api_order(body: OrderBody):
         signal_id=f"MANUAL_{sym}_{side_u}_{body.magic}_{now_ms}",
         signal_ts_ms=now_ms,
         margin_type="ISOLATED",
+        partition_usd=100.0,
     )
     r = momentum_scanner.engine.execute(signal, manual=True)
     if not r.ok:
@@ -1371,7 +1399,7 @@ def api_order(body: OrderBody):
         "ok": True,
         "symbol": sym,
         "side": side_u,
-        "quantity": body.volume,
+        "quantity": capped_qty,
         "fill_price": r.fill_price,
         "order_id": r.order_id,
         "client_order_id": r.client_order_id,

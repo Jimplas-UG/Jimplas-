@@ -192,6 +192,7 @@ class BinanceConnector:
         self._positions_cache: list[dict[str, Any]] | None = None
         self._positions_cache_ts = 0.0
         self._positions_cache_ttl = 1.5
+        self._positions_cool_log_ts = 0.0
         # Survives TTL invalidation — UI must not flicker FLAT during REST cool.
         self._last_good_positions: list[dict[str, Any]] = []
         self._last_good_positions_ts = 0.0
@@ -832,7 +833,13 @@ class BinanceConnector:
                 )
                 any_ok = True
             except Exception as e:
-                log.warning("userTrades %s: %s", sym, e)
+                msg = str(e)
+                # Mainnet leftovers (e.g. CTUSDT) are not listed on futures testnet — drop them.
+                if "invalid symbol" in msg.lower():
+                    self._deal_symbol_history.discard(str(sym).upper())
+                    log.info("userTrades drop invalid symbol %s on %s", sym, "testnet" if self.cfg.testnet else "mainnet")
+                else:
+                    log.warning("userTrades %s: %s", sym, e)
                 continue
             for t in rows or []:
                 side = "BUY" if t.get("buyer") else "SELL"
@@ -925,11 +932,21 @@ class BinanceConnector:
             self.note_api_auth_failure(msg, http_code=http_code, binance_code=binance_code)
             retryable = False
         else:
+            low = msg.lower()
+            # Transient transport drops (common on testnet) must retry — not "no_retry" dead ends.
+            transport_glitch = (
+                "timeout" in low
+                or "timed out" in low
+                or "remote end closed" in low
+                or "connection reset" in low
+                or "connection aborted" in low
+                or "broken pipe" in low
+                or "temporarily unavailable" in low
+            )
             retryable = (
                 http_code in (408, 429, 500, 502, 503, 504)
                 or binance_code in (-1001, -1003, -1021)
-                or "timeout" in msg.lower()
-                or "timed out" in msg.lower()
+                or transport_glitch
             )
         return {
             "error": msg,
@@ -1878,6 +1895,23 @@ class BinanceConnector:
             and now - self._positions_cache_ts < self._positions_cache_ttl
         ):
             return list(self._positions_cache)
+
+        def _sticky(sym: str | None) -> list[dict[str, Any]]:
+            base = (
+                list(self._positions_cache)
+                if self._positions_cache is not None
+                else list(self._last_good_positions)
+            )
+            if not sym:
+                return base
+            su = sym.upper()
+            return [p for p in base if str(p.get("symbol") or "").upper() == su]
+
+        # During 418/429 cool, never re-enter positionRisk — phone polls were spamming warnings
+        # and starving order/account REST (looks like "broken trading" on a funded testnet).
+        if not bypass_rest_cool and not force and self.rest_cooling_left() > 0.05:
+            return _sticky(symbol)
+
         try:
             params: dict[str, Any] = {}
             if symbol:
@@ -1890,16 +1924,15 @@ class BinanceConnector:
                 bypass_rest_cool=bypass_rest_cool,
             )
         except Exception as e:
-            log.warning("positions: %s", e)
-            if symbol is None:
-                if self._positions_cache is not None:
-                    return list(self._positions_cache)
-                if self._last_good_positions:
-                    return list(self._last_good_positions)
-            elif self._last_good_positions:
-                sym_u = symbol.upper()
-                return [p for p in self._last_good_positions if str(p.get("symbol") or "").upper() == sym_u]
-            return []
+            msg = str(e)
+            # One line per cool window — not one per phone poll.
+            if "cooling" in msg.lower():
+                if not getattr(self, "_positions_cool_log_ts", 0) or time.time() - self._positions_cool_log_ts > 5:
+                    log.warning("positions: %s (serving cache)", msg)
+                    self._positions_cool_log_ts = time.time()
+            else:
+                log.warning("positions: %s", msg)
+            return _sticky(symbol)
         if not isinstance(data, list):
             data = [data] if data else []
         out: list[dict[str, Any]] = []

@@ -692,7 +692,16 @@ class ExecutionEngine:
                     last_err = e
                     err = str(e)
                     code = _parse_binance_code(err)
-                    retryable = "timeout" in err.lower() or "timed out" in err.lower() or "URLError" in err
+                    low = err.lower()
+                    retryable = (
+                        "timeout" in low
+                        or "timed out" in low
+                        or "urlerror" in low
+                        or "remote end closed" in low
+                        or "connection reset" in low
+                        or "connection aborted" in low
+                        or "broken pipe" in low
+                    )
                     if retryable and hasattr(self._connector, "query_order_by_client_id"):
                         existing = self._connector.query_order_by_client_id(sym, client_id)
                         if existing and str(existing.get("status") or "").upper() in (
@@ -726,7 +735,13 @@ class ExecutionEngine:
                     break
 
             err = str(last_err) if last_err else "order_failed"
-            if "timeout" in err.lower() or "timed out" in err.lower():
+            low = err.lower()
+            if (
+                "timeout" in low
+                or "timed out" in low
+                or "remote end closed" in low
+                or "connection reset" in low
+            ):
                 err = f"uncertain_fill:{err}"
                 result.stage = "uncertain_fill"
             else:

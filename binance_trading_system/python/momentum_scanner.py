@@ -5,8 +5,11 @@ Monitors 1m / 3m / 5m / 15m rolling % on every price tick (max study window 15m)
 Entry: 15m move >= 5% gain, then >= 0.7% retrace from peak → Short (50% partition, 5x).
 Recovery: +2% adverse from Short → Long 1 (40%, 10x); at +4% → Long 2 (40%, 10x).
 Each recovery long requires a confirmed primary short, settle delay, and live adverse
-(not peak-only latch). While the short is underwater, Long 1 / Long 2 stay paired
-(no independent TP/0.5% trail) until rescue, invalidation, or short TP flattens all.
+(not peak-only latch). While the short is underwater OR after a hedge episode
+(≥+2% adverse / L1|L2 live or closed), Long 1 / Long 2 stay paired (no solo TP /
+0.5% trail) until rescue, smart exit, invalidation, or short TP-trail flattens all.
+Naked short exchange leverage targets 5x (never force 10x). Adopt refreshes in place
+(no overlapping second short). Never arm L1/L2 at/through invalidation (6.5%).
 Short TP at 2.5% down; the short trail keeps a profitable-MFE floor so it never acts
 as a hard stop. Recovery longs are never left without the primary short.
 """
@@ -440,6 +443,9 @@ class MomentumScanner:
         live_adv = self._short_adverse_pct(coin)
         if live_adv > coin.short_adverse_peak_pct:
             coin.short_adverse_peak_pct = live_adv
+        # Never arm a hedge into/through the invalidation band (gap → instant wipe).
+        if live_adv >= PAIR_INVALIDATION_PCT:
+            return False
         # Require live adverse — peak-only latched longs into fades and got scraped.
         if live_adv < LONG1_ADVERSE_PCT:
             return False
@@ -448,8 +454,8 @@ class MomentumScanner:
     def _long2_entry_allowed(self, coin: CoinStrategy) -> bool:
         """Long 2 at live ≥4% above the primary short entry.
 
-        Prefer Long 1 still open. If Long 1 already TP'd / trailed off while the short is
-        still underwater, still allow Long 2 so a continued pump is not left unhedged.
+        Prefer Long 1 still open. Sibling-wipe re-arm may allow Long 2 after Long 1 was
+        closed unintentionally — never open Long 2 once adverse already hits invalidation.
         """
         if not coin.short or coin.short_was_closed:
             return False
@@ -476,7 +482,31 @@ class MomentumScanner:
         live_adv = self._short_adverse_pct(coin)
         if live_adv > coin.short_adverse_peak_pct:
             coin.short_adverse_peak_pct = live_adv
+        if live_adv >= PAIR_INVALIDATION_PCT:
+            return False
         if live_adv < LONG2_ADVERSE_PCT:
+            return False
+        return True
+
+    def _hedge_episode_active(self, coin: CoinStrategy) -> bool:
+        """True once the short entered Long1 territory or a recovery hedge is/was live."""
+        if coin.long1 is not None or coin.long2 is not None:
+            return True
+        if coin.long1_was_closed or coin.long2_was_closed:
+            return True
+        return float(coin.short_adverse_peak_pct or 0.0) + 1e-12 >= LONG1_ADVERSE_PCT
+
+    def _solo_hedge_exit_allowed(self, coin: CoinStrategy) -> bool:
+        """Solo Long1/Long2 TP/pullback only before a hedge episode while short is green.
+
+        Once adverse ≥ +2% or a hedge is/was open, hedges stay paired until rescue /
+        smart-exit / invalidation / short TP-trail flatten. Stops L1 dump → naked short → INVALIDATION.
+        """
+        if not coin.short:
+            return True
+        if self._short_underwater(coin):
+            return False
+        if self._hedge_episode_active(coin):
             return False
         return True
 
@@ -539,16 +569,23 @@ class MomentumScanner:
 
     def _try_close_hedge_leg(self, coin: CoinStrategy, leg_name: str, reason: str) -> None:
         """
-        Independent hedge exit is allowed only when the short is already in profit.
-        While underwater, any hedge exit must flatten the full pair (no insurance dump).
+        Independent hedge exit only before a hedge episode and while short is in profit.
+        While underwater → flatten the full pair. After Long1 territory → keep hedges paired.
         """
-        if self._short_underwater(coin):
+        if coin.short and self._short_underwater(coin):
             log.info(
                 "scanner %s paired hold blocks solo %s — flattening pair",
                 coin.symbol,
                 reason,
             )
             self._close_all(coin, f"{reason}_PAIR_FLATTEN")
+            return
+        if coin.short and not self._solo_hedge_exit_allowed(coin):
+            log.info(
+                "scanner %s paired hold keeps %s — hedge episode active (no solo dump)",
+                coin.symbol,
+                reason,
+            )
             return
         self._close_leg(coin, leg_name, reason=reason)
 
@@ -691,7 +728,10 @@ class MomentumScanner:
         fallback_entry: float,
         tp: float,
     ) -> bool:
-        """Recover primary short state when Binance filled but ACK was lost / duplicate blocked."""
+        """Recover primary short state when Binance filled but ACK was lost / duplicate blocked.
+
+        If scanner already tracks this short, refresh in place — never open a second overlapping short.
+        """
         sym = symbol.upper()
         leg = self._exchange_short_leg(sym)
         if not leg:
@@ -700,14 +740,28 @@ class MomentumScanner:
         qty = float(leg.get("volume") or fallback_qty or 0)
         if fill <= 0 or qty <= 1e-12:
             return False
+        already = coin.short is not None
+        # Preserve adverse peak / trough across refresh so hedge episode state is not wiped.
+        prior_peak = float(coin.short_adverse_peak_pct or 0.0) if already else 0.0
+        prior_trough = float(coin.short_trough_price or 0.0) if already else 0.0
         coin.short = LegPosition("SELL", fill, qty, SHORT_LEVERAGE, MAGIC_SHORT, tp)
         coin.status = STATUS_SHORT
-        coin.short_trough_price = fill
-        coin.short_adverse_peak_pct = 0.0
-        self._mark_short_opened(coin, sym)
+        if already:
+            coin.short_trough_price = prior_trough if prior_trough > 0 else fill
+            coin.short_adverse_peak_pct = prior_peak
+        else:
+            coin.short_trough_price = fill
+            coin.short_adverse_peak_pct = 0.0
+            self._mark_short_opened(coin, sym)
+        # Naked adopted short must target 5x (Binance may keep 10x if reduce-blocked).
+        if hasattr(self._connector, "ensure_exchange_leverage"):
+            self._connector.ensure_exchange_leverage(sym, SHORT_LEVERAGE)
         self._last_exec_error = None
-        self._emit_signal(coin, "entered")
-        log.info("scanner adopted exchange SHORT %s qty=%s @ %s", sym, qty, fill)
+        if already:
+            log.info("scanner refreshed exchange SHORT %s qty=%s @ %s (no overlap)", sym, qty, fill)
+        else:
+            self._emit_signal(coin, "entered")
+            log.info("scanner adopted exchange SHORT %s qty=%s @ %s", sym, qty, fill)
         return True
 
     def _adopt_exchange_long1(
@@ -2255,6 +2309,35 @@ class MomentumScanner:
             qty = max(0.001, round(qty, 3))
         return qty
 
+    def max_manual_open_qty(self, symbol: str, side: str, price: float) -> float:
+        """Hard ceiling for manual desk opens — locked $100 partition stack (Sep23-25).
+
+        SELL/short: 50% @ 5x. BUY: one recovery leg 40% @ 10x. Never AAVE-sized desk bombs.
+        """
+        from leverage_policy import LONG1_LEVERAGE, SHORT_LEVERAGE
+
+        self._force_locked_partition_usd(persist=False)
+        side_u = (side or "").upper()
+        px = float(price or 0)
+        if px <= 0:
+            return 0.0
+        if side_u == "SELL":
+            return float(self._qty_for(symbol, px, SHORT_LEVERAGE, self._short_pct))
+        if side_u == "BUY":
+            return float(self._qty_for(symbol, px, LONG1_LEVERAGE, self._long1_pct))
+        return 0.0
+
+    def clamp_manual_open_qty(self, symbol: str, side: str, price: float, requested_qty: float) -> tuple[float, bool]:
+        """Return (qty, rejected). rejected=True when request exceeds locked partition max."""
+        max_q = self.max_manual_open_qty(symbol, side, price)
+        req = float(requested_qty or 0)
+        if max_q <= 0 or req <= 0:
+            return 0.0, True
+        # Tiny float/step slack only — egregious oversize (e.g. AAVE manual) is rejected.
+        if req > max_q * 1.02:
+            return max_q, True
+        return min(req, max_q), False
+
     def _execute_pending_short(self, coin: CoinStrategy) -> None:
         """Fire the primary short once per entry signal — never re-send on every tick."""
         sym = coin.symbol
@@ -2558,15 +2641,14 @@ class MomentumScanner:
         close_blocked = self._close_backoff_active(sym)
         if (coin.short or coin.long1 or coin.long2) and not getattr(self._connector.cfg, "paper", False):
             if hasattr(self._connector, "ensure_exchange_leverage"):
-                from leverage_policy import LONG1_LEVERAGE, symbol_exchange_leverage
+                from leverage_policy import symbol_exchange_leverage
 
                 has_long = bool(coin.long1) or bool(coin.long2)
-                # Isolated margin cannot reduce 10x→5x with an open short — keep 10x while
-                # the primary short lives to avoid a per-tick leverage warning storm.
-                if coin.short and not has_long:
-                    target = LONG1_LEVERAGE
-                else:
-                    target = symbol_exchange_leverage(has_recovery_long=has_long)
+                # Sep 23–25: naked primary short = 5x; only while Long1/Long2 live is symbol 10x.
+                # Do NOT force 10x on naked shorts — that doubled risk vs the frozen desk.
+                # If exchange cannot reduce 10x→5x with an open isolated position,
+                # ensure_exchange_leverage already keeps current and stops retry storms.
+                target = symbol_exchange_leverage(has_recovery_long=has_long)
                 self._connector.ensure_exchange_leverage(sym, target)
 
         price = coin.price
@@ -2645,11 +2727,11 @@ class MomentumScanner:
             )
             self._close_all(coin, "RESCUE")
             return
-        elif coin.short and self._short_underwater(coin, price) and (coin.long1 or coin.long2):
-            # Paired hold: do not solo-exit hedges while short is losing.
+        elif coin.short and (coin.long1 or coin.long2) and not self._solo_hedge_exit_allowed(coin):
+            # Paired hold: underwater OR post-Long1 hedge episode — no solo hedge dump.
             pass
         else:
-            # Short in profit (or no short): independent hedge TP / 0.5% peak trail OK.
+            # Pre-hedge-episode only: independent hedge TP / 0.5% peak trail when short is green.
             if coin.long1:
                 if coin.long1.tp_price and price >= coin.long1.tp_price:
                     self._try_close_hedge_leg(coin, "long1", "LONG1_TP")

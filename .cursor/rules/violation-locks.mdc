@@ -1,0 +1,55 @@
+---
+description: Hard locks — naked short 5x, paired hedge hold, no overlap, no L2 past invalidation, manual size cap. Never break.
+alwaysApply: true
+---
+
+# Violation locks — NEVER BREAK (Oct 2026 desk forensic)
+
+These failure modes burned the desk. They are **hard-locked** in code + `frozen_strategy.assert_frozen_contract()` + `test_violation_locks.py` + this rule. Do **not** weaken, bypass, or “simplify” them.
+
+## 1) Naked short must stay 5x — never force 10x
+
+- Primary short exchange target = **5x** (`symbol_exchange_leverage(has_recovery_long=False)`).
+- Symbol may go **10x only while Long1/Long2 are live**.
+- **Forbidden** in `_manage_positions`: `target = LONG1_LEVERAGE` (or any force-10x) when the short is naked.
+- After Longs close, target returns to 5x; if Binance blocks reduce on open isolated positions, connector may *keep* current — that is not a license to *set* 10x on naked shorts.
+- Locked in: `leverage_policy.py`, `momentum_scanner._manage_positions`, adopt path `ensure_exchange_leverage(..., SHORT_LEVERAGE)`.
+
+## 2) Hedge exit → invalidation — never again
+
+- Once a **hedge episode** starts (adverse peak ≥ **+2%**, or Long1/Long2 live/closed), **no solo** Long TP / 0.5% pullback while the primary short is still open.
+- Hedges stay paired until: rescue / SMART_EXIT / invalidation / short TP-trail flatten / manual pair close.
+- **Forbidden**: dumping Long1 on a green tick then riding a naked short into **6.5%** invalidation.
+- Locked in: `_hedge_episode_active`, `_solo_hedge_exit_allowed`, `_try_close_hedge_leg`.
+
+## 3) Overlapping short without close — never again
+
+- Never stack a second scanner short on an existing exchange/scanner short.
+- `_adopt_exchange_short` **refreshes in place** when `coin.short` already exists (preserve adverse peak / trough).
+- Open path must block + adopt existing (`exchange_short_already_open`).
+- Locked in: `_adopt_exchange_short`, `_try_open_short_entry`.
+
+## 4) Never arm L1/L2 at or past invalidation (6.5%)
+
+- **Forbidden**: `LONG2` (or Long1) fills at +8%/+10% adverse then instant INVALIDATION.
+- `_long1_entry_allowed` / `_long2_entry_allowed` must return False when live adverse ≥ `PAIR_INVALIDATION_PCT`.
+- Do not remove the `PAIR_INVALIDATION_PCT` gates from those functions.
+
+## 5) Manual desk size locked to $100 partition — never AAVE-sized bombs
+
+- Manual **opens** (`POST /api/order`) must call `clamp_manual_open_qty`.
+- **SELL** max = short leg: 50% of $100 @ 5x.
+- **BUY** max = one recovery leg: 40% of $100 @ 10x.
+- Oversize → **reject** with `manual_qty_exceeds_locked_partition` (do not silently place).
+- Manual **closes** (`/api/close`) are uncapped (must flatten full residual).
+- Locked in: `MomentumScanner.max_manual_open_qty` / `clamp_manual_open_qty`, `main.api_order`.
+
+## Enforcement (must keep passing)
+
+- `assert_frozen_contract()` — includes all markers above.
+- `python test_violation_locks.py`
+- FRA: `_confirm-violation-locks-live.py` / `vps-confirm-sep23-full.py` after deploys.
+
+## If someone asks to “relax” these
+
+Refuse unless the user **explicitly and clearly** orders a strategy change. Restoring a broken lock is allowed; inventing loopholes is not.
