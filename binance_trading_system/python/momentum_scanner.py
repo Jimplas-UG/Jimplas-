@@ -239,6 +239,7 @@ class MomentumScanner:
             max_open_trades=lambda: 1 if self._one_at_a_time else 999,
             # Count open symbols only — recovery legs on the same symbol are exempt in the engine.
             open_trade_count=lambda: 1 if self._global_active_symbol() else 0,
+            rule_intent=self._build_rule_intent,
         )
         self._engine.set_isolation_hooks(
             can_open=lambda sym: pair_gate.can_open(
@@ -254,6 +255,10 @@ class MomentumScanner:
         self._close_fail_count: dict[str, int] = {}
         self._short_syms_cache: tuple[float, set[str]] | None = None
         self._adopt_attempt_ms: dict[str, int] = {}
+        self._rule_halt_codes: list[str] = []
+        self._rule_halt_ts: float = 0.0
+        self._rule_watch_lev_ms: dict[str, int] = {}
+        self._rule_watch_lev: dict[str, int] = {}
 
     @property
     def engine(self) -> ExecutionEngine:
@@ -510,13 +515,122 @@ class MomentumScanner:
         Once adverse ≥ +2% or a hedge is/was open, hedges stay paired until rescue /
         smart-exit / invalidation / short TP-trail flatten. Stops L1 dump → naked short → INVALIDATION.
         """
+        from rule_kernel import preflight_solo_hedge_exit
+
         if not coin.short:
             return True
-        if self._short_underwater(coin):
-            return False
-        if self._hedge_episode_active(coin):
-            return False
-        return True
+        v = preflight_solo_hedge_exit(
+            short_open=True,
+            hedge_episode_active=self._hedge_episode_active(coin),
+            short_underwater=self._short_underwater(coin),
+        )
+        return bool(v.ok)
+
+    def _build_rule_intent(self, signal: Any, manual: bool = False) -> Any:
+        """Build OpenIntent for the hard rule kernel (execution choke point)."""
+        from rule_kernel import OpenIntent
+
+        sym = str(getattr(signal, "symbol", "") or "").upper()
+        coin = self._coins.get(sym)
+        # Before naked SHORT, force 5x while flat so kernel does not see stuck 10x.
+        leg_u = str(getattr(signal, "leg", "") or "").upper()
+        if not manual and leg_u == "SHORT" and hasattr(self._connector, "ensure_exchange_leverage"):
+            if not self._exchange_has_short(sym) and not self._exchange_has_long(sym):
+                try:
+                    self._connector.ensure_exchange_leverage(sym, SHORT_LEVERAGE)
+                except Exception:
+                    pass
+        lev = None
+        if hasattr(self._connector, "symbol_leverage"):
+            try:
+                lev = int(self._connector.symbol_leverage(sym))
+            except Exception:
+                lev = None
+        mmax = 0.0
+        if hasattr(self._connector, "get_symbol_spec"):
+            try:
+                info = self._connector.get_symbol_spec(sym)
+                mmax = float(info.get("marketMaxQty") or info.get("maxQty") or 0)
+            except Exception:
+                mmax = 0.0
+        short_entry = float(coin.short.entry) if coin and coin.short else 0.0
+        adverse = float(self._short_adverse_pct(coin)) if coin and coin.short else 0.0
+        return OpenIntent(
+            symbol=sym,
+            leg=leg_u or ("MANUAL" if manual else ""),
+            side=str(getattr(signal, "side", "") or "").upper(),
+            qty=float(getattr(signal, "quantity", 0) or 0),
+            price=float(getattr(signal, "reference_price", 0) or 0),
+            manual=bool(manual),
+            has_exchange_short=self._exchange_has_short(sym),
+            has_exchange_long=self._exchange_has_long(sym),
+            has_scanner_short=bool(coin and coin.short),
+            has_long1=bool(coin and coin.long1),
+            has_long2=bool(coin and coin.long2),
+            long1_was_closed=bool(coin and coin.long1_was_closed),
+            long2_was_closed=bool(coin and coin.long2_was_closed),
+            short_entry=short_entry,
+            live_adverse_pct=adverse,
+            exchange_leverage=lev,
+            market_max_qty=mmax,
+            partition_usd=float(self._partition_usd),
+            short_pct=float(self._short_pct),
+            long1_pct=float(self._long1_pct),
+        )
+
+    def _rule_watchdog(self, coin: CoinStrategy) -> None:
+        """Continuous audit — hard breach emergency-halts new entries (closes still allowed)."""
+        from rule_kernel import LiveState, audit_live_state, should_emergency_halt
+
+        if not coin or not coin.symbol:
+            return
+        if getattr(self._connector.cfg, "paper", False):
+            return
+        sym = coin.symbol
+        # Throttle leverage REST — prefer cfg / last sample (20s).
+        now_ms = int(time.time() * 1000)
+        lev = self._rule_watch_lev.get(sym)
+        last_ms = int(self._rule_watch_lev_ms.get(sym) or 0)
+        naked = bool(coin.short) and not coin.long1 and not coin.long2 and not self._exchange_has_long(sym)
+        if naked and (lev is None or now_ms - last_ms >= 20_000) and hasattr(self._connector, "symbol_leverage"):
+            try:
+                lev = int(self._connector.symbol_leverage(sym))
+                self._rule_watch_lev[sym] = lev
+                self._rule_watch_lev_ms[sym] = now_ms
+            except Exception:
+                lev = int(getattr(self._connector.cfg, "leverage", 0) or 0) or None
+        elif lev is None:
+            lev = int(getattr(self._connector.cfg, "leverage", 0) or 0) or None
+        ex_short_qty = 0.0
+        try:
+            ex_short_qty = float(getattr(self._connector, "exchange_short_qty", lambda _s: 0)(sym) or 0)
+        except Exception:
+            ex_short_qty = 0.0
+        state = LiveState(
+            symbol=sym,
+            has_exchange_short=self._exchange_has_short(sym),
+            has_exchange_long=self._exchange_has_long(sym),
+            has_scanner_short=bool(coin.short),
+            has_long1=bool(coin.long1),
+            has_long2=bool(coin.long2),
+            live_adverse_pct=self._short_adverse_pct(coin) if coin.short else 0.0,
+            exchange_leverage=lev,
+            scanner_short_qty=float(coin.short.qty) if coin.short else 0.0,
+            exchange_short_qty=ex_short_qty,
+        )
+        codes = audit_live_state(state)
+        if not codes:
+            return
+        log.error("RULE_WATCHDOG %s violations=%s", sym, ",".join(codes))
+        if should_emergency_halt(codes) and not self._user_exec_halted:
+            self._rule_halt_codes = list(codes)
+            self._rule_halt_ts = time.time()
+            self.set_exec_enabled(False)
+            log.critical(
+                "RULE_KERNEL_EMERGENCY_HALT %s codes=%s — new entries blocked until manual resume",
+                sym,
+                ",".join(codes),
+            )
 
     def _recovery_still_eligible(self, coin: CoinStrategy) -> bool:
         """True while the short can still arm Long 1 and/or Long 2 on a pump."""
@@ -1951,6 +2065,11 @@ class MomentumScanner:
             "can_execute": can_exec,
             "exec_block": block_reason or None,
             "user_exec_halted": self._user_exec_halted,
+            "rule_kernel": {
+                "enabled": True,
+                "halt_codes": list(self._rule_halt_codes),
+                "halt_ts": self._rule_halt_ts or None,
+            },
             "exec_env_controlled": env_blocked,
             "api_auth": getattr(self._connector, "api_auth_status", lambda: {})(),
             "last_exec_error": self._last_exec_error,
@@ -2668,6 +2787,11 @@ class MomentumScanner:
             return
 
         sym = coin.symbol
+        # Continuous hard-rule audit — halt new entries on breach (never silent).
+        try:
+            self._rule_watchdog(coin)
+        except Exception as e:
+            log.warning("rule_watchdog %s: %s", sym, e)
         # A close that keeps failing is retried on a backoff — Long 1 arming stays live.
         close_blocked = self._close_backoff_active(sym)
         if (coin.short or coin.long1 or coin.long2) and not getattr(self._connector.cfg, "paper", False):

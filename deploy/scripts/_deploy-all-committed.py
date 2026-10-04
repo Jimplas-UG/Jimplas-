@@ -15,7 +15,9 @@ FILES = [
     "binance_trading_system/python/frozen_strategy.py",
     "binance_trading_system/python/main.py",
     "binance_trading_system/python/momentum_scanner.py",
+    "binance_trading_system/python/rule_kernel.py",
     "binance_trading_system/python/test_exec_session.py",
+    "binance_trading_system/python/test_rule_kernel.py",
     "binance_trading_system/python/test_strategy_guards.py",
     "binance_trading_system/python/test_violation_locks.py",
 ]
@@ -23,7 +25,8 @@ FILES = [
 CMD = rf"""
 set -e
 cd {REMOTE}
-{PY} -m py_compile binance_connector.py execution_engine.py frozen_strategy.py main.py momentum_scanner.py
+{PY} -m py_compile binance_connector.py execution_engine.py frozen_strategy.py main.py momentum_scanner.py rule_kernel.py
+{PY} test_rule_kernel.py
 {PY} test_violation_locks.py
 {PY} test_frozen_strategy.py
 {PY} test_strategy_guards.py

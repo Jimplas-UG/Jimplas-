@@ -14,6 +14,31 @@ os.environ["SCANNER_EXEC"] = "1"
 os.environ.pop("FORWARD_DRY_RUN", None)
 
 from execution_engine import ExecutionEngine, ExecutionSignal  # noqa: E402
+from rule_kernel import OpenIntent  # noqa: E402
+
+
+def _permissive_intent(signal: ExecutionSignal, manual: bool = False) -> OpenIntent:
+    """Unit-test intent — satisfies kernel so engine plumbing can be tested."""
+    leg = (signal.leg or "").upper()
+    return OpenIntent(
+        symbol=signal.symbol,
+        leg=leg,
+        side=signal.side,
+        qty=float(signal.quantity),
+        price=float(signal.reference_price),
+        manual=manual,
+        has_exchange_short=leg.startswith("LONG"),
+        has_scanner_short=leg.startswith("LONG"),
+        has_long1=leg == "LONG2",
+        live_adverse_pct=4.1 if leg == "LONG2" else (2.1 if leg == "LONG1" else 0.0),
+        exchange_leverage=5,
+        market_max_qty=1_000_000_000,
+        partition_usd=100.0,
+    )
+
+
+def _engine(conn) -> ExecutionEngine:
+    return ExecutionEngine(conn, session_ok=lambda: (True, ""), rule_intent=_permissive_intent)
 
 
 class MockConnector:
@@ -86,7 +111,7 @@ def _signal(**kw) -> ExecutionSignal:
 
 def test_qualified_sell_executes() -> None:
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     r = eng.execute(_signal(side="SELL"))
     assert r.ok, r.error
     assert r.order_id == 12345
@@ -101,7 +126,7 @@ def test_recovery_long_buy_executes() -> None:
     """Short-first: recovery LONG1/LONG2 hedges are BUY orders and must pass."""
     conn = MockConnector()
     conn._short_qty = 10.0
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     r = eng.execute(_signal(side="BUY", leg="LONG1", tp=None))
     assert r.ok, r.error
     assert r.side == "BUY"
@@ -113,7 +138,7 @@ def test_recovery_long_buy_executes() -> None:
 def test_standalone_buy_blocked_by_short_first() -> None:
     """Any BUY that is not a recovery long or a desk manual order must be blocked."""
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     for leg in ("SHORT", "", "ENTRY"):
         r = eng.execute(
             _signal(side="BUY", leg=leg, tp=None, signal_id=f"buy_blocked_{leg or 'none'}")
@@ -127,7 +152,7 @@ def test_standalone_buy_blocked_by_short_first() -> None:
 def test_manual_buy_allowed() -> None:
     """Desk manual trading must allow BUY and SELL for speed/flexibility."""
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     r = eng.execute(
         _signal(side="BUY", leg="MANUAL", tp=None, signal_id="buy_manual_1"),
         manual=True,
@@ -139,7 +164,7 @@ def test_manual_buy_allowed() -> None:
 
 def test_manual_orders_unique_client_ids() -> None:
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     r1 = eng.execute(
         _signal(side="SELL", leg="MANUAL", tp=None, signal_id="MANUAL_X_SELL_1_100"),
         manual=True,
@@ -155,7 +180,7 @@ def test_manual_orders_unique_client_ids() -> None:
 
 def test_tp_created() -> None:
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     r = eng.execute(_signal())
     assert r.ok
     assert r.tp_order_id == 67890
@@ -165,7 +190,7 @@ def test_tp_created() -> None:
 
 def test_invalid_quantity_blocked() -> None:
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     r = eng.execute(_signal(quantity=0))
     assert not r.ok
     assert "invalid_quantity" in r.error or "quantity" in r.error
@@ -174,7 +199,7 @@ def test_invalid_quantity_blocked() -> None:
 
 def test_precision_min_notional() -> None:
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     r = eng.execute(_signal(quantity=0.0001, reference_price=0.01))
     assert not r.ok
     assert "min_notional" in r.error or "quantity" in r.error
@@ -184,7 +209,7 @@ def test_precision_min_notional() -> None:
 def test_timeout_retry_works() -> None:
     conn = MockConnector()
     conn.fail_times = 2
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     t0 = time.perf_counter()
     r = eng.execute(_signal(signal_id="retry_test_1"))
     elapsed = (time.perf_counter() - t0) * 1000
@@ -196,7 +221,7 @@ def test_timeout_retry_works() -> None:
 
 def test_duplicate_prevention() -> None:
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     sig = _signal(signal_id="dup_test_1")
     r1 = eng.execute(sig)
     r2 = eng.execute(sig)
@@ -209,7 +234,7 @@ def test_duplicate_prevention() -> None:
 def test_insufficient_margin() -> None:
     conn = MockConnector()
     conn._request = MagicMock(return_value={"availableBalance": 0.01})
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     r = eng.execute(_signal(signal_id="margin_test_1"))
     assert not r.ok
     assert "insufficient_margin" in r.error
@@ -219,7 +244,7 @@ def test_insufficient_margin() -> None:
 def test_forward_dry_run_blocks() -> None:
     os.environ["FORWARD_DRY_RUN"] = "1"
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     r = eng.execute(_signal(signal_id="dry_test_1"))
     assert not r.ok
     assert r.error == "FORWARD_DRY_RUN"
@@ -229,7 +254,7 @@ def test_forward_dry_run_blocks() -> None:
 
 def test_primary_short_exchange_is_5x() -> None:
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     r = eng.execute(_signal(side="SELL", leg="SHORT", leverage=20, signal_id="lev_short_1"))
     assert r.ok, r.error
     prep = [c for c in conn.calls if c.get("op") == "prepare"]
@@ -241,7 +266,7 @@ def test_primary_short_exchange_is_5x() -> None:
 
 def test_recovery_long_exchange_is_10x() -> None:
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     for leg, sig in (("LONG1", "lev_long1_1"), ("LONG2", "lev_long2_1")):
         conn.calls.clear()
         r = eng.execute(_signal(side="BUY", leg=leg, leverage=5, tp=None, signal_id=sig))
@@ -255,7 +280,7 @@ def test_recovery_long_exchange_is_10x() -> None:
 
 def test_latency_under_target_when_network_allows() -> None:
     conn = MockConnector()
-    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    eng = _engine(conn)
     r = eng.execute(_signal(signal_id="lat_test_1"))
     assert r.ok
     assert r.latency_ms < 100

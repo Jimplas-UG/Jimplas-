@@ -16,6 +16,7 @@ the live modules still match the working contract:
   (SELL ≤ 50%@5x, BUY ≤ 40%@10x of $100) — reject oversize
   Market opens clamp to MARKET_LOT_SIZE (never -4005 → naked invalidation)
   Adverse % never uses a deflated short entry (no early L1/L2)
+  Hard rule_kernel choke point on every open + live watchdog emergency halt
   Rescue: long PnL ≥ short loss + buffer → flatten all
   Invalidation: ≥6.5% adverse from short entry → flatten all
   Short TP −2.5%; never leave orphan longs without the primary short
@@ -196,6 +197,16 @@ def assert_frozen_contract() -> dict[str, Any]:
     eng_path = Path(__file__).resolve().parent / "execution_engine.py"
     eng_src = eng_path.read_text(encoding="utf-8")
     assert "qty clamped to market max" in eng_src or "_validate_order_qty" in eng_src
+    # Hard rule kernel — every auto open must pass; fail closed without intent.
+    import rule_kernel as rk
+
+    assert hasattr(rk, "preflight_open") and hasattr(rk, "audit_live_state")
+    assert hasattr(rk, "should_emergency_halt")
+    assert "rule_kernel_missing_intent" in eng_src
+    assert "preflight_open" in eng_src
+    assert hasattr(ms.MomentumScanner, "_build_rule_intent")
+    assert hasattr(ms.MomentumScanner, "_rule_watchdog")
+    assert "rule_intent=self._build_rule_intent" in inspect.getsource(ms.MomentumScanner.__init__)
 
     # Entry / adverse / TP / hedge pullback defaults (floors may raise short trail only).
     assert abs(ms.GAIN_THRESHOLD_PCT - GAIN_THRESHOLD_PCT) < 1e-9

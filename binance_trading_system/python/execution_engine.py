@@ -142,11 +142,13 @@ class ExecutionEngine:
         session_ok: Callable[[], tuple[bool, str]] | None = None,
         max_open_trades: Callable[[], int] | None = None,
         open_trade_count: Callable[[], int] | None = None,
+        rule_intent: Callable[[ExecutionSignal, bool], Any] | None = None,
     ):
         self._connector = connector
         self._session_ok = session_ok
         self._max_open_trades = max_open_trades or (lambda: 1)
         self._open_trade_count = open_trade_count or (lambda: 0)
+        self._rule_intent = rule_intent
         self._events: deque[ExecutionEvent] = deque(maxlen=64)
         self._filled_client_ids: set[str] = set()
         self._inflight_client_ids: set[str] = set()
@@ -178,6 +180,10 @@ class ExecutionEngine:
     ) -> None:
         self._isolation_check = can_open
         self._close_pending_check = close_pending
+
+    def set_rule_intent(self, rule_intent: Callable[[ExecutionSignal, bool], Any] | None) -> None:
+        """Bind scanner OpenIntent builder — required for hard rule kernel on opens."""
+        self._rule_intent = rule_intent
 
     def _emit(
         self,
@@ -493,6 +499,48 @@ class ExecutionEngine:
             self._log_failure(signal, reason=result.error, retry_decision="retry_on_margin")
             self._emit(signal, "risk_blocked", error=result.error)
             return result
+
+        # Hard rule kernel — last gate before signed order. No bypass path.
+        try:
+            from rule_kernel import preflight_open
+
+            intent = None
+            if self._rule_intent is not None:
+                intent = self._rule_intent(signal, manual)
+            if intent is None:
+                # Fail closed for auto scanner opens — never trade without kernel context.
+                if not manual:
+                    result.error = "rule_kernel_missing_intent"
+                    result.stage = "rule_blocked"
+                    self._log_failure(signal, reason=result.error, retry_decision="no_retry_kernel")
+                    self._emit(signal, "rule_blocked", error=result.error)
+                    return result
+            else:
+                # Attach market max from filters when builder omitted it.
+                if getattr(intent, "market_max_qty", 0) in (0, None) and info:
+                    intent.market_max_qty = float(info.get("marketMaxQty") or info.get("maxQty") or 0)
+                verdict = preflight_open(intent)
+                if not verdict.ok:
+                    result.error = verdict.reason
+                    result.stage = "rule_blocked"
+                    self._log_failure(signal, reason=result.error, retry_decision="no_retry_kernel")
+                    self._emit(signal, "rule_blocked", error=result.error)
+                    log.error(
+                        "RULE_KERNEL_BLOCK coin=%s leg=%s code=%s reason=%s",
+                        sym,
+                        signal.leg,
+                        verdict.code,
+                        verdict.reason,
+                    )
+                    return result
+        except Exception as e:
+            if not manual:
+                result.error = f"rule_kernel_error:{e}"
+                result.stage = "rule_blocked"
+                self._log_failure(signal, reason=result.error, retry_decision="no_retry_kernel")
+                self._emit(signal, "rule_blocked", error=result.error)
+                return result
+            log.warning("rule_kernel manual skip on error: %s", e)
 
         self._emit(signal, "sending", client_order_id=client_id)
         self._inflight_client_ids.add(client_id)

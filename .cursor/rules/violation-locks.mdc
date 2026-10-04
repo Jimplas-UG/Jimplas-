@@ -57,10 +57,19 @@ These failure modes burned the desk. They are **hard-locked** in code + `frozen_
 - **Forbidden**: exchange entry lower than fill → inflated adverse → Long1 at +0.6% / Long2 at +2.8%.
 - Locked in: `MomentumScanner._sync_short_entry_from_exchange`.
 
+## 8) Hard rule kernel — no silent bypass
+
+- Every auto **open** must pass `rule_kernel.preflight_open()` inside `ExecutionEngine.execute`.
+- Missing intent on auto opens → **fail closed** (`rule_kernel_missing_intent`).
+- Live `_rule_watchdog` audits open symbols; hard codes (`NAKED_SHORT_AT_10X`, overlap, hedge past inv) → **emergency halt** new entries.
+- Solo hedge exits go through `preflight_solo_hedge_exit`.
+- Locked in: `rule_kernel.py`, `execution_engine` rule gate, `MomentumScanner._build_rule_intent` / `_rule_watchdog`.
+
 ## Enforcement (must keep passing)
 
 - `assert_frozen_contract()` — includes all markers above.
 - `python test_violation_locks.py`
+- `python test_rule_kernel.py`
 - FRA: `_confirm-violation-locks-live.py` / `vps-confirm-sep23-full.py` after deploys.
 
 ## If someone asks to “relax” these
