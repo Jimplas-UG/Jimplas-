@@ -498,6 +498,33 @@ class ExecutionEngine:
         self._inflight_client_ids.add(client_id)
 
         try:
+            # Clamp to MARKET_LOT_SIZE BEFORE raising exchange leverage to 10x.
+            # Otherwise a -4005 Long1 leaves a naked short stuck at 10x (Binance blocks reduce).
+            order_qty = float(signal.quantity)
+            if hasattr(self._connector, "get_symbol_spec") and hasattr(self._connector, "_validate_order_qty"):
+                try:
+                    info = self._connector.get_symbol_spec(sym)
+                    px = float(signal.reference_price or 0) or 1.0
+                    clamped, qty_err = self._connector._validate_order_qty(order_qty, px, info)
+                    if qty_err and "above market max" in str(qty_err):
+                        result.error = qty_err
+                        result.stage = "risk_blocked"
+                        self._log_failure(signal, reason=result.error, retry_decision="no_retry")
+                        self._emit(signal, "risk_blocked", error=result.error)
+                        return result
+                    if clamped > 0 and abs(clamped - order_qty) / max(order_qty, 1e-12) > 0.001:
+                        log.info(
+                            "qty clamped to market max coin=%s leg=%s %.6g -> %.6g",
+                            sym,
+                            signal.leg,
+                            order_qty,
+                            clamped,
+                        )
+                        order_qty = clamped
+                        signal.quantity = clamped
+                except Exception as e:
+                    log.warning("qty preflight %s: %s", sym, e)
+
             self._connector.prepare_symbol_cached(sym, exchange_lev, "ISOLATED")
             # Manual: prepare_symbol_cached already set leverage; skip sync positionRisk.
             # Auto: ensure_exchange_leverage is a no-op when prepare cache is warm.
@@ -509,7 +536,7 @@ class ExecutionEngine:
                     order_resp = self._connector.place_market_order(
                         sym,
                         side,
-                        float(signal.quantity),
+                        float(order_qty),
                         client_order_id=client_id,
                         reference_price=signal.reference_price,
                         leverage=signal.leverage,

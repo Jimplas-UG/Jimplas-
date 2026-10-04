@@ -14,6 +14,8 @@ the live modules still match the working contract:
   Never arm L1/L2 once adverse already ≥ invalidation (6.5%)
   Manual desk opens cannot exceed locked partition leg size
   (SELL ≤ 50%@5x, BUY ≤ 40%@10x of $100) — reject oversize
+  Market opens clamp to MARKET_LOT_SIZE (never -4005 → naked invalidation)
+  Adverse % never uses a deflated short entry (no early L1/L2)
   Rescue: long PnL ≥ short loss + buffer → flatten all
   Invalidation: ≥6.5% adverse from short entry → flatten all
   Short TP −2.5%; never leave orphan longs without the primary short
@@ -181,6 +183,19 @@ def assert_frozen_contract() -> dict[str, Any]:
     main_src = main_path.read_text(encoding="utf-8")
     assert "manual_qty_exceeds_locked_partition" in main_src
     assert "clamp_manual_open_qty" in main_src
+    # Market max clamp + conservative short-entry sync (post-lock forensic).
+    import binance_connector as bc
+
+    parse_src = inspect.getsource(bc.BinanceConnector._parse_symbol_filters)
+    assert "MARKET_LOT_SIZE" in parse_src and "marketMaxQty" in parse_src
+    val_src = inspect.getsource(bc.BinanceConnector._validate_order_qty)
+    assert "marketMaxQty" in val_src
+    sync_src = inspect.getsource(ms.MomentumScanner._sync_short_entry_from_exchange)
+    assert "max(local, ex_entry)" in sync_src
+    assert "deflate" in sync_src
+    eng_path = Path(__file__).resolve().parent / "execution_engine.py"
+    eng_src = eng_path.read_text(encoding="utf-8")
+    assert "qty clamped to market max" in eng_src or "_validate_order_qty" in eng_src
 
     # Entry / adverse / TP / hedge pullback defaults (floors may raise short trail only).
     assert abs(ms.GAIN_THRESHOLD_PCT - GAIN_THRESHOLD_PCT) < 1e-9

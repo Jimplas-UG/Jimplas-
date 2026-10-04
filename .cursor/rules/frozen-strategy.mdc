@@ -22,7 +22,7 @@ The live Binance bot strategy is the **real deal**. Do not change it unless the 
 - Leg order (SHORT primary, LONG1/LONG2 recovery hedges)
 - Paired-hold / orphan-long rules
 - Sep 23–25 exit ops: SMART_EXIT 6% + hedged short-profit guard, manual confirms, 12s close cool (no instant clear)
-- **Violation locks** (see `violation-locks.mdc`): naked short **5x only**; paired hold after hedge episode; no overlapping short; no L1/L2 at/through 6.5% invalidation; **manual opens capped to $100 partition legs** (reject oversize)
+- **Violation locks** (see `violation-locks.mdc`): naked short **5x only**; paired hold after hedge episode; no overlapping short; no L1/L2 at/through 6.5% invalidation; **manual opens capped to $100 partition legs** (reject oversize); **MARKET_LOT_SIZE clamp** (no -4005 naked invalidation); **no deflated short entry** (no early L1/L2)
 - `frozen_strategy.py`, strategy defaults in `momentum_scanner.py`, `leverage_policy.py`, `strategy_guards.py`, `test_violation_locks.py`, `main.py` manual qty clamp
 
 ## Allowed without strategy change

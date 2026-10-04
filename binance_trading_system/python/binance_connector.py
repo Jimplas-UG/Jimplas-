@@ -569,6 +569,7 @@ class BinanceConnector:
         sym = str(s.get("symbol", "")).upper()
         filters = {f["filterType"]: f for f in s.get("filters", [])}
         lot = filters.get("LOT_SIZE", {})
+        market_lot = filters.get("MARKET_LOT_SIZE", {}) or {}
         price_f = filters.get("PRICE_FILTER", {})
         min_notional_f = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL", {})
         min_notional = float(min_notional_f.get("notional", min_notional_f.get("minNotional", "5")))
@@ -576,6 +577,15 @@ class BinanceConnector:
         pct_side_f = filters.get("PERCENT_PRICE_BY_SIDE") or {}
         mult_up = _float_or_none(pct_f.get("multiplierUp") or pct_side_f.get("askMultiplierUp"))
         mult_down = _float_or_none(pct_f.get("multiplierDown") or pct_side_f.get("bidMultiplierDown"))
+        lot_max = float(lot.get("maxQty", "1000"))
+        # Market orders are capped by MARKET_LOT_SIZE (BEAMX testnet: 100k) — ignoring it
+        # yields -4005, failed Long1, naked short → invalidation.
+        market_max_raw = market_lot.get("maxQty")
+        market_max = float(market_max_raw) if market_max_raw not in (None, "") else lot_max
+        if market_max <= 0:
+            market_max = lot_max
+        market_step = float(market_lot.get("stepSize") or lot.get("stepSize", "0.001"))
+        market_min = float(market_lot.get("minQty") or lot.get("minQty", "0.001"))
         return {
             "symbol": sym,
             "status": s.get("status"),
@@ -584,7 +594,10 @@ class BinanceConnector:
             "tickSize": float(price_f.get("tickSize", "0.01")),
             "stepSize": float(lot.get("stepSize", "0.001")),
             "minQty": float(lot.get("minQty", "0.001")),
-            "maxQty": float(lot.get("maxQty", "1000")),
+            "maxQty": lot_max,
+            "marketMaxQty": market_max,
+            "marketMinQty": market_min,
+            "marketStepSize": market_step,
             "minNotional": min_notional,
             "multiplierUp": mult_up,
             "multiplierDown": mult_down,
@@ -1295,9 +1308,23 @@ class BinanceConnector:
         return params
 
     def _validate_order_qty(self, qty: float, price: float, info: dict[str, Any]) -> tuple[float, str | None]:
-        qty = round_to_step(qty, info["stepSize"])
-        if qty < info["minQty"]:
-            qty = info["minQty"]
+        step = float(info.get("marketStepSize") or info.get("stepSize") or 0.001)
+        min_q = float(info.get("marketMinQty") or info.get("minQty") or 0.001)
+        max_q = float(info.get("marketMaxQty") or info.get("maxQty") or 0.0)
+        lot_max = float(info.get("maxQty") or 0.0)
+        if lot_max > 0:
+            max_q = min(max_q, lot_max) if max_q > 0 else lot_max
+        qty = round_to_step(float(qty), step)
+        if max_q > 0 and qty > max_q:
+            qty = round_to_step(max_q, step)
+            if qty > max_q:
+                # step round-up can exceed max — step down once
+                qty = max(min_q, qty - step)
+                qty = round_to_step(qty, step)
+        if qty < min_q:
+            qty = min_q
+        if max_q > 0 and qty > max_q + 1e-12:
+            return qty, f"qty {qty} above market max {max_q}"
         notional = qty * price
         min_n = float(info.get("minNotional", info.get("min_notional", 5.0)))
         if notional < min_n:

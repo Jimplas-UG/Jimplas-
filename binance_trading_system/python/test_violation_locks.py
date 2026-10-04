@@ -129,6 +129,44 @@ def test_manual_open_qty_locked_to_partition() -> None:
     print("OK manual open qty locked to partition (reject oversize)")
 
 
+def test_market_max_qty_clamped() -> None:
+    from binance_connector import BinanceConnector
+
+    info = {
+        "stepSize": 1.0,
+        "minQty": 1.0,
+        "maxQty": 10_000_000.0,
+        "marketMaxQty": 100_000.0,
+        "marketMinQty": 1.0,
+        "marketStepSize": 1.0,
+        "minNotional": 5.0,
+    }
+    qty, err = BinanceConnector._validate_order_qty(BinanceConnector.__new__(BinanceConnector), 140056.0, 0.0028, info)
+    assert err is None, err
+    assert qty <= 100_000.0, qty
+    assert qty >= 99_000.0, qty
+    print("OK market max qty clamped (BEAMX -4005 lock)")
+
+
+def test_short_entry_sync_never_deflates() -> None:
+    sc = _scanner()
+    sc._connector.cfg.paper = False  # exercise exchange sync path
+    coin = CoinStrategy(symbol="AINUSDT")
+    coin.short = LegPosition("SELL", 0.04865, 1.0, SCAN_SHORT_LEV, MAGIC_SHORT, 0.047)
+    # Exchange reports a lower entry — must NOT deflate (would arm L1 early).
+    sc._exchange_short_leg = lambda _s: {"price_open": 0.0475}  # type: ignore
+    entry = sc._sync_short_entry_from_exchange(coin)
+    assert abs(entry - 0.04865) < 1e-9, entry
+    coin.price = 0.04912  # +0.97% vs real fill — must NOT pass 2% gate
+    assert sc._short_adverse_pct(coin) < LONG1_ADVERSE_PCT
+    # Higher exchange entry is allowed (more conservative).
+    coin.short.entry = 0.04865
+    sc._exchange_short_leg = lambda _s: {"price_open": 0.0490}  # type: ignore
+    entry2 = sc._sync_short_entry_from_exchange(coin)
+    assert abs(entry2 - 0.0490) < 1e-9, entry2
+    print("OK short entry sync never deflates (no early L1/L2)")
+
+
 if __name__ == "__main__":
     test_naked_short_exchange_target_is_5x()
     test_hedge_episode_blocks_solo_exit()
@@ -138,6 +176,8 @@ if __name__ == "__main__":
     test_adopt_refreshes_without_overlap_flag()
     test_manage_never_forces_naked_10x()
     test_manual_open_qty_locked_to_partition()
+    test_market_max_qty_clamped()
+    test_short_entry_sync_never_deflates()
     from frozen_strategy import assert_frozen_contract
 
     assert_frozen_contract()

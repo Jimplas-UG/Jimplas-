@@ -44,6 +44,19 @@ These failure modes burned the desk. They are **hard-locked** in code + `frozen_
 - Manual **closes** (`/api/close`) are uncapped (must flatten full residual).
 - Locked in: `MomentumScanner.max_manual_open_qty` / `clamp_manual_open_qty`, `main.api_order`.
 
+## 6) Market qty must respect MARKET_LOT_SIZE — never -4005 naked invalidation
+
+- Scanner/engine opens clamp to `marketMaxQty` (MARKET_LOT_SIZE) before sending.
+- **Forbidden**: Long1 `Quantity greater than max quantity (-4005)` then ride naked short to 6.5% INVALIDATION (BEAMX).
+- Clamp **before** raising exchange leverage to 10x (failed L1 must not leave naked short stuck at 10x).
+- Locked in: `binance_connector._parse_symbol_filters` / `_validate_order_qty`, `momentum_scanner._qty_for`, `execution_engine` qty preflight.
+
+## 7) Never deflate short entry for adverse % — no early L1/L2
+
+- Adverse reference = `max(scanner_fill_entry, exchange_entry)`.
+- **Forbidden**: exchange entry lower than fill → inflated adverse → Long1 at +0.6% / Long2 at +2.8%.
+- Locked in: `MomentumScanner._sync_short_entry_from_exchange`.
+
 ## Enforcement (must keep passing)
 
 - `assert_frozen_contract()` — includes all markers above.

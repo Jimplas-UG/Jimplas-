@@ -381,19 +381,27 @@ class MomentumScanner:
         return float(long_fn(symbol) or 0) > 1e-12 and float(short_fn(symbol) or 0) <= 1e-12
 
     def _sync_short_entry_from_exchange(self, coin: CoinStrategy) -> float:
-        """Use exchange entry price for adverse % — avoids false triggers from bad fills."""
+        """Adverse reference = max(scanner fill, exchange entry).
+
+        Never deflate entry: a lower exchange mark inflates adverse % and arms L1/L2 early
+        (AIN forensic: fill +0.6% while gate thought +2%).
+        """
         short = coin.short
         if not short:
             return 0.0
-        entry = float(short.entry or 0)
+        local = float(short.entry or 0)
         if getattr(self._connector.cfg, "paper", False):
-            return entry
+            return local
         ex_leg = self._exchange_short_leg(coin.symbol)
-        if ex_leg:
-            ex_entry = float(ex_leg.get("price_open") or 0)
-            if ex_entry > 0:
-                entry = ex_entry
-                short.entry = ex_entry
+        ex_entry = float((ex_leg or {}).get("price_open") or 0) if ex_leg else 0.0
+        if local > 0 and ex_entry > 0:
+            entry = max(local, ex_entry)
+        elif ex_entry > 0:
+            entry = ex_entry
+        else:
+            entry = local
+        if entry > 0:
+            short.entry = entry
         return entry
 
     def _short_adverse_pct(self, coin: CoinStrategy) -> float:
@@ -2299,12 +2307,35 @@ class MomentumScanner:
         notional = margin_usd * leverage
         qty = notional / price
         try:
-            spec = self._connector.symbol_spec(symbol, pip_size=0.01)
-            step = float(spec.get("stepSize") or 0.001)
-            min_q = float(spec.get("minQty") or 0.001)
             from binance_connector import round_to_step
 
-            qty = max(min_q, round_to_step(qty, step))
+            # Prefer full exchange filters (incl. MARKET_LOT_SIZE) when available.
+            info = None
+            if hasattr(self._connector, "get_symbol_spec"):
+                try:
+                    info = self._connector.get_symbol_spec(symbol)
+                except Exception:
+                    info = None
+            if info:
+                step = float(info.get("marketStepSize") or info.get("stepSize") or 0.001)
+                min_q = float(info.get("marketMinQty") or info.get("minQty") or 0.001)
+                max_q = float(info.get("marketMaxQty") or info.get("maxQty") or 0.0)
+                lot_max = float(info.get("maxQty") or 0.0)
+                if lot_max > 0:
+                    max_q = min(max_q, lot_max) if max_q > 0 else lot_max
+                qty = max(min_q, round_to_step(qty, step))
+                if max_q > 0 and qty > max_q:
+                    qty = round_to_step(max_q, step)
+                    if qty > max_q:
+                        qty = max(min_q, round_to_step(max_q - step, step))
+            else:
+                spec = self._connector.symbol_spec(symbol, pip_size=0.01)
+                step = float(spec.get("step_size") or spec.get("stepSize") or 0.001)
+                min_q = float(spec.get("min_qty") or spec.get("minQty") or 0.001)
+                max_q = float(spec.get("max_qty") or spec.get("volume_max") or 0.0)
+                qty = max(min_q, round_to_step(qty, step))
+                if max_q > 0 and qty > max_q:
+                    qty = max(min_q, round_to_step(max_q, step))
         except Exception:
             qty = max(0.001, round(qty, 3))
         return qty
