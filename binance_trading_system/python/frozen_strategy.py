@@ -219,6 +219,13 @@ def assert_frozen_contract() -> dict[str, Any]:
     leg_src = inspect.getsource(bc.BinanceConnector.close_leg)
     assert "close_by_position_side" in leg_src
     assert "PARTIAL_CLOSE_EMERGENCY_HALT" in inspect.getsource(ms.MomentumScanner._close_all)
+    assert hasattr(ms.MomentumScanner, "_retry_stuck_closes")
+    assert hasattr(ms.MomentumScanner, "_mark_stuck_close")
+    assert "REFUSE_RESUME_STUCK_CLOSE" in open(ms.__file__, encoding="utf-8").read()
+    assert hasattr(bc.BinanceConnector, "_persistent_escape_4131_close")
+    assert "force_flat_4131" in inspect.getsource(bc.BinanceConnector._persistent_escape_4131_close)
+    assert "_persistent_escape_4131_close" in inspect.getsource(bc.BinanceConnector.close_position)
+    assert "_persistent_escape_4131_close" in inspect.getsource(bc.BinanceConnector.close_by_position_side)
 
     # Entry / adverse / TP / hedge pullback defaults (floors may raise short trail only).
     assert abs(ms.GAIN_THRESHOLD_PCT - GAIN_THRESHOLD_PCT) < 1e-9

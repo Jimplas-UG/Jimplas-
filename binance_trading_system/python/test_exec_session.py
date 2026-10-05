@@ -61,6 +61,8 @@ def test_emergency_stop_blocks() -> None:
     ok, reason = s._order_session_ok()
     assert ok, reason
     s.set_exec_enabled(False)
+    s._rule_halt_codes = ["NAKED_SHORT_AT_10X"]
+    s._rule_halt_ts = 1.0
     ok, reason = s._order_session_ok()
     assert not ok
     assert reason == "EMERGENCY_STOP"
@@ -70,6 +72,9 @@ def test_emergency_stop_blocks() -> None:
     s.set_exec_enabled(True)
     ok, reason = s._order_session_ok()
     assert ok, reason
+    st2 = s.status()
+    assert st2.get("rule_kernel", {}).get("halt_codes") == []
+    assert st2.get("rule_kernel", {}).get("halt_ts") in (None, 0, 0.0)
 
 
 def test_forward_dry_run_blocks() -> None:

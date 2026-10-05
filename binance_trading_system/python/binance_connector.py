@@ -31,7 +31,13 @@ DEFAULT_MAGIC = 77002002
 DEFAULT_PRICE_BAND_UP = 1.05
 DEFAULT_PRICE_BAND_DOWN = 0.95
 LIMIT_IOC_ATTEMPT_SLEEP_S = 0.06
-LIMIT_IOC_MAX_ATTEMPTS = 12
+LIMIT_IOC_MAX_ATTEMPTS = 24
+# When MARKET hits -4131 and book is outside the mark band, IOC at band edge expires
+# unfilled. Keep hammering MARKET/IOC/brief-GTC until flat or budget exhausted.
+CLOSE_FORCE_FLAT_BUDGET_S = 75.0
+CLOSE_FORCE_FLAT_SLEEP_S = 0.18
+LIMIT_GTC_WAIT_S = 0.40
+CLOSE_FORCE_FLAT_ROUNDS = 40
 
 
 def _truthy(v: str | None) -> bool:
@@ -2399,6 +2405,343 @@ class BinanceConnector:
                 }
         return {"ok": False, "error": last_err, "close_method": "limit_ioc"}
 
+    def _limit_gtc_brief_close(
+        self,
+        *,
+        symbol: str,
+        exit_side: str,
+        quantity: float,
+        hedge_side: str,
+        entry_price: float = 0.0,
+        wait_s: float = LIMIT_GTC_WAIT_S,
+    ) -> dict[str, Any]:
+        """
+        Rest a reduce LIMIT at the legal band edge briefly — when ask is above mark*up,
+        IOC at band_max expires; a short GTC can catch the next print inside the band.
+        Always cancel residual; never leave a stray working order.
+        """
+        import time as _time
+
+        sym = symbol.upper()
+        spec = self._close_price_spec(sym)
+        step = float(spec.get("stepSize") or 0.001)
+        tick = float(spec.get("tickSize") or 0.0001)
+        mult_up = _float_or_none(spec.get("multiplierUp"))
+        mult_down = _float_or_none(spec.get("multiplierDown"))
+        qty = round_to_step(float(quantity), step)
+        if qty <= 0:
+            return {"ok": False, "error": "invalid_quantity"}
+        side = exit_side.upper()
+        book = self.book_ticker(sym) or {}
+        bid = float(book.get("bid") or 0)
+        ask = float(book.get("ask") or 0)
+        mark = self.mark_price(sym)
+        _cands, band_min, band_max = build_limit_ioc_candidates(
+            exit_side=side,
+            bid=bid,
+            ask=ask,
+            mark=mark,
+            tick=tick,
+            multiplier_up=mult_up,
+            multiplier_down=mult_down,
+            mark_centered=True,
+        )
+        if side == "BUY":
+            px = _clamp_band_price(band_max * 0.999 if band_max > 0 else ask or mark, band_min=band_min, band_max=band_max, tick=tick)
+        else:
+            px = _clamp_band_price(band_min * 1.001 if band_min > 0 else bid or mark, band_min=band_min, band_max=band_max, tick=tick)
+        if px <= 0:
+            return {"ok": False, "error": "no_gtc_price"}
+        cid = f"{CLIENT_ID_PREFIX}_LG_{hedge_side}_{int(_time.time() * 1000)}"[:36]
+        params: dict[str, Any] = {
+            "symbol": sym,
+            "side": side,
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+            "quantity": qty,
+            "price": px,
+            "newClientOrderId": cid,
+        }
+        if hedge_side in ("LONG", "SHORT"):
+            params["positionSide"] = hedge_side
+        else:
+            params["reduceOnly"] = "true"
+        order_id = None
+        try:
+            resp = self._request_keepalive(
+                "POST", "/fapi/v1/order", params, signed=True, timeout=10.0, bypass_rest_cool=True
+            )
+            order_id = resp.get("orderId")
+            filled = float(resp.get("executedQty") or 0)
+            status = str(resp.get("status") or "").upper()
+            if filled > 0 and status in ("FILLED", "PARTIALLY_FILLED"):
+                fill = float(resp.get("avgPrice") or px)
+                rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
+                if abs(rpnl) < 1e-12 and entry_price > 0:
+                    pos_side = "BUY" if hedge_side == "LONG" else "SELL"
+                    rpnl = self._estimate_close_pnl(pos_side, entry_price, fill, filled or qty)
+                self.invalidate_positions_cache()
+                if status != "FILLED" and order_id:
+                    try:
+                        self._request_keepalive(
+                            "DELETE",
+                            "/fapi/v1/order",
+                            {"symbol": sym, "orderId": order_id},
+                            signed=True,
+                            timeout=8.0,
+                            bypass_rest_cool=True,
+                        )
+                    except Exception:
+                        try:
+                            self.cancel_all_orders(sym, bypass_rest_cool=True)
+                        except Exception:
+                            pass
+                return {
+                    "ok": True,
+                    "symbol": sym,
+                    "side": "BUY" if hedge_side == "LONG" else "SELL",
+                    "exit_side": side,
+                    "position_side": hedge_side,
+                    "volume": filled,
+                    "fill_price": fill,
+                    "entry_price": entry_price,
+                    "profit": rpnl,
+                    "realized_pnl": rpnl,
+                    "commission": commission,
+                    "order": order_id,
+                    "close_method": "limit_gtc_brief",
+                }
+            _time.sleep(max(0.05, float(wait_s)))
+            # Query order for late fill
+            if order_id:
+                try:
+                    q = self._request_keepalive(
+                        "GET",
+                        "/fapi/v1/order",
+                        {"symbol": sym, "orderId": order_id},
+                        signed=True,
+                        timeout=8.0,
+                        bypass_rest_cool=True,
+                    )
+                    filled = float(q.get("executedQty") or 0)
+                    status = str(q.get("status") or "").upper()
+                    if filled > 0:
+                        fill = float(q.get("avgPrice") or px)
+                        rpnl, commission = self.realized_pnl_for_order(sym, int(order_id))
+                        if abs(rpnl) < 1e-12 and entry_price > 0:
+                            pos_side = "BUY" if hedge_side == "LONG" else "SELL"
+                            rpnl = self._estimate_close_pnl(pos_side, entry_price, fill, filled)
+                        self.invalidate_positions_cache()
+                        if status != "FILLED":
+                            try:
+                                self._request_keepalive(
+                                    "DELETE",
+                                    "/fapi/v1/order",
+                                    {"symbol": sym, "orderId": order_id},
+                                    signed=True,
+                                    timeout=8.0,
+                                    bypass_rest_cool=True,
+                                )
+                            except Exception:
+                                pass
+                        return {
+                            "ok": True,
+                            "symbol": sym,
+                            "side": "BUY" if hedge_side == "LONG" else "SELL",
+                            "exit_side": side,
+                            "position_side": hedge_side,
+                            "volume": filled,
+                            "fill_price": fill,
+                            "entry_price": entry_price,
+                            "profit": rpnl,
+                            "realized_pnl": rpnl,
+                            "commission": commission,
+                            "order": order_id,
+                            "close_method": "limit_gtc_brief",
+                        }
+                except Exception as e:
+                    log.warning("limit_gtc_brief query %s: %s", sym, e)
+        except Exception as e:
+            log.warning("limit_gtc_brief %s %s px=%s: %s", sym, hedge_side, px, e)
+            return {"ok": False, "error": str(e), "close_method": "limit_gtc_brief"}
+        finally:
+            if order_id:
+                try:
+                    self._request_keepalive(
+                        "DELETE",
+                        "/fapi/v1/order",
+                        {"symbol": sym, "orderId": order_id},
+                        signed=True,
+                        timeout=8.0,
+                        bypass_rest_cool=True,
+                    )
+                except Exception:
+                    try:
+                        self.cancel_all_orders(sym, bypass_rest_cool=True)
+                    except Exception:
+                        pass
+        return {"ok": False, "error": "gtc_unfilled", "close_method": "limit_gtc_brief"}
+
+    def _persistent_escape_4131_close(
+        self,
+        *,
+        symbol: str,
+        exit_side: str,
+        quantity: float,
+        hedge_side: str,
+        entry_price: float = 0.0,
+        budget_s: float = CLOSE_FORCE_FLAT_BUDGET_S,
+    ) -> dict[str, Any]:
+        """
+        Desk-critical: never abandon a -4131 close after one IOC walk.
+
+        When last/ask is outside mark*PERCENT_PRICE, IOC at the band edge expires.
+        Keep cycling MARKET → LIMIT IOC → brief GTC until qty is gone or budget ends.
+        """
+        import time as _time
+
+        sym = symbol.upper()
+        spec = self._close_price_spec(sym)
+        step = float(spec.get("stepSize") or 0.001)
+        remaining = round_to_step(float(quantity), step)
+        if remaining <= 0:
+            return {"ok": False, "error": "invalid_quantity"}
+        side = exit_side.upper()
+        hs = hedge_side if hedge_side in ("LONG", "SHORT") else str(hedge_side or "").upper()
+        deadline = _time.time() + max(5.0, float(budget_s))
+        closed_parts: list[dict[str, Any]] = []
+        last_err = "percent_price_-4131"
+        rounds = 0
+        log.warning(
+            "force_flat_4131_start %s %s qty=%.8f budget=%.1fs",
+            sym,
+            hs,
+            remaining,
+            budget_s,
+        )
+        while remaining > 1e-12 and _time.time() < deadline and rounds < CLOSE_FORCE_FLAT_ROUNDS:
+            rounds += 1
+            # 1) MARKET again — mark may have caught the book.
+            cid = f"{CLIENT_ID_PREFIX}_FM_{hs}_{int(_time.time() * 1000)}_{rounds}"[:36]
+            params = self._market_close_params(
+                symbol=sym,
+                side=side,
+                quantity=remaining,
+                client_order_id=cid,
+                hedge_position_side=hs if hs in ("LONG", "SHORT") else None,
+                entry_side_for_reduce="SELL" if side == "BUY" else "BUY",
+            )
+            try:
+                resp = self._request_keepalive(
+                    "POST", "/fapi/v1/order", params, signed=True, timeout=8.0, bypass_rest_cool=True
+                )
+                filled = float(resp.get("executedQty") or remaining)
+                fill = float(resp.get("avgPrice") or 0) or entry_price
+                order_id = resp.get("orderId")
+                rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
+                if abs(rpnl) < 1e-12 and entry_price > 0:
+                    pos_side = "BUY" if hs == "LONG" else "SELL"
+                    rpnl = self._estimate_close_pnl(pos_side, entry_price, fill, filled)
+                part = {
+                    "ok": True,
+                    "symbol": sym,
+                    "side": "BUY" if hs == "LONG" else "SELL",
+                    "exit_side": side,
+                    "position_side": hs,
+                    "volume": filled,
+                    "fill_price": fill,
+                    "entry_price": entry_price,
+                    "profit": rpnl,
+                    "realized_pnl": rpnl,
+                    "commission": commission,
+                    "order": order_id,
+                    "close_method": "market_retry_after_4131",
+                    "force_flat_round": rounds,
+                }
+                closed_parts.append(part)
+                remaining = round_to_step(max(0.0, remaining - filled), step)
+                self.invalidate_positions_cache()
+                continue
+            except RuntimeError as e:
+                if not _is_percent_price_error(e):
+                    last_err = str(e)
+                    log.warning("force_flat_4131 market %s: %s", sym, e)
+                    _time.sleep(CLOSE_FORCE_FLAT_SLEEP_S)
+                    continue
+                last_err = str(e)
+            # 2) LIMIT IOC walk (fresh book each call)
+            lim = self._limit_ioc_close_leg(
+                symbol=sym,
+                exit_side=side,
+                quantity=remaining,
+                hedge_side=hs,
+                entry_price=entry_price,
+            )
+            if lim.get("ok"):
+                filled = float(lim.get("volume") or remaining)
+                closed_parts.append(lim)
+                remaining = round_to_step(max(0.0, remaining - filled), step)
+                continue
+            last_err = str(lim.get("error") or last_err)
+            # 3) Brief GTC at band edge
+            gtc = self._limit_gtc_brief_close(
+                symbol=sym,
+                exit_side=side,
+                quantity=remaining,
+                hedge_side=hs,
+                entry_price=entry_price,
+            )
+            if gtc.get("ok"):
+                filled = float(gtc.get("volume") or remaining)
+                closed_parts.append(gtc)
+                remaining = round_to_step(max(0.0, remaining - filled), step)
+                continue
+            last_err = str(gtc.get("error") or last_err)
+            _time.sleep(CLOSE_FORCE_FLAT_SLEEP_S)
+
+        if closed_parts and remaining <= 1e-12:
+            last = closed_parts[-1]
+            out = dict(last)
+            out["ok"] = True
+            out["volume"] = sum(float(p.get("volume") or 0) for p in closed_parts)
+            out["closed_parts"] = closed_parts
+            out["force_flat_rounds"] = rounds
+            out["close_method"] = "force_flat_4131"
+            log.info(
+                "force_flat_4131_ok %s %s rounds=%s parts=%s",
+                sym,
+                hs,
+                rounds,
+                len(closed_parts),
+            )
+            return out
+        # Merge any partial fills into a soft failure so callers still credit closed qty.
+        if closed_parts:
+            filled = sum(float(p.get("volume") or 0) for p in closed_parts)
+            last = closed_parts[-1]
+            return {
+                "ok": False,
+                "error": last_err or "force_flat_4131_incomplete",
+                "close_method": "force_flat_4131",
+                "volume": filled,
+                "closed_parts": closed_parts,
+                "remaining_qty": remaining,
+                "force_flat_rounds": rounds,
+                "symbol": sym,
+                "position_side": hs,
+                "exit_side": side,
+                "fill_price": last.get("fill_price"),
+                "entry_price": entry_price,
+                "order": last.get("order"),
+            }
+        return {
+            "ok": False,
+            "error": last_err or "force_flat_4131_failed",
+            "close_method": "force_flat_4131",
+            "remaining_qty": remaining,
+            "force_flat_rounds": rounds,
+        }
+
     def close_by_position_side(
         self,
         symbol: str,
@@ -2509,11 +2852,11 @@ class BinanceConnector:
             except RuntimeError as e:
                 if _is_percent_price_error(e):
                     log.warning(
-                        "close_by_position_side %s %s MARKET -4131 — band-clamped LIMIT IOC fallback",
+                        "close_by_position_side %s %s MARKET -4131 — force-flat escape",
                         sym,
                         ps,
                     )
-                    lim = self._limit_ioc_close_leg(
+                    lim = self._persistent_escape_4131_close(
                         symbol=sym,
                         exit_side=exit_side,
                         quantity=chunk,
@@ -2525,10 +2868,15 @@ class BinanceConnector:
                         remaining = round_to_step(max(0.0, remaining - float(lim.get("volume") or chunk)), step)
                         chunk_i += 1
                         continue
+                    # Credit any partial fills from the force-flat walk before failing.
+                    part_vol = float(lim.get("volume") or 0)
+                    if part_vol > 1e-12:
+                        closed_legs.append(lim)
+                        remaining = round_to_step(max(0.0, remaining - part_vol), step)
                     return {
                         "ok": False,
                         "error": lim.get("error") or str(e),
-                        "close_method": "limit_ioc",
+                        "close_method": lim.get("close_method") or "force_flat_4131",
                         "closed": closed_legs,
                     }
                 msg = str(e)
@@ -2816,11 +3164,11 @@ class BinanceConnector:
                 except RuntimeError as e:
                     if _is_percent_price_error(e):
                         log.warning(
-                            "close_position %s %s MARKET -4131 — band-clamped LIMIT IOC fallback",
+                            "close_position %s %s MARKET -4131 — force-flat escape",
                             sym,
                             side_tag,
                         )
-                        lim = self._limit_ioc_close_leg(
+                        lim = self._persistent_escape_4131_close(
                             symbol=sym,
                             exit_side=exit_side,
                             quantity=chunk,
@@ -2832,6 +3180,10 @@ class BinanceConnector:
                             remaining = round_to_step(max(0.0, remaining - float(lim.get("volume") or chunk)), step)
                             chunk_i += 1
                             continue
+                        part_vol = float(lim.get("volume") or 0)
+                        if part_vol > 1e-12:
+                            closed.append(lim)
+                            remaining = round_to_step(max(0.0, remaining - part_vol), step)
                         errors.append({"position_side": side_tag, "error": lim.get("error") or str(e)})
                         return
                     msg = str(e)

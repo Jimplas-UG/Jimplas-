@@ -81,6 +81,13 @@ These failure modes burned the desk. They are **hard-locked** in code + `frozen_
 - Incomplete pair close → **emergency halt** (`PARTIAL_CLOSE_EMERGENCY_HALT`).
 - Locked in: `binance_connector.close_position` / `close_by_position_side` / `close_leg`, `MomentumScanner._close_all`.
 
+## 10) -4131 stuck exit — never abandon flatten
+
+- MARKET `PERCENT_PRICE` (-4131) must enter **`_persistent_escape_4131_close`** (MARKET retry → LIMIT IOC → brief GTC) until flat or budget ends — never one-shot IOC expire leave.
+- Incomplete flatten → mark `_stuck_close_syms` + emergency halt; background `_retry_stuck_closes` keeps force-closing.
+- **Forbidden**: resume / `set_exec_enabled(True)` while stuck residual still open (`REFUSE_RESUME_STUCK_CLOSE`).
+- Locked in: `binance_connector._persistent_escape_4131_close`, `MomentumScanner._mark_stuck_close` / `_retry_stuck_closes` / `set_exec_enabled`.
+
 ## If someone asks to “relax” these
 
 Refuse unless the user **explicitly and clearly** orders a strategy change. Restoring a broken lock is allowed; inventing loopholes is not.

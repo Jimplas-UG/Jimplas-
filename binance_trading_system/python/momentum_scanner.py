@@ -259,6 +259,9 @@ class MomentumScanner:
         self._rule_halt_ts: float = 0.0
         self._rule_watch_lev_ms: dict[str, int] = {}
         self._rule_watch_lev: dict[str, int] = {}
+        # Symbols that failed to flatten (e.g. -4131). New entries stay blocked until flat.
+        self._stuck_close_syms: dict[str, dict[str, Any]] = {}
+        self._stuck_close_retry_ms: dict[str, int] = {}
 
     @property
     def engine(self) -> ExecutionEngine:
@@ -1169,10 +1172,32 @@ class MomentumScanner:
 
     def set_exec_enabled(self, enabled: bool) -> None:
         """App emergency stop / resume — blocks new entries; closes still allowed."""
+        if enabled:
+            # Never re-arm while a flatten is incomplete — desk cannot trade into residual risk.
+            live_stuck = self._refresh_stuck_close_syms()
+            if live_stuck:
+                self._user_exec_halted = True
+                self.invalidate_session_cache()
+                self._persist_risk_config()
+                log.critical(
+                    "REFUSE_RESUME_STUCK_CLOSE symbols=%s — flatten first",
+                    ",".join(sorted(live_stuck)),
+                )
+                return
         halted = not enabled
         if self._user_exec_halted == halted:
+            # Resume path still clears stale kernel halt telemetry even if already armed.
+            if enabled and self._rule_halt_codes:
+                self._rule_halt_codes = []
+                self._rule_halt_ts = 0.0
+                self.invalidate_session_cache()
+                log.info("scanner cleared stale rule_halt_codes while already armed")
             return
         self._user_exec_halted = halted
+        if enabled:
+            # Manual resume / re-arm — drop last emergency codes so status is not sticky.
+            self._rule_halt_codes = []
+            self._rule_halt_ts = 0.0
         self.invalidate_session_cache()
         self._persist_risk_config()
         can_exec, block = self._order_session_ok()
@@ -1183,6 +1208,68 @@ class MomentumScanner:
             can_exec,
             block or "none",
         )
+
+    def _mark_stuck_close(self, symbol: str, reason: str, remaining: Any = None) -> None:
+        sym = symbol.upper()
+        self._stuck_close_syms[sym] = {
+            "reason": str(reason or "close_incomplete")[:120],
+            "remaining": remaining,
+            "ts": time.time(),
+        }
+        self._clear_close_backoff(sym)  # force-flat must not wait on backoff
+
+    def _refresh_stuck_close_syms(self) -> list[str]:
+        """Drop stuck markers that are already flat; return still-open stuck symbols."""
+        still: list[str] = []
+        for sym in list(self._stuck_close_syms.keys()):
+            try:
+                left = [
+                    p
+                    for p in (self._connector.positions(sym, force=True) or [])
+                    if float(p.get("volume") or 0) > 1e-12
+                ]
+            except Exception:
+                left = [{"symbol": sym}]  # fail closed — keep stuck
+            if left:
+                still.append(sym)
+            else:
+                self._stuck_close_syms.pop(sym, None)
+                self._stuck_close_retry_ms.pop(sym, None)
+                log.info("stuck_close cleared %s — exchange flat", sym)
+        return still
+
+    def _retry_stuck_closes(self) -> None:
+        """While halted on incomplete flatten, keep calling force close until flat."""
+        stuck = self._refresh_stuck_close_syms()
+        if not stuck:
+            return
+        now_ms = int(time.time() * 1000)
+        for sym in stuck:
+            last = int(self._stuck_close_retry_ms.get(sym) or 0)
+            if now_ms - last < 2500:
+                continue
+            self._stuck_close_retry_ms[sym] = now_ms
+            coin = self._coins.get(sym)
+            if coin is None:
+                # Still flatten exchange residual even without scanner coin.
+                try:
+                    r = self._connector.close_position(sym, None)
+                    log.warning(
+                        "stuck_close_retry bare %s ok=%s err=%s rem=%s",
+                        sym,
+                        r.get("ok"),
+                        r.get("error"),
+                        r.get("remaining"),
+                    )
+                    if self._close_succeeded(r, sym):
+                        self._stuck_close_syms.pop(sym, None)
+                except Exception as e:
+                    log.warning("stuck_close_retry bare %s: %s", sym, e)
+                continue
+            meta = self._stuck_close_syms.get(sym) or {}
+            reason = f"STUCK_CLOSE_RETRY_{(meta.get('reason') or 'CLOSE')}"[:40]
+            log.warning("stuck_close_retry %s reason=%s", sym, reason)
+            self._close_all(coin, reason, force=True)
 
     def invalidate_session_cache(self) -> None:
         self._session_ok_cache = None
@@ -1783,6 +1870,11 @@ class MomentumScanner:
             return self._reconcile_from_exchange_locked()
 
     def _reconcile_from_exchange_locked(self) -> dict[str, Any]:
+        # Desk-critical: unfinished -4131/partial closes must keep force-flattening.
+        try:
+            self._retry_stuck_closes()
+        except Exception as e:
+            log.warning("stuck_close_retry: %s", e)
         positions = self._exchange_positions()
         open_syms = {
             str(p.get("symbol") or "").upper()
@@ -2070,6 +2162,7 @@ class MomentumScanner:
                 "halt_codes": list(self._rule_halt_codes),
                 "halt_ts": self._rule_halt_ts or None,
             },
+            "stuck_close_symbols": sorted(self._stuck_close_syms.keys()),
             "exec_env_controlled": env_blocked,
             "api_auth": getattr(self._connector, "api_auth_status", lambda: {})(),
             "last_exec_error": self._last_exec_error,
@@ -3219,6 +3312,8 @@ class MomentumScanner:
                     close_result = {"ok": True, "closed": [], "broker": "binance", "note": "already_flat"}
             if self._close_succeeded(close_result, sym):
                 self._clear_close_backoff(sym)
+                self._stuck_close_syms.pop(sym, None)
+                self._stuck_close_retry_ms.pop(sym, None)
                 self._reset_coin_state(coin)
                 self._arm_entry_cooldown(sym, reason or "scanner_close")
                 self._connector.invalidate_positions_cache()
@@ -3251,6 +3346,7 @@ class MomentumScanner:
                 # Partial flatten of a hedged pair is a hard desk failure — stop new entries.
                 rem = close_result.get("remaining") or []
                 if rem and not self._user_exec_halted:
+                    self._mark_stuck_close(sym, reason, rem)
                     self.set_exec_enabled(False)
                     log.critical(
                         "PARTIAL_CLOSE_EMERGENCY_HALT %s reason=%s remaining=%s",
@@ -3258,6 +3354,8 @@ class MomentumScanner:
                         reason,
                         rem,
                     )
+                elif rem:
+                    self._mark_stuck_close(sym, reason, rem)
             return close_result
         finally:
             pair_gate.end_close(sym)

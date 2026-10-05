@@ -180,7 +180,80 @@ def test_close_chunks_market_max_and_longs_first() -> None:
     assert "max_cell" in side or "marketMaxQty" in side
     leg = inspect.getsource(BinanceConnector.close_leg)
     assert "close_by_position_side" in leg
+    assert "_persistent_escape_4131_close" in src
+    assert "_persistent_escape_4131_close" in side
     print("OK close_position chunks MARKET max, aborts SHORT if LONG residual, side/leg chunked")
+
+
+def test_force_flat_4131_retries_until_fill() -> None:
+    """MARKET -4131 must not give up after one expired IOC walk."""
+    from binance_connector import BinanceConnector
+
+    c = BinanceConnector()
+    c.cfg.api_key = "k"
+    c.cfg.api_secret = "s"
+    c.cfg.paper = False
+    calls = {"market": 0, "ioc": 0}
+
+    def fake_market(**kwargs):
+        return {
+            "symbol": kwargs["symbol"],
+            "side": kwargs["side"],
+            "type": "MARKET",
+            "quantity": kwargs["quantity"],
+            "newClientOrderId": kwargs["client_order_id"],
+            "positionSide": kwargs.get("hedge_position_side") or "SHORT",
+        }
+
+    c._market_close_params = fake_market  # type: ignore
+
+    def fake_req(method, path, params=None, signed=False, timeout=10.0, bypass_rest_cool=False):
+        if method == "POST" and (params or {}).get("type") == "MARKET":
+            calls["market"] += 1
+            if calls["market"] < 3:
+                raise RuntimeError("PERCENT_PRICE filter limit (code=-4131, http=400)")
+            return {"orderId": 99, "avgPrice": "2.0", "executedQty": str(params.get("quantity") or 1)}
+        raise RuntimeError(f"unexpected {method} {path} {params}")
+
+    c._request_keepalive = fake_req  # type: ignore
+    c._limit_ioc_close_leg = lambda **_k: {"ok": False, "error": "ioc_unfilled status=EXPIRED"}  # type: ignore
+    c._limit_gtc_brief_close = lambda **_k: {"ok": False, "error": "gtc_unfilled"}  # type: ignore
+    c.realized_pnl_for_order = lambda *_a, **_k: (0.0, 0.0)  # type: ignore
+    c.invalidate_positions_cache = lambda: None  # type: ignore
+    c._estimate_close_pnl = lambda *_a, **_k: 0.0  # type: ignore
+
+    # Shrink budget for unit test speed via rounds / sleep constants already small for market path.
+    r = c._persistent_escape_4131_close(
+        symbol="ORCAUSDT",
+        exit_side="BUY",
+        quantity=10.0,
+        hedge_side="SHORT",
+        entry_price=2.0,
+        budget_s=5.0,
+    )
+    assert r.get("ok"), r
+    assert calls["market"] >= 3
+    assert r.get("close_method") == "force_flat_4131"
+    print("OK force_flat_4131 keeps retrying MARKET until fill")
+
+
+def test_refuse_resume_while_stuck_close() -> None:
+    from binance_connector import BinanceConnector, BinanceConfig
+    from momentum_scanner import MomentumScanner
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._connected = True
+    c.mark_signed_ready(reason="test")
+    s = MomentumScanner(connector=c, get_testnet=lambda: True)
+    s._user_exec_halted = True
+    s._stuck_close_syms["ORCAUSDT"] = {"reason": "SHORT_TP", "ts": 1.0}
+    s._connector.positions = lambda symbol=None, force=False, **_k: [  # type: ignore
+        {"symbol": "ORCAUSDT", "positionSide": "SHORT", "volume": 1.0, "type": "SELL"}
+    ]
+    s.set_exec_enabled(True)
+    assert s._user_exec_halted is True
+    assert "ORCAUSDT" in s._stuck_close_syms
+    print("OK refuse resume while stuck close residual remains")
 
 
 if __name__ == "__main__":
@@ -195,6 +268,8 @@ if __name__ == "__main__":
     test_market_max_qty_clamped()
     test_short_entry_sync_never_deflates()
     test_close_chunks_market_max_and_longs_first()
+    test_force_flat_4131_retries_until_fill()
+    test_refuse_resume_while_stuck_close()
     from frozen_strategy import assert_frozen_contract
 
     assert_frozen_contract()
