@@ -235,6 +235,15 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "apply_symbol_positions_snapshot" in inspect.getsource(bc.BinanceConnector.close_by_position_side)
     assert "apply_all_positions_snapshot" in inspect.getsource(bc.BinanceConnector.close_all_positions)
     assert "apply_symbol_positions_snapshot" in inspect.getsource(ms.MomentumScanner._close_all)
+    # Unverified ACK must query order / position delta — never invent chunk fills.
+    assert hasattr(bc.BinanceConnector, "_resolve_executed_qty")
+    assert hasattr(bc.BinanceConnector, "query_order")
+    assert "_resolve_executed_qty" in inspect.getsource(bc.BinanceConnector.close_position)
+    assert "_resolve_executed_qty" in inspect.getsource(bc.BinanceConnector.close_by_position_side)
+    assert "CLOSE_INCOMPLETE" in open(ms.__file__, encoding="utf-8").read()
+    # Exchange flat wins over soft ACK failure.
+    succ_src = inspect.getsource(ms.MomentumScanner._close_succeeded)
+    assert "Flat on exchange" in succ_src or "exchange" in succ_src.lower()
 
     # Entry / adverse / TP / hedge pullback defaults (floors may raise short trail only).
     assert abs(ms.GAIN_THRESHOLD_PCT - GAIN_THRESHOLD_PCT) < 1e-9

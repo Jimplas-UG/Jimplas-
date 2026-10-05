@@ -172,6 +172,131 @@ def test_force_flat_4131_and_chunk_markers() -> None:
     )
 
 
+def test_resolve_fill_via_query_not_invent() -> None:
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=True))
+    # ACK has no qty — inventing chunk size is forbidden; query returns fill.
+    c.query_order = lambda symbol, order_id: {  # type: ignore
+        "orderId": order_id,
+        "executedQty": "12.5",
+        "avgPrice": "1.5",
+        "status": "FILLED",
+    }
+    qty, px, src = c._resolve_executed_qty(
+        {"orderId": 99, "executedQty": "0", "avgPrice": "0"},
+        symbol="MOVRUSDT",
+        order_id=99,
+    )
+    ok = qty == 12.5 and abs(px - 1.5) < 1e-9 and src == "query"
+    _row(
+        "RESOLVE_FILL_VIA_QUERY",
+        "ACK empty -> GET order fill; never invent",
+        f"qty={qty} px={px} src={src}",
+        ok,
+    )
+
+
+def test_resolve_fill_unverified_no_invent() -> None:
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=True))
+    c.query_order = lambda symbol, order_id: None  # type: ignore
+    qty, px, src = c._resolve_executed_qty(
+        {"orderId": 1},
+        symbol="PORTALUSDT",
+        order_id=1,
+        pre_pos_qty=None,
+    )
+    ok = qty == 0.0 and src == "unverified"
+    _row(
+        "RESOLVE_FILL_UNVERIFIED",
+        "no ACK/query/delta -> qty=0 unverified",
+        f"qty={qty} src={src}",
+        ok,
+    )
+
+
+def test_close_succeeded_exchange_flat_wins() -> None:
+    from momentum_scanner import MomentumScanner
+
+    sc = MomentumScanner.__new__(MomentumScanner)
+    sc._connector = SimpleNamespace(
+        cfg=SimpleNamespace(paper=False),
+        positions=lambda symbol, force=True: [],
+    )
+    # Soft failure ACK but exchange already flat → success
+    ok = sc._close_succeeded({"ok": False, "error": "ack_missing_executedQty"}, "MOVRUSDT")
+    # Residual still open → fail even if ok=True
+    sc._connector.positions = lambda symbol, force=True: [{"volume": 10, "positionSide": "SHORT"}]
+    bad = sc._close_succeeded({"ok": True, "closed": [{}]}, "MOVRUSDT")
+    _row(
+        "CLOSE_SUCCESS_EXCHANGE_WINS",
+        "flat+soft_fail=True; residual+ok=False",
+        f"flat_soft={ok} residual_ok={bad}",
+        ok is True and bad is False,
+    )
+
+
+def test_incomplete_close_always_safe_mode() -> None:
+    from momentum_scanner import MomentumScanner
+    from pair_isolation import pair_gate as pg
+
+    sc = MomentumScanner.__new__(MomentumScanner)
+    sc._coins = {}
+    sc._user_exec_halted = False
+    sc._rule_halt_codes = []
+    sc._rule_halt_ts = 0.0
+    sc._stuck_close_syms = {}
+    sc._stuck_close_retry_ms = {}
+    sc._close_backoff = {}
+    sc._last_exec_error = None
+    sc._one_at_a_time = False
+    sc._on_snapshot = None
+    calls: list[str] = []
+
+    def _enter(reason: str, *, codes=None):
+        calls.append(reason)
+        sc._user_exec_halted = True
+        sc._rule_halt_codes = list(codes or [])
+
+    sc._enter_safe_mode = _enter  # type: ignore
+    sc._mark_stuck_close = lambda sym, reason, remaining=None: sc._stuck_close_syms.__setitem__(  # type: ignore
+        sym.upper(), {"reason": reason, "remaining": remaining}
+    )
+    sc._note_close_failure = lambda *a, **k: None  # type: ignore
+    sc._close_backoff_active = lambda sym: False  # type: ignore
+    sc._close_succeeded = lambda r, symbol=None: False  # type: ignore
+    sc._connector = SimpleNamespace(
+        cfg=SimpleNamespace(paper=False),
+        positions=lambda symbol, force=True, bypass_rest_cool=False: [
+            {"positionSide": "SHORT", "volume": 5.0, "type": "SELL"}
+        ],
+        close_position=lambda symbol, side: {"ok": False, "error": "ack_missing_executedQty", "closed": []},
+    )
+    coin = SimpleNamespace(symbol="MOVRUSDT", short=object(), long1=None, long2=None)
+    real_begin, real_end, real_rec = pg.begin_close, pg.end_close, pg.record_order
+    pg.begin_close = lambda *a, **k: None  # type: ignore
+    pg.end_close = lambda *a, **k: None  # type: ignore
+    pg.record_order = lambda **k: None  # type: ignore
+    try:
+        r = MomentumScanner._close_all(sc, coin, "RESCUE", force=True)
+    finally:
+        pg.begin_close, pg.end_close, pg.record_order = real_begin, real_end, real_rec
+    ok = (
+        r.get("ok") is False
+        and "CLOSE_INCOMPLETE" in calls
+        and "MOVRUSDT" in sc._stuck_close_syms
+        and bool(r.get("remaining"))
+    )
+    _row(
+        "INCOMPLETE_CLOSE_SAFE_MODE",
+        "ack_missing without remaining[] still SAFE_MODE+stuck",
+        f"ok={r.get('ok')} calls={calls} stuck={list(sc._stuck_close_syms)} rem={r.get('remaining')}",
+        ok,
+    )
+
+
 def _close_cache_status(ok: bool, result: dict) -> str:
     """Mirror main._close_op_finish status rules (no FastAPI import required)."""
     st = str(result.get("status") or "")
@@ -231,5 +356,9 @@ if __name__ == "__main__":
     test_stuck_close_blocks_session()
     test_oversize_blocks_l1()
     test_force_flat_4131_and_chunk_markers()
+    test_resolve_fill_via_query_not_invent()
+    test_resolve_fill_unverified_no_invent()
+    test_close_succeeded_exchange_flat_wins()
+    test_incomplete_close_always_safe_mode()
     test_pending_verify_not_cached_as_closed()
     print("test_execution_discipline: ALL OK")

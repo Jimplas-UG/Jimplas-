@@ -2094,6 +2094,112 @@ class BinanceConnector:
             log.warning("query_order_by_client_id %s %s: %s", symbol, client_order_id, e)
             return None
 
+    def query_order(self, symbol: str, order_id: int | str) -> dict[str, Any] | None:
+        """GET /fapi/v1/order by orderId — verify fill when POST ACK omits executedQty."""
+        if self.cfg.paper or not self.cfg.api_key or order_id in (None, "", 0, "0"):
+            return None
+        try:
+            # Prefer keepalive+bypass so close cool cannot block fill verification.
+            if hasattr(self, "_request_keepalive"):
+                try:
+                    return self._request_keepalive(
+                        "GET",
+                        "/fapi/v1/order",
+                        {"symbol": symbol.upper(), "orderId": int(order_id)},
+                        signed=True,
+                        timeout=5.0,
+                        bypass_rest_cool=True,
+                    )
+                except TypeError:
+                    pass
+            return self._request(
+                "GET",
+                "/fapi/v1/order",
+                {"symbol": symbol.upper(), "orderId": int(order_id)},
+                signed=True,
+                timeout=5.0,
+            )
+        except Exception as e:
+            log.warning("query_order %s orderId=%s: %s", symbol, order_id, e)
+            return None
+
+    def _resolve_executed_qty(
+        self,
+        resp: dict[str, Any] | None,
+        *,
+        symbol: str,
+        order_id: Any = None,
+        pre_pos_qty: float | None = None,
+        position_side: str | None = None,
+    ) -> tuple[float, float, str]:
+        """Resolve actual fill without inventing from requested chunk size.
+
+        Returns (filled_qty, avg_price, source) where source is
+        ack | query | position_delta | unverified.
+        """
+        sym = symbol.upper()
+        resp = resp or {}
+        oid = order_id if order_id not in (None, "", 0, "0") else resp.get("orderId")
+
+        def _qty_px(src: dict[str, Any]) -> tuple[float, float]:
+            try:
+                q = float(src.get("executedQty") or 0)
+            except (TypeError, ValueError):
+                q = 0.0
+            try:
+                px = float(src.get("avgPrice") or 0)
+            except (TypeError, ValueError):
+                px = 0.0
+            return q, px
+
+        qty, px = _qty_px(resp)
+        if qty > 1e-12:
+            return qty, px, "ack"
+
+        if oid is not None:
+            q = self.query_order(sym, oid)
+            if q:
+                qty, px = _qty_px(q)
+                if qty > 1e-12:
+                    log.info(
+                        "resolve_fill %s orderId=%s via GET executedQty=%.8f (ACK missing)",
+                        sym,
+                        oid,
+                        qty,
+                    )
+                    return qty, px, "query"
+
+        # Last resort: position shrunk — only when we knew the pre-qty.
+        if pre_pos_qty is not None and pre_pos_qty > 1e-12:
+            try:
+                self.invalidate_positions_cache()
+                live = self.positions(sym, force=True, bypass_rest_cool=True) or []
+            except Exception as e:
+                log.warning("resolve_fill position delta %s: %s", sym, e)
+                live = []
+            ps = str(position_side or "").upper()
+            post = 0.0
+            for p in live:
+                side = str(p.get("positionSide") or "").upper()
+                typ = str(p.get("type") or "").upper()
+                if ps == "LONG" and (side == "LONG" or typ == "BUY"):
+                    post += float(p.get("volume") or 0)
+                elif ps == "SHORT" and (side == "SHORT" or (typ == "SELL" and side != "LONG")):
+                    post += float(p.get("volume") or 0)
+                elif not ps:
+                    post += float(p.get("volume") or 0)
+            delta = round(max(0.0, float(pre_pos_qty) - post), 12)
+            if delta > 1e-12:
+                log.info(
+                    "resolve_fill %s via position_delta pre=%.8f post=%.8f filled=%.8f",
+                    sym,
+                    pre_pos_qty,
+                    post,
+                    delta,
+                )
+                return delta, px, "position_delta"
+        return 0.0, 0.0, "unverified"
+
     def _liquidation_safe(self, side: str, entry: float, sl: float | None) -> tuple[bool, str]:
         if sl is None:
             return True, ""
@@ -2414,16 +2520,29 @@ class BinanceConnector:
                     continue
                 filled = float(resp.get("executedQty") or 0)
                 status = str(resp.get("status") or "").upper()
-                if filled <= 0 and status not in ("FILLED", "PARTIALLY_FILLED"):
-                    last_err = f"ioc_unfilled status={status}"
-                    _time.sleep(LIMIT_IOC_ATTEMPT_SLEEP_S)
-                    continue
+                if filled <= 0:
+                    filled, ack_px, fill_src = self._resolve_executed_qty(
+                        resp,
+                        symbol=sym,
+                        order_id=resp.get("orderId"),
+                    )
+                    if filled > 0 and ack_px > 0:
+                        resp = dict(resp)
+                        resp["avgPrice"] = ack_px
+                    if filled <= 0 and status not in ("FILLED", "PARTIALLY_FILLED"):
+                        last_err = f"ioc_unfilled status={status}"
+                        _time.sleep(LIMIT_IOC_ATTEMPT_SLEEP_S)
+                        continue
+                    if filled <= 0:
+                        last_err = f"ioc_unverified status={status}"
+                        _time.sleep(LIMIT_IOC_ATTEMPT_SLEEP_S)
+                        continue
                 fill = float(resp.get("avgPrice") or px)
                 order_id = resp.get("orderId")
                 rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
                 if abs(rpnl) < 1e-12 and entry_price > 0:
                     pos_side = "BUY" if hedge_side == "LONG" else "SELL"
-                    rpnl = self._estimate_close_pnl(pos_side, entry_price, fill, filled or qty)
+                    rpnl = self._estimate_close_pnl(pos_side, entry_price, fill, filled)
                 self.invalidate_positions_cache()
                 return {
                     "ok": True,
@@ -2431,7 +2550,7 @@ class BinanceConnector:
                     "side": "BUY" if hedge_side == "LONG" else "SELL",
                     "exit_side": side,
                     "position_side": hedge_side,
-                    "volume": filled or qty,
+                    "volume": filled,
                     "fill_price": fill,
                     "entry_price": entry_price,
                     "profit": rpnl,
@@ -2675,13 +2794,25 @@ class BinanceConnector:
                 )
                 filled = float(resp.get("executedQty") or 0)
                 if filled <= 1e-12:
-                    log.warning(
-                        "force_flat_4131 %s ACK missing executedQty orderId=%s — treat as unfilled",
-                        sym,
-                        resp.get("orderId"),
+                    filled, ack_px, src = self._resolve_executed_qty(
+                        resp,
+                        symbol=sym,
+                        order_id=resp.get("orderId"),
+                        pre_pos_qty=remaining,
+                        position_side=hs if hs in ("LONG", "SHORT") else None,
                     )
-                    last_err = "ack_missing_executedQty"
-                    continue
+                    if filled <= 1e-12:
+                        log.warning(
+                            "force_flat_4131 %s ACK/query missing executedQty orderId=%s — treat as unfilled",
+                            sym,
+                            resp.get("orderId"),
+                        )
+                        last_err = "ack_missing_executedQty"
+                        continue
+                    if ack_px > 0:
+                        resp = dict(resp)
+                        resp["avgPrice"] = ack_px
+                    log.info("force_flat_4131 %s fill resolved via %s qty=%.8f", sym, src, filled)
                 fill = float(resp.get("avgPrice") or 0) or entry_price
                 order_id = resp.get("orderId")
                 rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
@@ -2944,18 +3075,53 @@ class BinanceConnector:
             fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
             if fill <= 0:
                 fill = float(p.get("price_open") or 0)
-            try:
-                filled_qty = float(resp.get("executedQty") or 0)
-            except (TypeError, ValueError):
-                filled_qty = 0.0
+            filled_qty, ack_px, fill_src = self._resolve_executed_qty(
+                resp,
+                symbol=sym,
+                order_id=order_id,
+                pre_pos_qty=remaining,
+                position_side=ps,
+            )
             if filled_qty <= 1e-12:
                 log.warning(
-                    "close_by_position_side %s %s ACK missing executedQty orderId=%s — not inventing chunk fill",
+                    "close_by_position_side %s %s ACK/query missing executedQty orderId=%s — not inventing chunk fill",
                     sym,
                     ps,
                     order_id,
                 )
-                return {"ok": False, "error": "ack_missing_executedQty", "closed": closed_legs}
+                # Attach live residual so callers always SAFE_MODE / stuck-retry.
+                try:
+                    leftover_now = [
+                        x
+                        for x in (self.positions(sym, force=True, bypass_rest_cool=True) or [])
+                        if float(x.get("volume") or 0) > 1e-12
+                    ]
+                except Exception:
+                    leftover_now = [{"symbol": sym, "positionSide": ps, "volume": remaining}]
+                return {
+                    "ok": False,
+                    "error": "ack_missing_executedQty",
+                    "closed": closed_legs,
+                    "remaining": [
+                        {
+                            "position_side": x.get("positionSide"),
+                            "type": x.get("type"),
+                            "volume": x.get("volume"),
+                        }
+                        for x in leftover_now
+                    ]
+                    or [{"position_side": ps, "volume": remaining}],
+                }
+            if ack_px > 0 and fill <= 0:
+                fill = self._sanitize_fill_price(sym, exit_side, ack_px, entry) or fill
+            if fill_src != "ack":
+                log.info(
+                    "close_by_position_side %s %s fill resolved via %s qty=%.8f",
+                    sym,
+                    ps,
+                    fill_src,
+                    filled_qty,
+                )
             rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
             quote_qty = fill * filled_qty
             if abs(rpnl) < 1e-12:
@@ -3270,20 +3436,33 @@ class BinanceConnector:
                 fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
                 if fill <= 0:
                     fill = float(p.get("price_open") or 0)
-                # Never invent a fill from chunk size — ACK without qty is unverified.
-                try:
-                    filled_qty = float(resp.get("executedQty") or 0)
-                except (TypeError, ValueError):
-                    filled_qty = 0.0
+                # Never invent a fill from chunk size — ACK without qty must be queried.
+                filled_qty, ack_px, fill_src = self._resolve_executed_qty(
+                    resp,
+                    symbol=sym,
+                    order_id=order_id,
+                    pre_pos_qty=remaining,
+                    position_side=side_tag,
+                )
                 if filled_qty <= 1e-12:
                     log.warning(
-                        "close_position %s %s ACK missing executedQty orderId=%s — abort chunk credit",
+                        "close_position %s %s ACK/query missing executedQty orderId=%s — abort chunk credit",
                         sym,
                         side_tag,
                         order_id,
                     )
                     errors.append({"position_side": side_tag, "error": "ack_missing_executedQty"})
                     return
+                if ack_px > 0 and fill <= 0:
+                    fill = self._sanitize_fill_price(sym, exit_side, ack_px, entry) or fill
+                if fill_src != "ack":
+                    log.info(
+                        "close_position %s %s fill resolved via %s qty=%.8f",
+                        sym,
+                        side_tag,
+                        fill_src,
+                        filled_qty,
+                    )
                 rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
                 quote_qty = fill * filled_qty
                 if abs(rpnl) < 1e-12:

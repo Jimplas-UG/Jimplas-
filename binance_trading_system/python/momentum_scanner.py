@@ -3230,14 +3230,16 @@ class MomentumScanner:
                     rem = [{"symbol": sym, "error": "position_query_failed"}]
                 if rem:
                     self._mark_stuck_close(sym, f"LEG_{leg_name}_{reason or 'close_fail'}", rem)
-                    if not self._user_exec_halted:
-                        self.set_exec_enabled(False)
-                        log.critical(
-                            "PARTIAL_CLOSE_EMERGENCY_HALT %s solo_leg=%s remaining=%s",
-                            sym,
-                            leg_name,
-                            rem,
-                        )
+                    self._enter_safe_mode(
+                        "CLOSE_INCOMPLETE",
+                        codes=["CLOSE_INCOMPLETE", sym, f"LEG_{leg_name}", str(r.get("error") or "")[:60]],
+                    )
+                    log.critical(
+                        "PARTIAL_CLOSE_EMERGENCY_HALT %s solo_leg=%s remaining=%s",
+                        sym,
+                        leg_name,
+                        rem,
+                    )
                 return
             # Live only: verify expected residual before clearing scanner state.
             if not getattr(self._connector.cfg, "paper", False):
@@ -3357,11 +3359,13 @@ class MomentumScanner:
                 self._try_open_long2(coin)
 
     def _close_succeeded(self, close_result: dict[str, Any], symbol: str | None = None) -> bool:
-        """Only treat flatten as success when exchange is actually flat (or already_flat)."""
+        """Only treat flatten as success when exchange is actually flat (or already_flat).
+
+        Exchange state wins: if the book is flat after an unverified ACK / soft failure,
+        treat as success. Never invent CLOSED while residual qty remains.
+        """
         if close_result.get("note") == "already_flat":
             return True
-        if not close_result.get("ok"):
-            return False
         if close_result.get("error") == "partial_close_remaining_legs":
             return False
         if close_result.get("remaining"):
@@ -3376,10 +3380,12 @@ class MomentumScanner:
                 ]
                 if left:
                     return False
+                # Flat on exchange — success even if ACK was incomplete / ok=False.
+                return True
             except Exception as e:
                 log.warning("close success verify %s: %s", sym, e)
                 return False
-        return True
+        return bool(close_result.get("ok"))
 
     def _close_all(self, coin: CoinStrategy, reason: str, *, force: bool = False) -> dict[str, Any]:
         sym = coin.symbol
@@ -3428,6 +3434,7 @@ class MomentumScanner:
                 except Exception:
                     self._connector.invalidate_positions_cache()
                 latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+                close_result["ok"] = True
                 close_result["latency_ms"] = float(close_result.get("latency_ms") or latency_ms)
                 pair_gate.record_order(
                     symbol=sym,
@@ -3441,7 +3448,7 @@ class MomentumScanner:
                 if self._one_at_a_time:
                     self._maybe_execute_best_pending()
             else:
-                # Keep scanner state — live legs still open (e.g. -4131 partial).
+                # Keep scanner state — live legs still open (e.g. -4131 / ack_missing).
                 self._note_close_failure(sym, str(close_result.get("error") or reason))
                 self._last_exec_error = f"{sym}: {close_result.get('error') or 'close_incomplete'}"
                 log.warning(
@@ -3453,19 +3460,36 @@ class MomentumScanner:
                 )
                 close_result["ok"] = False
                 close_result["error"] = close_result.get("error") or "close_incomplete"
-                # Partial flatten of a hedged pair is a hard desk failure — stop new entries.
+                # Always reconcile residual from exchange — never skip SAFE_MODE because
+                # the connector omitted a remaining[] field (ack_missing early return).
                 rem = close_result.get("remaining") or []
-                if rem and not self._user_exec_halted:
+                if not rem and not getattr(self._connector.cfg, "paper", False):
+                    try:
+                        rem = [
+                            {
+                                "position_side": p.get("positionSide"),
+                                "type": p.get("type"),
+                                "volume": p.get("volume"),
+                            }
+                            for p in (self._connector.positions(sym, force=True, bypass_rest_cool=True) or [])
+                            if float(p.get("volume") or 0) > 1e-12
+                        ]
+                    except Exception:
+                        rem = [{"symbol": sym, "error": "position_query_failed"}]
+                    close_result["remaining"] = rem
+                if rem:
                     self._mark_stuck_close(sym, reason, rem)
-                    self.set_exec_enabled(False)
+                    err = str(close_result.get("error") or "CLOSE_INCOMPLETE")
+                    self._enter_safe_mode(
+                        "CLOSE_INCOMPLETE",
+                        codes=["CLOSE_INCOMPLETE", sym, err[:80]],
+                    )
                     log.critical(
                         "PARTIAL_CLOSE_EMERGENCY_HALT %s reason=%s remaining=%s",
                         sym,
                         reason,
                         rem,
                     )
-                elif rem:
-                    self._mark_stuck_close(sym, reason, rem)
             return close_result
         finally:
             pair_gate.end_close(sym)
