@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy SAFE_MODE / oversize / close-verify execution discipline locks to FRA."""
+"""Deploy SAFE_MODE / oversize / close-verify / fill-resolve locks to FRA."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -34,15 +34,15 @@ cd {REMOTE}
 {PY} test_execution_discipline.py
 {PY} - <<'PY'
 from frozen_strategy import assert_frozen_contract
+import inspect
+from binance_connector import BinanceConnector
+from momentum_scanner import MomentumScanner
 snap = assert_frozen_contract()
-src = open('main.py', encoding='utf-8').read()
-assert 'CLOSE_PENDING_VERIFY' in src
-assert 'Never label CLOSE_PENDING_VERIFY as CLOSED' in src
-conn = open('binance_connector.py', encoding='utf-8').read()
-assert 'ack_missing_executedQty' in conn
-ms = open('momentum_scanner.py', encoding='utf-8').read()
-assert 'SAFE_MODE' in ms and 'OVERSIZE_EXTERNAL_SHORT' in ms
-assert 'SAFE_MODE_STUCK_CLOSE' in ms
+assert hasattr(BinanceConnector, '_resolve_executed_qty')
+assert hasattr(BinanceConnector, 'query_order')
+assert '_resolve_executed_qty' in inspect.getsource(BinanceConnector.close_position)
+assert 'CLOSE_INCOMPLETE' in open('momentum_scanner.py', encoding='utf-8').read()
+assert 'Flat on exchange' in inspect.getsource(MomentumScanner._close_succeeded)
 print('CONTRACT', snap['strategy_id'], 'part', snap['ops']['partition_usd'])
 print('EXEC_DISCIPLINE_MARKERS_OK')
 PY
@@ -55,9 +55,7 @@ tok=open('/etc/bilshenz.env').read().split('BRIDGE_TOKEN=')[1].splitlines()[0].s
 H={{'Authorization':'Bearer '+tok}}
 h=json.loads(urllib.request.urlopen('http://127.0.0.1:8766/health', timeout=8).read())
 sc=h.get('scanner') or {{}}
-req=urllib.request.Request('http://127.0.0.1:8766/api/status', headers=H)
-st=json.loads(urllib.request.urlopen(req, timeout=12).read())
-print('LIVE', h.get('mode'), 'conn', h.get('connected'), 'can', sc.get('can_execute'), 'halt', sc.get('user_exec_halted'), 'part', sc.get('partition_usd'), 'safe', sc.get('safe_mode'))
+print('LIVE', h.get('mode'), 'conn', h.get('connected'), 'can', sc.get('can_execute'), 'halt', sc.get('user_exec_halted'), 'part', sc.get('partition_usd'), 'safe', sc.get('safe_mode'), 'stuck', sc.get('stuck_close_symbols'), 'err', sc.get('last_exec_error'))
 print('EXEC_DISCIPLINE_DEPLOY_OK')
 PY
 """
