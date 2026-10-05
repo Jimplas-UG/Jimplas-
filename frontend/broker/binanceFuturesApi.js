@@ -541,6 +541,12 @@ export async function postBinanceClosePosition(
         latencyMs: j.latency_ms ?? j.detail?.latency_ms,
         error: j.error ?? j.detail?.error,
         verifiedFlat: j.verified_flat === true || j.detail?.verified_flat === true,
+        positionsCleared: j.positions_cleared === true || j.detail?.positions_cleared === true,
+        positionsSnapshot: Array.isArray(j.positions_snapshot)
+          ? j.positions_snapshot
+          : Array.isArray(j.detail?.positions_snapshot)
+            ? j.detail.positions_snapshot
+            : null,
         closePending: j.close_pending === true || j.status === 'CLOSE_PENDING_VERIFY',
         statusLabel: j.status || j.detail?.status,
         remaining: j.remaining || j.detail?.remaining || [],

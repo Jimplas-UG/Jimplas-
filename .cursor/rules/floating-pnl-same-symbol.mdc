@@ -13,11 +13,13 @@ Scanner/chart lead price (e.g. QNT @ 248 or SOON @ 0.33) was applied to open **U
 ## Locked rules
 
 1. **Never** use `executionLead.price`, chart mid, or `brokerFeed.price` for open-position PnL unless `tick.symbol === position.symbol`.
-2. All floating PnL MUST go through `frontend/lib/liveFloatingPnl.js` (`liveLegProfit`, `liveFloatingTotal`, `resolveLegMark`, `isPlausibleMark`).
+2. All floating PnL MUST go through `frontend/lib/liveFloatingPnl.js` (`liveLegProfit`, `liveFloatingTotal`, `heroFloatingPnl`, `resolveLegMark`, `isPlausibleMark`).
 3. A numeric mark without `quoteSymbol` / `livePriceSymbol` must **not** paint every open leg.
 4. Reject marks where `|mark − entry| / entry > MAX_MARK_REL_MOVE` (0.45). Cap `|PnL|` to ~`1.25 × entry notional`.
 5. `OpenPositionsPanel` requires `livePriceSymbol` with `livePrice`. Do not reintroduce `quoteSymbol`-only mark application.
-6. Do **not** change frozen strategy (`short_first_v1`) to “fix” display bugs.
+6. **Flat book ⇒ hero floating = 0.** Never fall back to sticky `account.profit` after close (ghost floating). Use `heroFloatingPnl(positions)`.
+7. After CLOSE_OK, bridge must `apply_symbol_positions_snapshot` so cool-path sticky cannot resurrect closed legs; client keeps a short close tombstone.
+8. Do **not** change frozen strategy (`short_first_v1`) to “fix” display bugs.
 
 ## Regression
 

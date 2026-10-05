@@ -81,6 +81,10 @@ function AppContent() {
     if (!connected || !desk.brokerFeed?.account) return null;
     return desk.brokerFeed.account;
   }, [connected, desk.brokerFeed?.account]);
+  const homePositions = useMemo(
+    () => (connected ? desk.brokerFeed?.positions || [] : []),
+    [connected, desk.brokerFeed?.positions],
+  );
 
   const tabStyle = useCallback(
     (name) => ({
@@ -109,6 +113,7 @@ function AppContent() {
             onOpenProfile={openProfile}
             connected={connected}
             account={homeAccount}
+            positions={homePositions}
             active={tab === 'scanner'}
           />
         </View>

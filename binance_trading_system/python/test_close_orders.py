@@ -349,11 +349,31 @@ def test_apply_symbol_positions_snapshot_clears_sticky() -> None:
     c._last_good_positions_ts = 0.0
     c._positions_cache = list(c._last_good_positions)
     c._positions_cache_ts = 0.0
+    c._last_good_account = {"balance": 100.0, "profit": -9.6, "equity": 90.4}
     c.apply_symbol_positions_snapshot("BTCUSDT", [])
     assert all(p["symbol"] != "BTCUSDT" for p in c._last_good_positions)
     assert any(p["symbol"] == "ETHUSDT" for p in c._last_good_positions)
     assert all(p["symbol"] != "BTCUSDT" for p in (c._positions_cache or []))
+    # ETH still open — floating may remain until full flat.
+    c.apply_symbol_positions_snapshot("ETHUSDT", [])
+    assert c._last_good_positions == []
+    assert float(c._last_good_account["profit"]) == 0.0
     print("OK apply_symbol_positions_snapshot clears sticky closed symbol")
+
+
+def test_close_position_syncs_sticky_flat() -> None:
+    """close_position must apply sticky snapshot so cool polls cannot resurrect ghosts."""
+    import inspect
+
+    from binance_connector import BinanceConnector
+
+    src = inspect.getsource(BinanceConnector.close_position)
+    assert "apply_symbol_positions_snapshot" in src
+    src2 = inspect.getsource(BinanceConnector.close_by_position_side)
+    assert "apply_symbol_positions_snapshot" in src2
+    src3 = inspect.getsource(BinanceConnector.close_all_positions)
+    assert "apply_all_positions_snapshot" in src3
+    print("OK close paths sync sticky snapshots")
 
 
 if __name__ == "__main__":
@@ -372,4 +392,5 @@ if __name__ == "__main__":
     test_limit_ioc_second_pass_is_mark_centered()
     test_symbol_filters_carry_price_band_multipliers()
     test_apply_symbol_positions_snapshot_clears_sticky()
+    test_close_position_syncs_sticky_flat()
     print("test_close_orders: ALL OK")

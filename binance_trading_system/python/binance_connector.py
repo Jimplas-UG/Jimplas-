@@ -1901,6 +1901,13 @@ class BinanceConnector:
         if not sym_u:
             return
         legs = list(legs or [])
+        if not hasattr(self, "_last_good_positions"):
+            self._last_good_positions = []
+        if not hasattr(self, "_last_good_positions_ts"):
+            self._last_good_positions_ts = 0.0
+        if not hasattr(self, "_positions_cache"):
+            self._positions_cache = None
+            self._positions_cache_ts = 0.0
         kept = [p for p in self._last_good_positions if str(p.get("symbol") or "").upper() != sym_u]
         self._last_good_positions = kept + legs
         self._last_good_positions_ts = time.time()
@@ -1912,6 +1919,37 @@ class BinanceConnector:
         else:
             self._positions_cache = None
             self._positions_cache_ts = 0.0
+        # Flat book → floating must not stick on account.profit during REST cool.
+        if not self._last_good_positions and getattr(self, "_last_good_account", None):
+            acct = dict(self._last_good_account)
+            acct["profit"] = 0.0
+            if acct.get("balance") is not None:
+                try:
+                    acct["equity"] = float(acct.get("balance") or 0) + 0.0
+                except (TypeError, ValueError):
+                    pass
+            self._last_good_account = acct
+
+    def apply_all_positions_snapshot(self, legs: list[dict[str, Any]] | None) -> None:
+        """Replace sticky open-book entirely (close-all / confirmed flat)."""
+        legs = list(legs or [])
+        if not hasattr(self, "_last_good_positions"):
+            self._last_good_positions = []
+        if not hasattr(self, "_last_good_positions_ts"):
+            self._last_good_positions_ts = 0.0
+        self._last_good_positions = legs
+        self._last_good_positions_ts = time.time()
+        self._positions_cache = list(legs)
+        self._positions_cache_ts = time.time()
+        if not legs and getattr(self, "_last_good_account", None):
+            acct = dict(self._last_good_account)
+            acct["profit"] = 0.0
+            if acct.get("balance") is not None:
+                try:
+                    acct["equity"] = float(acct.get("balance") or 0) + 0.0
+                except (TypeError, ValueError):
+                    pass
+            self._last_good_account = acct
 
     def positions(self, symbol: str | None = None, *, force: bool = False, bypass_rest_cool: bool = False) -> list[dict[str, Any]]:
         if self.cfg.paper:
@@ -2958,6 +2996,12 @@ class BinanceConnector:
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         out = {"ok": True, "closed": closed_legs, **leg_row, "latency_ms": latency_ms, "broker": "binance"}
         self.remember_close_deals(closed_legs)
+        try:
+            left = self.positions(sym, force=True, bypass_rest_cool=True)
+            self.apply_symbol_positions_snapshot(sym, list(left or []))
+        except Exception as e:
+            log.warning("close_by_position_side sticky sync %s: %s", sym, e)
+            self.invalidate_positions_cache()
         return out
 
     def trade_pnl_calendar(self, days: int = 400) -> dict[str, Any]:
@@ -3294,7 +3338,9 @@ class BinanceConnector:
 
         remaining = self.positions(sym, force=True, bypass_rest_cool=True)
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
-        self.invalidate_positions_cache()
+        # Desk-critical: sync sticky last-good NOW. invalidate alone keeps ghosts and
+        # cool-path /api/positions resurrects floating PnL after scanner/manual close.
+        self.apply_symbol_positions_snapshot(sym, list(remaining or []))
         ok = len(remaining) == 0 and len(closed) > 0
         out: dict[str, Any] = {
             "ok": ok,
@@ -3355,8 +3401,9 @@ class BinanceConnector:
                 break
             if attempt < 2:
                 time.sleep(1.2)
-        self.invalidate_positions_cache()
         remaining = self.positions(force=True, bypass_rest_cool=True)
+        # Flat book must clear sticky last-good + account.profit (ghost floating lock).
+        self.apply_all_positions_snapshot(list(remaining or []))
         return {
             "ok": len(remaining) == 0,
             "closed": all_closed,

@@ -5,11 +5,14 @@ import TickScannerHome from '../components/scanner/TickScannerHome';
 import { PilotHeroBalance } from '../components/pilot/PilotUI';
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
+import { heroFloatingPnl } from '../lib/liveFloatingPnl';
 
-function ScannerScreen({ pad, scanner, onOpenProfile, connected: connectedProp, account = null, active = true }) {
+function ScannerScreen({ pad, scanner, onOpenProfile, connected: connectedProp, account = null, positions = null, active = true }) {
   const { colors: C, styles } = useBilshenzTheme();
   const { connected: bridgeConnected, sessionExec, linkHealth, restCoolS } = useBinanceBridge();
   const connected = connectedProp ?? bridgeConnected;
+  // Flat book ⇒ hero floating 0. Never fall back to sticky account.profit after close.
+  const floating = heroFloatingPnl(Array.isArray(positions) ? positions : []);
 
   return (
     <ScrollView
@@ -20,7 +23,7 @@ function ScannerScreen({ pad, scanner, onOpenProfile, connected: connectedProp, 
       removeClippedSubviews>
       <PilotHeroBalance
         balance={account?.balance}
-        floating={account?.profit}
+        floating={floating}
         connected={connected}
         onConnect={onOpenProfile}
       />
@@ -54,6 +57,8 @@ function ScannerScreen({ pad, scanner, onOpenProfile, connected: connectedProp, 
 function scannerPropsEqual(prev, next) {
   if (prev.active !== next.active || prev.pad !== next.pad || prev.connected !== next.connected) return false;
   if (prev.account !== next.account || prev.onOpenProfile !== next.onOpenProfile) return false;
+  // MUST compare positions — skipping this left ghost floating after close on Home.
+  if (prev.positions !== next.positions) return false;
   if (!next.active) {
     // Hidden Home tab: ignore row churn while Trade is open.
     return (

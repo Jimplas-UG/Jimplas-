@@ -150,13 +150,22 @@ export function liveFloatingTotal(positions, marks, quoteSymbol = null) {
     if (map && Number(map[sym]) > 0) {
       mark = Number(map[sym]);
       markSym = sym;
-    } else if (single != null && Number.isFinite(single) && q && sym === q) {
-      // Require explicit quoteSymbol — never paint one mark onto every open leg.
+    } else if (single != null && q && sym === q) {
       mark = single;
       markSym = q;
     }
     return sum + liveLegProfit(p, mark, markSym);
   }, 0);
+}
+
+/**
+ * Hero / header floating PnL.
+ * HARD RULE: flat book ⇒ 0. Never fall back to sticky account.profit after close.
+ */
+export function heroFloatingPnl(positions, _accountProfitIgnored = null) {
+  const rows = Array.isArray(positions) ? positions : [];
+  if (!rows.length) return 0;
+  return liveFloatingTotal(rows, null, null);
 }
 
 /** Prefer account with real balances over a cool-path stub. */

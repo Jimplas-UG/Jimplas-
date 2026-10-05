@@ -10,7 +10,7 @@ import { PilotCard, PilotHeroBalance, PilotSectionTitle } from '../components/pi
 import { useBilshenzTheme } from '../contexts/ThemeContext';
 import { useBinanceBridge } from '../contexts/BinanceBridgeContext';
 import { useDiagnostics } from '../hooks/useDiagnostics';
-import { liveFloatingTotal } from '../lib/liveFloatingPnl';
+import { liveFloatingTotal, heroFloatingPnl } from '../lib/liveFloatingPnl';
 import { pickPrimaryExecutionCandidate } from '../lib/scannerExecution';
 import { spacing } from '../theme/designTokens';
 
@@ -62,15 +62,10 @@ function TradeScreen({ pad, desk, scanner, onOpenProfile, active = true }) {
   }, [positions, executionLead?.symbol, executionLead?.price, brokerFeed.resolvedSymbol, brokerFeed.price]);
 
   const floating = useMemo(() => {
-    if (positions.length) {
-      // Prefer exchange sticky when no trustworthy same-symbol mark.
-      if (matchedLive.price == null) {
-        return positions.reduce((s, p) => s + (Number(p?.profit) || 0), 0);
-      }
-      return liveFloatingTotal(positions, matchedLive.price, matchedLive.symbol);
-    }
-    return Number(account?.profit ?? 0);
-  }, [positions, matchedLive.price, matchedLive.symbol, account?.profit]);
+    if (!positions.length) return heroFloatingPnl([]);
+    if (matchedLive.price == null) return heroFloatingPnl(positions);
+    return liveFloatingTotal(positions, matchedLive.price, matchedLive.symbol);
+  }, [positions, matchedLive.price, matchedLive.symbol]);
 
   return (
     <ScrollView

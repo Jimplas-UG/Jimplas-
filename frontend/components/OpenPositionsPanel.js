@@ -116,14 +116,8 @@ export default function OpenPositionsPanel({
       markBusy(key, true);
       const closeOperationId = `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-      // Optimistic only after confirm — keep UI snappy without skipping the lock confirm.
-      onOptimisticClose?.({
-        symbol,
-        positionSide,
-        closePair,
-        closed: [],
-        dealsHead: [],
-      });
+      // Never optimistic-clear before exchange ACK — premature tombstone hid failures
+      // and skipped verifiedFlat tombstones on LONG-only closes.
       onCloseMessage?.(`Closing ${label}…`);
 
       try {
@@ -140,6 +134,8 @@ export default function OpenPositionsPanel({
             closePair,
             closed: Array.isArray(r.closed) ? r.closed : [],
             dealsHead: Array.isArray(r.dealsHead) ? r.dealsHead : [],
+            verifiedFlat: !!r.verifiedFlat || !!r.positionsCleared,
+            positionsSnapshot: Array.isArray(r.positionsSnapshot) ? r.positionsSnapshot : null,
           });
           const closedLegs = Array.isArray(r.closed) ? r.closed : [];
           const closed = closedLegs[0];
@@ -258,12 +254,6 @@ export default function OpenPositionsPanel({
           onPress: () => {
             if (closingKeysRef.current.has('__all__')) return;
             markBusy('__all__', true);
-            onOptimisticClose?.({
-              closePair: true,
-              symbol: '*',
-              closed: [],
-              dealsHead: [],
-            });
             onCloseMessage?.('Closing all…');
             void (async () => {
               try {
@@ -274,6 +264,8 @@ export default function OpenPositionsPanel({
                     symbol: '*',
                     closed: Array.isArray(r.closed) ? r.closed : [],
                     dealsHead: Array.isArray(r.dealsHead) ? r.dealsHead : [],
+                    verifiedFlat: true,
+                    positionsSnapshot: [],
                   });
                   onCloseMessage?.(`Closed ${r.closed?.length ?? 0} leg(s)`);
                   void onRefreshAfterClose?.();

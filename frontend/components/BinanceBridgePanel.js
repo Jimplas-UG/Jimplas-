@@ -21,6 +21,7 @@ import {
   fetchBinanceSession,
 } from '../broker/binanceFuturesApi';
 import { getBrokerMode } from '../lib/brokerMode';
+import { heroFloatingPnl } from '../lib/liveFloatingPnl';
 import {
   connectBinanceBridge,
   hasBinanceCredentials,
@@ -145,7 +146,8 @@ export default function BinanceBridgePanel() {
       ]);
       if (tkRes.ok) setTick(await tkRes.json());
       const next = Array.isArray(posResult?.positions) ? posResult.positions : [];
-      if (next.length > 0 || (posResult?.ok && !posResult?.stale)) {
+      // Confirmed ok (including empty flat) always wins — never keep ghost legs.
+      if (posResult?.ok || next.length > 0) {
         setPositions(next);
       }
     } catch {
@@ -197,7 +199,8 @@ export default function BinanceBridgePanel() {
 
       const posResult = await fetchBinancePositions(b);
       const next = Array.isArray(posResult?.positions) ? posResult.positions : [];
-      if (next.length > 0 || (posResult?.ok && !posResult?.stale)) {
+      // Confirmed ok (including empty flat) always wins — never keep ghost legs.
+      if (posResult?.ok || next.length > 0) {
         setPositions(next);
       }
     } catch (e) {
@@ -698,8 +701,15 @@ export default function BinanceBridgePanel() {
             </View>
             <View style={[st.metric, { borderColor: C.border }]}>
               <Text style={[st.metricLab, { color: C.dim }]}>Floating</Text>
-              <Text style={[st.metricVal, { color: (account.profit ?? 0) >= 0 ? C.green : C.red }]}>
-                ${Math.round(account.profit ?? 0).toLocaleString()}
+              <Text
+                style={[
+                  st.metricVal,
+                  {
+                    color:
+                      heroFloatingPnl(positions) >= 0 ? C.green : C.red,
+                  },
+                ]}>
+                ${Math.round(heroFloatingPnl(positions)).toLocaleString()}
               </Text>
             </View>
           </View>

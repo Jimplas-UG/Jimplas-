@@ -32,6 +32,8 @@ const MIN_CACHE_BARS = 12;
 const STARTUP_TIMEOUT_MS = 4500;
 const STARTUP_RETRIES = 1;
 const BROKER_DEALS_MAX = 200;
+/** After CLOSE_OK, ignore sticky ghosts for this symbol while REST cools. */
+const CLOSE_TOMBSTONE_MS = 45000;
 
 function dealRowKey(d) {
   return String(d?.order_id ?? d?.orderId ?? d?.ticket ?? d?.order ?? '');
@@ -153,14 +155,69 @@ export function useBinanceLiveFeed({
   const accountRef = useRef(null);
   const dealsRef = useRef([]);
   const emptyPosStreakRef = useRef(0);
+  /** @type {React.MutableRefObject<Map<string, number>>} */
+  const closeTombstoneRef = useRef(new Map());
   const pauseFeedUiRef = useRef(pauseFeedUi);
   pauseFeedUiRef.current = pauseFeedUi;
   const lastTickUiAtRef = useRef(0);
+
+  const markCloseTombstone = useCallback((symbol) => {
+    const sym = String(symbol || '').toUpperCase();
+    if (!sym) return;
+    if (sym === '*') {
+      closeTombstoneRef.current.set('*', Date.now());
+      return;
+    }
+    closeTombstoneRef.current.set(sym, Date.now());
+  }, []);
+
+  const filterTombstonedPositions = useCallback((rows) => {
+    const now = Date.now();
+    const map = closeTombstoneRef.current;
+    // Expire old tombstones.
+    for (const [k, ts] of [...map.entries()]) {
+      if (now - ts > CLOSE_TOMBSTONE_MS) map.delete(k);
+    }
+    if (!map.size) return Array.isArray(rows) ? rows : [];
+    if (map.has('*')) return [];
+    return (Array.isArray(rows) ? rows : []).filter((p) => {
+      const sym = String(p?.symbol || '').toUpperCase();
+      return !sym || !map.has(sym);
+    });
+  }, []);
+
+  const zeroAccountFloatingIfFlat = useCallback((openLen) => {
+    if (openLen > 0) return;
+    const prev = accountRef.current;
+    if (!prev) return;
+    if (Number(prev.profit) === 0) return;
+    const next = {
+      ...prev,
+      profit: 0,
+      equity: prev.balance != null ? Number(prev.balance) : prev.equity,
+    };
+    accountRef.current = next;
+    setAccount(next);
+  }, []);
 
   const commitAccount = useCallback((next) => {
     const merged = mergeStickyAccount(accountRef.current, next);
     if (merged === accountRef.current && next && !next.stale) {
       // Still refresh profit from live positions when present.
+    }
+    // If book is flat locally, never keep a non-zero sticky floating from cool account.
+    if ((positionsRef.current || []).length === 0 && merged && Number(merged.profit) !== 0) {
+      const flatAcct = {
+        ...merged,
+        profit: 0,
+        equity: merged.balance != null ? Number(merged.balance) : merged.equity,
+      };
+      accountRef.current = flatAcct;
+      setAccount(flatAcct);
+      if (flatAcct.balance != null || flatAcct.equity != null) {
+        void AsyncStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify(flatAcct)).catch(() => {});
+      }
+      return;
     }
     accountRef.current = merged;
     setAccount(merged);
@@ -233,8 +290,14 @@ export function useBinanceLiveFeed({
         if (acctRaw && !accountRef.current) {
           const acct = JSON.parse(acctRaw);
           if (acct && typeof acct === 'object') {
-            accountRef.current = acct;
-            setAccount(acct);
+            // Never restore sticky floating from disk — positions may already be flat.
+            const safe = {
+              ...acct,
+              profit: 0,
+              equity: acct.balance != null ? Number(acct.balance) : acct.equity,
+            };
+            accountRef.current = safe;
+            setAccount(safe);
           }
         }
         if (dealsRaw && !dealsRef.current.length) {
@@ -473,21 +536,39 @@ export function useBinanceLiveFeed({
       if (!result || typeof result !== 'object' || !('positions' in result)) {
         // Legacy callers may still pass a bare array — ignore clearing.
         if (Array.isArray(result)) {
-          if (result.length) {
-            positionsRef.current = result;
-            setPositions(result);
+          const filtered = filterTombstonedPositions(result);
+          if (filtered.length) {
+            positionsRef.current = filtered;
+            setPositions(filtered);
             setPositionsStale(false);
             emptyPosStreakRef.current = 0;
           }
         }
         return;
       }
-      const next = Array.isArray(result.positions) ? result.positions : [];
+      const next = filterTombstonedPositions(Array.isArray(result.positions) ? result.positions : []);
       const cool = Number(result.restCoolS) || 0;
       setPositionsCoolS(cool);
       // Never claim FLAT while REST is cooling — sticky last-good may be empty payload.
+      // But tombstoned ghosts are already filtered — empty after filter is real flat.
       if (cool >= 0.5 && next.length === 0) {
-        if (positionsRef.current.length > 0) setPositionsStale(true);
+        if (positionsRef.current.length > 0 && !result.positionsCleared) {
+          // Keep UI flat if we already optimistically cleared after CLOSE_OK.
+          if (emptyPosStreakRef.current >= 2) {
+            positionsRef.current = [];
+            setPositions([]);
+            setPositionsStale(true);
+            zeroAccountFloatingIfFlat(0);
+            return;
+          }
+          setPositionsStale(true);
+          return;
+        }
+        positionsRef.current = [];
+        setPositions([]);
+        setPositionsStale(!!cool);
+        emptyPosStreakRef.current = 2;
+        zeroAccountFloatingIfFlat(0);
         return;
       }
       if (result.ok && next.length === 0 && !result.stale && cool < 0.5) {
@@ -497,6 +578,7 @@ export function useBinanceLiveFeed({
           positionsRef.current = [];
           setPositions([]);
           setPositionsStale(false);
+          zeroAccountFloatingIfFlat(0);
         } else {
           setPositionsStale(true);
         }
@@ -509,7 +591,7 @@ export function useBinanceLiveFeed({
         setPositionsStale(!!result.stale || cool > 0.5 || result.ok === false);
         return;
       }
-      // Error / cool with empty payload — keep last known.
+      // Error / cool with empty payload — keep last known only if not tombstoned-flat.
       if (positionsRef.current.length > 0) {
         setPositionsStale(true);
         return;
@@ -540,7 +622,7 @@ export function useBinanceLiveFeed({
       clearInterval(dealsId);
       clearInterval(posId);
     };
-  }, [sessionActive, enabled, baseUrl, pauseFeedUi, commitAccount, commitDeals]);
+  }, [sessionActive, enabled, baseUrl, pauseFeedUi, commitAccount, commitDeals, filterTombstonedPositions, zeroAccountFloatingIfFlat]);
 
   const refreshBrokerSnapshot = useCallback(async () => {
     if (!sessionActive || !enabled || !baseUrl?.trim()) return;
@@ -553,7 +635,7 @@ export function useBinanceLiveFeed({
     if (st.account) commitAccount(st.account);
     else if (!st.connected && !accountRef.current) commitAccount(null);
     commitDeals(d);
-    const next = Array.isArray(posResult?.positions) ? posResult.positions : [];
+    const next = filterTombstonedPositions(Array.isArray(posResult?.positions) ? posResult.positions : []);
     const cool = Number(posResult?.restCoolS) || 0;
     setPositionsCoolS(cool);
     // Confirmed exchange snapshot (ok, not stale, not cooling) always wins — including empty after close.
@@ -562,19 +644,25 @@ export function useBinanceLiveFeed({
       setPositions(next);
       setPositionsStale(false);
       emptyPosStreakRef.current = next.length === 0 ? 2 : 0;
+      zeroAccountFloatingIfFlat(next.length);
     } else if (next.length > 0) {
       positionsRef.current = next;
       setPositions(next);
       setPositionsStale(!!posResult?.stale || cool > 0.5 || posResult?.ok === false);
       emptyPosStreakRef.current = 0;
+    } else if (positionsRef.current.length > 0 && emptyPosStreakRef.current >= 2) {
+      positionsRef.current = [];
+      setPositions([]);
+      setPositionsStale(true);
+      zeroAccountFloatingIfFlat(0);
     } else if (positionsRef.current.length > 0) {
       setPositionsStale(true);
     } else {
       setPositionsStale(!!posResult?.stale || posResult?.ok === false);
     }
-  }, [sessionActive, enabled, baseUrl, commitAccount, commitDeals]);
+  }, [sessionActive, enabled, baseUrl, commitAccount, commitDeals, filterTombstonedPositions, zeroAccountFloatingIfFlat]);
 
-  const applyOptimisticClose = useCallback(({ symbol, positionSide = null, closePair = false, closed = null, dealsHead = null } = {}) => {
+  const applyOptimisticClose = useCallback(({ symbol, positionSide = null, closePair = false, closed = null, dealsHead = null, verifiedFlat = false, positionsSnapshot = null } = {}) => {
     // Paint trade history immediately from close fills (do not wait for /api/logs poll).
     if (Array.isArray(dealsHead) && dealsHead.length) {
       commitDeals({ ok: true, deals: dealsHead, stale: false });
@@ -614,36 +702,58 @@ export function useBinanceLiveFeed({
     }
 
     if (symbol === '*') {
+      markCloseTombstone('*');
       positionsRef.current = [];
       setPositions([]);
       setPositionsStale(false);
       emptyPosStreakRef.current = 2;
+      zeroAccountFloatingIfFlat(0);
       return;
     }
     const sym = String(symbol || '').toUpperCase();
     if (!sym) return;
+    const flattenSym =
+      !!verifiedFlat || !!closePair || String(positionSide || '').toUpperCase() === 'SHORT';
+    // Tombstone whenever this symbol leaves the open book (incl. LONG-only flat).
+    if (flattenSym) markCloseTombstone(sym);
+    else if (Array.isArray(positionsSnapshot)) {
+      const stillOpen = positionsSnapshot.some(
+        (p) => String(p?.symbol || '').toUpperCase() === sym && Number(p?.volume || 0) > 0,
+      );
+      if (!stillOpen) markCloseTombstone(sym);
+    }
+
+    // Prefer server snapshot when present (authoritative after CLOSE_OK).
+    if (Array.isArray(positionsSnapshot)) {
+      let next = filterTombstonedPositions(positionsSnapshot);
+      if (flattenSym) {
+        next = next.filter((p) => String(p.symbol || '').toUpperCase() !== sym);
+      }
+      positionsRef.current = next;
+      setPositions(next);
+      setPositionsStale(false);
+      emptyPosStreakRef.current = next.length === 0 ? 2 : 0;
+      zeroAccountFloatingIfFlat(next.length);
+      return;
+    }
     const prev = positionsRef.current || [];
     let next;
-    if (closePair || !positionSide) {
+    if (flattenSym || !positionSide) {
       next = prev.filter((p) => String(p.symbol || '').toUpperCase() !== sym);
     } else {
       const ps = String(positionSide).toUpperCase();
-      // SHORT manual close flattens the pair on the bridge — clear all legs for symbol.
-      if (ps === 'SHORT') {
-        next = prev.filter((p) => String(p.symbol || '').toUpperCase() !== sym);
-      } else {
-        next = prev.filter((p) => {
-          if (String(p.symbol || '').toUpperCase() !== sym) return true;
-          const leg = String(p.positionSide || p.leg || (p.type === 'SELL' ? 'SHORT' : 'LONG')).toUpperCase();
-          return leg !== ps;
-        });
-      }
+      next = prev.filter((p) => {
+        if (String(p.symbol || '').toUpperCase() !== sym) return true;
+        const leg = String(p.positionSide || p.leg || (p.type === 'SELL' ? 'SHORT' : 'LONG')).toUpperCase();
+        return leg !== ps;
+      });
     }
     positionsRef.current = next;
     setPositions(next);
     setPositionsStale(false);
     emptyPosStreakRef.current = next.length === 0 ? 2 : 0;
-  }, [commitDeals]);
+    zeroAccountFloatingIfFlat(next.length);
+  }, [commitDeals, markCloseTombstone, filterTombstonedPositions, zeroAccountFloatingIfFlat]);
 
   const refreshAfterClose = useCallback(async () => {
     if (!sessionActive || !enabled || !baseUrl?.trim()) return;

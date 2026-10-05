@@ -226,6 +226,11 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "force_flat_4131" in inspect.getsource(bc.BinanceConnector._persistent_escape_4131_close)
     assert "_persistent_escape_4131_close" in inspect.getsource(bc.BinanceConnector.close_position)
     assert "_persistent_escape_4131_close" in inspect.getsource(bc.BinanceConnector.close_by_position_side)
+    # Ghost floating lock: close paths must sync sticky last-good (not invalidate-only).
+    assert "apply_symbol_positions_snapshot" in inspect.getsource(bc.BinanceConnector.close_position)
+    assert "apply_symbol_positions_snapshot" in inspect.getsource(bc.BinanceConnector.close_by_position_side)
+    assert "apply_all_positions_snapshot" in inspect.getsource(bc.BinanceConnector.close_all_positions)
+    assert "apply_symbol_positions_snapshot" in inspect.getsource(ms.MomentumScanner._close_all)
 
     # Entry / adverse / TP / hedge pullback defaults (floors may raise short trail only).
     assert abs(ms.GAIN_THRESHOLD_PCT - GAIN_THRESHOLD_PCT) < 1e-9

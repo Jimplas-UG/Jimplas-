@@ -3316,7 +3316,11 @@ class MomentumScanner:
                 self._stuck_close_retry_ms.pop(sym, None)
                 self._reset_coin_state(coin)
                 self._arm_entry_cooldown(sym, reason or "scanner_close")
-                self._connector.invalidate_positions_cache()
+                # Flat snapshot — never leave sticky last-good painting ghost floating.
+                try:
+                    self._connector.apply_symbol_positions_snapshot(sym, [])
+                except Exception:
+                    self._connector.invalidate_positions_cache()
                 latency_ms = round((time.perf_counter() - t0) * 1000, 1)
                 close_result["latency_ms"] = float(close_result.get("latency_ms") or latency_ms)
                 pair_gate.record_order(

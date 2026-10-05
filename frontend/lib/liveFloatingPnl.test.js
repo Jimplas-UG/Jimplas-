@@ -7,6 +7,7 @@ const {
   liveFloatingTotal,
   isPlausibleMark,
   resolveLegMark,
+  heroFloatingPnl,
   MAX_PNL_NOTIONAL_MULT,
 } = require('./liveFloatingPnl.js');
 
@@ -65,5 +66,13 @@ const heroBug = liveFloatingTotal(
   'USUSDT',
 );
 assert(Math.abs(heroBug) < 500, `SOON-on-US pair total must stay near exposure, got ${heroBug}`);
+
+assert(heroFloatingPnl([]) === 0, 'flat book hero floating must be 0');
+assert(heroFloatingPnl(null) === 0, 'null positions hero floating must be 0');
+assert(heroFloatingPnl([], -999) === 0, 'must ignore stale account.profit when flat');
+assert(
+  heroFloatingPnl([{ symbol: 'X', type: 'SELL', volume: 10, price_open: 1, profit: -3 }]) === -3,
+  'open book uses sticky when no mark',
+);
 
 console.log('liveFloatingPnl.test.js OK');

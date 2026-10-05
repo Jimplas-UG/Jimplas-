@@ -1516,7 +1516,7 @@ def api_close(body: CloseBody):
 
         # Verify exchange state before telling the client CLOSED.
         try:
-            remaining = connector.positions(sym, force=True)
+            remaining = connector.positions(sym, force=True, bypass_rest_cool=True)
         except Exception as e:
             log.warning("close verify positions %s: %s", sym, e)
             remaining = None
@@ -1565,6 +1565,20 @@ def api_close(body: CloseBody):
             r["status"] = "CLOSING"
             r["verify_error"] = "position_query_failed"
 
+        # Desk-critical: sync sticky last-good NOW so cool-path /api/positions cannot
+        # resurrect a closed leg and keep floating PnL painted on the phone.
+        try:
+            if r.get("ok"):
+                flatten_symbol = bool(r.get("verified_flat")) or bool(body.close_pair)
+                if body.position_side and str(body.position_side).upper() == "SHORT":
+                    flatten_symbol = True
+                if flatten_symbol and (remaining is None or len(remaining) == 0):
+                    connector.apply_symbol_positions_snapshot(sym, [])
+                elif remaining is not None:
+                    connector.apply_symbol_positions_snapshot(sym, list(remaining))
+        except Exception as e:
+            log.warning("close sticky snapshot %s: %s", sym, e)
+
         connector.invalidate_positions_cache()
         if r.get("ok"):
             if r.get("closed"):
@@ -1576,6 +1590,8 @@ def api_close(body: CloseBody):
             head = list(getattr(connector, "_last_good_deals", None) or [])[:30]
             if head:
                 r["deals_head"] = head
+            r["positions_snapshot"] = list(remaining) if remaining is not None else []
+            r["positions_cleared"] = bool(r.get("verified_flat"))
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         r["latency_ms"] = r.get("latency_ms") or latency_ms
         r["close_operation_id"] = op_id
@@ -1693,6 +1709,15 @@ def api_close_all():
     finally:
         if flat:
             pair_gate.end_close_all(open_syms or ["*"])
+            # Wipe sticky so cool-path polls cannot resurrect every closed leg.
+            try:
+                connector.apply_all_positions_snapshot([])
+            except Exception:
+                try:
+                    for s in open_syms or []:
+                        connector.apply_symbol_positions_snapshot(s, [])
+                except Exception as e:
+                    log.warning("close-all sticky clear: %s", e)
         else:
             # Heal immediately if somehow already flat despite flat=False.
             pair_gate.release_stale_close_gates(lambda: connector.positions(force=True) or [])
