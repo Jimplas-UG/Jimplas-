@@ -167,6 +167,17 @@ def test_short_entry_sync_never_deflates() -> None:
     print("OK short entry sync never deflates (no early L1/L2)")
 
 
+def test_close_chunks_market_max_and_longs_first() -> None:
+    import inspect
+    from binance_connector import BinanceConnector
+
+    src = inspect.getsource(BinanceConnector.close_position)
+    assert "marketMaxQty" in src or "max_cell" in src
+    assert "_close_rank" in src
+    assert "chunks" in src.lower() or "chunk" in src
+    print("OK close_position chunks MARKET max and closes LONGs first")
+
+
 if __name__ == "__main__":
     test_naked_short_exchange_target_is_5x()
     test_hedge_episode_blocks_solo_exit()
@@ -178,6 +189,7 @@ if __name__ == "__main__":
     test_manual_open_qty_locked_to_partition()
     test_market_max_qty_clamped()
     test_short_entry_sync_never_deflates()
+    test_close_chunks_market_max_and_longs_first()
     from frozen_strategy import assert_frozen_contract
 
     assert_frozen_contract()

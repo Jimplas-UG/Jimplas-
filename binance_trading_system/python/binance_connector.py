@@ -2695,15 +2695,29 @@ class BinanceConnector:
         if not self.cfg.api_key:
             return {"ok": False, "error": "api_key_missing"}
 
+        # Close LONG recovery hedges FIRST, then SHORT. If a long close fails (-4005),
+        # the short stays open as a hedge instead of leaving a naked orphan long.
+        def _close_rank(p: dict[str, Any]) -> int:
+            ps = str(p.get("positionSide") or "").upper()
+            if ps == "LONG" or str(p.get("type") or "").upper() == "BUY":
+                return 0
+            return 1
+
+        positions = sorted(positions, key=_close_rank)
+
         try:
             self.cancel_all_orders(sym, bypass_rest_cool=True)
         except Exception as e:
             log.warning("close_position cancel orders %s: %s", sym, e)
 
-        info = self.exchange_info()
+        info = self.get_symbol_spec(sym)
         closed: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
         t0 = _time.perf_counter()
+        step = float(info.get("marketStepSize") or info.get("stepSize") or 0.001)
+        min_q = float(info.get("marketMinQty") or info.get("minQty") or 0.001)
+        # Mutable so -4005 can shrink the chunk ceiling mid-close.
+        max_cell = [float(info.get("marketMaxQty") or info.get("maxQty") or 0)]
 
         def _close_one(p: dict[str, Any], *, attempt: int) -> None:
             pos_side = str(p.get("type", "")).upper()
@@ -2712,78 +2726,113 @@ class BinanceConnector:
             # Full-pair flatten always uses each leg's own size. A shared `volume`
             # would wrongly size both LONG and SHORT to the same qty.
             qty_src = pos_vol if volume is None or len(positions) > 1 else float(volume)
-            qty = round_to_step(qty_src, info["stepSize"])
-            if qty < info["minQty"]:
-                qty = info["minQty"]
-            if qty > pos_vol + 1e-12:
-                qty = round_to_step(pos_vol, info["stepSize"])
-            if qty <= 0:
+            remaining = round_to_step(qty_src, step)
+            if remaining < min_q:
+                remaining = min_q
+            if remaining > pos_vol + 1e-12:
+                remaining = round_to_step(pos_vol, step)
+            if remaining <= 0:
                 errors.append({"position_side": hedge_side or pos_side, "error": "invalid_quantity"})
                 return
             exit_side = "SELL" if pos_side == "BUY" else "BUY"
             side_tag = hedge_side if hedge_side in ("LONG", "SHORT") else pos_side or "X"
-            # Unique per leg+attempt — duplicate newClientOrderId aborts the 2nd hedge leg.
-            cid = f"{CLIENT_ID_PREFIX}_CLS_{side_tag}_{int(_time.time() * 1000)}_{attempt}"[:36]
-            params = self._market_close_params(
-                symbol=sym,
-                side=exit_side,
-                quantity=qty,
-                client_order_id=cid,
-                hedge_position_side=hedge_side if hedge_side in ("LONG", "SHORT") else None,
-                entry_side_for_reduce=pos_side,
-            )
-            try:
-                resp = self._request_keepalive(
-                    "POST", "/fapi/v1/order", params, signed=True, timeout=8.0, bypass_rest_cool=True
-                )
-            except RuntimeError as e:
-                if _is_percent_price_error(e):
-                    log.warning(
-                        "close_position %s %s MARKET -4131 — band-clamped LIMIT IOC fallback",
-                        sym,
-                        side_tag,
-                    )
-                    lim = self._limit_ioc_close_leg(
-                        symbol=sym,
-                        exit_side=exit_side,
-                        quantity=qty,
-                        hedge_side=hedge_side if hedge_side in ("LONG", "SHORT") else side_tag,
-                        entry_price=float(p.get("price_open") or 0),
-                    )
-                    if lim.get("ok"):
-                        closed.append(lim)
-                        return
-                    errors.append({"position_side": side_tag, "error": lim.get("error") or str(e)})
+            chunk_i = 0
+            # MARKET_LOT_SIZE can be far below LOT_SIZE (PORTAL testnet max=30k). Chunk or -4005
+            # leaves orphan longs after RESCUE closes the short first.
+            while remaining > 1e-12:
+                market_max = float(max_cell[0] or 0)
+                chunk = remaining
+                if market_max > 0 and chunk > market_max:
+                    chunk = round_to_step(market_max, step)
+                    if chunk > market_max:
+                        chunk = max(min_q, round_to_step(market_max - step, step))
+                if chunk < min_q:
+                    errors.append({"position_side": side_tag, "error": f"chunk_below_min:{chunk}"})
                     return
-                errors.append({"position_side": side_tag, "error": str(e)})
-                log.warning("close_position %s %s failed: %s", sym, side_tag, e)
-                return
-            order_id = resp.get("orderId")
-            entry = float(p.get("price_open") or 0)
-            fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
-            if fill <= 0:
-                fill = float(p.get("price_open") or 0)
-            rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
-            quote_qty = fill * qty
-            if abs(rpnl) < 1e-12:
-                rpnl = self._estimate_close_pnl(pos_side, entry, fill, qty)
-            else:
-                rpnl = self._finalize_close_pnl(sym, pos_side, entry, fill, qty, rpnl, quote_qty)
-            closed.append(
-                {
-                    "symbol": sym,
-                    "side": pos_side,
-                    "exit_side": exit_side,
-                    "position_side": hedge_side or None,
-                    "volume": qty,
-                    "fill_price": fill,
-                    "entry_price": entry,
-                    "profit": rpnl,
-                    "realized_pnl": rpnl,
-                    "commission": commission,
-                    "order": order_id,
-                }
-            )
+                cid = f"{CLIENT_ID_PREFIX}_CLS_{side_tag}_{int(_time.time() * 1000)}_{attempt}_{chunk_i}"[:36]
+                params = self._market_close_params(
+                    symbol=sym,
+                    side=exit_side,
+                    quantity=chunk,
+                    client_order_id=cid,
+                    hedge_position_side=hedge_side if hedge_side in ("LONG", "SHORT") else None,
+                    entry_side_for_reduce=pos_side,
+                )
+                try:
+                    resp = self._request_keepalive(
+                        "POST", "/fapi/v1/order", params, signed=True, timeout=8.0, bypass_rest_cool=True
+                    )
+                except RuntimeError as e:
+                    if _is_percent_price_error(e):
+                        log.warning(
+                            "close_position %s %s MARKET -4131 — band-clamped LIMIT IOC fallback",
+                            sym,
+                            side_tag,
+                        )
+                        lim = self._limit_ioc_close_leg(
+                            symbol=sym,
+                            exit_side=exit_side,
+                            quantity=chunk,
+                            hedge_side=hedge_side if hedge_side in ("LONG", "SHORT") else side_tag,
+                            entry_price=float(p.get("price_open") or 0),
+                        )
+                        if lim.get("ok"):
+                            closed.append(lim)
+                            remaining = round_to_step(max(0.0, remaining - float(lim.get("volume") or chunk)), step)
+                            chunk_i += 1
+                            continue
+                        errors.append({"position_side": side_tag, "error": lim.get("error") or str(e)})
+                        return
+                    msg = str(e)
+                    if ("-4005" in msg or "max quantity" in msg.lower()) and chunk > min_q * 2:
+                        shrunk = round_to_step(chunk * 0.5, step)
+                        if shrunk >= min_q:
+                            log.warning(
+                                "close_position %s %s -4005 — shrink chunk %.6g -> %.6g",
+                                sym,
+                                side_tag,
+                                chunk,
+                                shrunk,
+                            )
+                            max_cell[0] = shrunk
+                            continue
+                    errors.append({"position_side": side_tag, "error": msg})
+                    log.warning("close_position %s %s failed: %s", sym, side_tag, e)
+                    return
+                order_id = resp.get("orderId")
+                entry = float(p.get("price_open") or 0)
+                fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
+                if fill <= 0:
+                    fill = float(p.get("price_open") or 0)
+                filled_qty = float(resp.get("executedQty") or chunk)
+                rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
+                quote_qty = fill * filled_qty
+                if abs(rpnl) < 1e-12:
+                    rpnl = self._estimate_close_pnl(pos_side, entry, fill, filled_qty)
+                else:
+                    rpnl = self._finalize_close_pnl(sym, pos_side, entry, fill, filled_qty, rpnl, quote_qty)
+                closed.append(
+                    {
+                        "symbol": sym,
+                        "side": pos_side,
+                        "exit_side": exit_side,
+                        "position_side": hedge_side or None,
+                        "volume": filled_qty,
+                        "fill_price": fill,
+                        "entry_price": entry,
+                        "profit": rpnl,
+                        "realized_pnl": rpnl,
+                        "commission": commission,
+                        "order": order_id,
+                    }
+                )
+                remaining = round_to_step(max(0.0, remaining - filled_qty), step)
+                chunk_i += 1
+                if chunk_i > 40:
+                    errors.append({"position_side": side_tag, "error": "too_many_close_chunks"})
+                    return
+            if chunk_i > 1:
+                log.info("close_position %s %s closed in %s market chunks", sym, side_tag, chunk_i)
 
         for i, p in enumerate(positions):
             _close_one(p, attempt=i)

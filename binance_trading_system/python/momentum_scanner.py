@@ -3248,6 +3248,16 @@ class MomentumScanner:
                 )
                 close_result["ok"] = False
                 close_result["error"] = close_result.get("error") or "close_incomplete"
+                # Partial flatten of a hedged pair is a hard desk failure — stop new entries.
+                rem = close_result.get("remaining") or []
+                if rem and not self._user_exec_halted:
+                    self.set_exec_enabled(False)
+                    log.critical(
+                        "PARTIAL_CLOSE_EMERGENCY_HALT %s reason=%s remaining=%s",
+                        sym,
+                        reason,
+                        rem,
+                    )
             return close_result
         finally:
             pair_gate.end_close(sym)

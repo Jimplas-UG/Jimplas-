@@ -17,6 +17,7 @@ the live modules still match the working contract:
   Market opens clamp to MARKET_LOT_SIZE (never -4005 → naked invalidation)
   Adverse % never uses a deflated short entry (no early L1/L2)
   Hard rule_kernel choke point on every open + live watchdog emergency halt
+  Close paths chunk MARKET_LOT_SIZE; LONG hedges close before SHORT (no orphan long)
   Rescue: long PnL ≥ short loss + buffer → flatten all
   Invalidation: ≥6.5% adverse from short entry → flatten all
   Short TP −2.5%; never leave orphan longs without the primary short
@@ -207,6 +208,11 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert hasattr(ms.MomentumScanner, "_build_rule_intent")
     assert hasattr(ms.MomentumScanner, "_rule_watchdog")
     assert "rule_intent=self._build_rule_intent" in inspect.getsource(ms.MomentumScanner.__init__)
+    # Close must chunk MARKET max and close LONGs before SHORT (PORTAL orphan lock).
+    close_src = inspect.getsource(bc.BinanceConnector.close_position)
+    assert "marketMaxQty" in close_src or "max_cell" in close_src
+    assert "Close LONG" in close_src or "_close_rank" in close_src
+    assert "PARTIAL_CLOSE_EMERGENCY_HALT" in inspect.getsource(ms.MomentumScanner._close_all)
 
     # Entry / adverse / TP / hedge pullback defaults (floors may raise short trail only).
     assert abs(ms.GAIN_THRESHOLD_PCT - GAIN_THRESHOLD_PCT) < 1e-9

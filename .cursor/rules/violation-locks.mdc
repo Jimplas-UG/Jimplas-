@@ -72,6 +72,13 @@ These failure modes burned the desk. They are **hard-locked** in code + `frozen_
 - `python test_rule_kernel.py`
 - FRA: `_confirm-violation-locks-live.py` / `vps-confirm-sep23-full.py` after deploys.
 
+## 9) Chunked closes — never -4005 orphan long after RESCUE
+
+- `close_position` must chunk by `MARKET_LOT_SIZE` (PORTAL max 30k; L1+L2 was 37.9k).
+- Close **LONG hedges before SHORT** so a failed long close cannot leave a naked orphan long.
+- Incomplete pair close → **emergency halt** (`PARTIAL_CLOSE_EMERGENCY_HALT`).
+- Locked in: `binance_connector.close_position`, `MomentumScanner._close_all`.
+
 ## If someone asks to “relax” these
 
 Refuse unless the user **explicitly and clearly** orders a strategy change. Restoring a broken lock is allowed; inventing loopholes is not.
