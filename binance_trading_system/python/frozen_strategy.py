@@ -227,6 +227,10 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "_persistent_escape_4131_close" in inspect.getsource(bc.BinanceConnector.close_position)
     assert "_persistent_escape_4131_close" in inspect.getsource(bc.BinanceConnector.close_by_position_side)
     # Ghost floating lock: close paths must sync sticky last-good (not invalidate-only).
+    assert "OVERSIZE_EXTERNAL_SHORT" in open(rk.__file__, encoding="utf-8").read()
+    assert "SAFE_MODE" in open(ms.__file__, encoding="utf-8").read()
+    assert "_flag_oversize_external_short" in open(ms.__file__, encoding="utf-8").read()
+    assert "SAFE_MODE_STUCK_CLOSE" in open(ms.__file__, encoding="utf-8").read()
     assert "apply_symbol_positions_snapshot" in inspect.getsource(bc.BinanceConnector.close_position)
     assert "apply_symbol_positions_snapshot" in inspect.getsource(bc.BinanceConnector.close_by_position_side)
     assert "apply_all_positions_snapshot" in inspect.getsource(bc.BinanceConnector.close_all_positions)

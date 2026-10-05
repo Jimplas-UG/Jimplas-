@@ -139,6 +139,21 @@ def test_watchdog_halts_naked_10x() -> None:
     print("OK watchdog emergency-halts naked short at 10x")
 
 
+def test_watchdog_halts_oversize_external() -> None:
+    codes = audit_live_state(
+        LiveState(
+            symbol="AAVEUSDT",
+            has_exchange_short=True,
+            has_scanner_short=True,
+            short_notional_usd=3479.0,
+            max_short_notional_usd=250.0,
+        )
+    )
+    assert "OVERSIZE_EXTERNAL_SHORT" in codes
+    assert should_emergency_halt(codes)
+    print("OK watchdog emergency-halts oversize external short")
+
+
 if __name__ == "__main__":
     test_blocks_early_long1()
     test_blocks_long1_past_inv()
@@ -148,4 +163,5 @@ if __name__ == "__main__":
     test_allows_valid_long1()
     test_solo_exit_blocked_in_episode()
     test_watchdog_halts_naked_10x()
+    test_watchdog_halts_oversize_external()
     print("test_rule_kernel: ALL OK")

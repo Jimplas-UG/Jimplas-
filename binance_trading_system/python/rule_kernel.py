@@ -30,6 +30,8 @@ HALT_ON = frozenset(
         "OVERLAPPING_EXCHANGE_SHORT",
         "HEDGE_PAST_INVALIDATION",
         "RULE_KERNEL_BYPASS",
+        # External/manual short above locked $100 partition leg — never manage as normal.
+        "OVERSIZE_EXTERNAL_SHORT",
     }
 )
 
@@ -75,6 +77,9 @@ class LiveState:
     exchange_leverage: int | None = None
     scanner_short_qty: float = 0.0
     exchange_short_qty: float = 0.0
+    short_entry: float = 0.0
+    short_notional_usd: float = 0.0
+    max_short_notional_usd: float = 0.0
 
 
 @dataclass
@@ -203,6 +208,14 @@ def audit_live_state(state: LiveState) -> list[str]:
     if (state.has_long1 or state.has_long2) and float(state.live_adverse_pct or 0) >= PAIR_INVALIDATION_PCT + 0.05:
         # Hedge still open past invalidation — manage should have flattened; flag hard.
         codes.append("HEDGE_PAST_INVALIDATION")
+    # AAVE-class desk bomb / unexpected external size vs locked partition primary leg.
+    max_n = float(state.max_short_notional_usd or 0)
+    notional = float(state.short_notional_usd or 0)
+    if max_n <= 0 and float(state.short_entry or 0) > 0 and float(state.scanner_short_qty or 0) > 0:
+        notional = float(state.short_entry) * float(state.scanner_short_qty)
+        max_n = LOCKED_PARTITION_USD * PRIMARY_PARTITION_PCT / 100.0 * PRIMARY_LEVERAGE
+    if max_n > 0 and notional > max_n * 1.05:
+        codes.append("OVERSIZE_EXTERNAL_SHORT")
     return codes
 
 

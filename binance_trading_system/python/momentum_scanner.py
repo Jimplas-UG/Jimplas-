@@ -262,6 +262,8 @@ class MomentumScanner:
         # Symbols that failed to flatten (e.g. -4131). New entries stay blocked until flat.
         self._stuck_close_syms: dict[str, dict[str, Any]] = {}
         self._stuck_close_retry_ms: dict[str, int] = {}
+        # External/manual shorts above locked partition notional — SAFE_MODE until flat.
+        self._oversize_external_syms: set[str] = set()
 
     @property
     def engine(self) -> ExecutionEngine:
@@ -444,6 +446,10 @@ class MomentumScanner:
         """Long 1 after primary short + settle delay when price is live ≥2% above short entry."""
         if not coin.short or coin.short_was_closed:
             return False
+        # Oversize external short: flatten-only — never add L1 exposure.
+        if self._is_oversize_short(coin):
+            self._flag_oversize_external_short(coin)
+            return False
         if coin.long1 is not None or coin.long1_was_closed:
             return False
         if not self._exchange_has_short(coin.symbol):
@@ -474,6 +480,10 @@ class MomentumScanner:
         closed unintentionally — never open Long 2 once adverse already hits invalidation.
         """
         if not coin.short or coin.short_was_closed:
+            return False
+        # Oversize external short: flatten-only — never add L2 exposure.
+        if self._is_oversize_short(coin):
+            self._flag_oversize_external_short(coin)
             return False
         if coin.long2 is not None or coin.long2_was_closed:
             return False
@@ -620,15 +630,20 @@ class MomentumScanner:
             exchange_leverage=lev,
             scanner_short_qty=float(coin.short.qty) if coin.short else 0.0,
             exchange_short_qty=ex_short_qty,
+            short_entry=float(coin.short.entry) if coin.short else 0.0,
+            short_notional_usd=self._short_notional_usd(coin),
+            max_short_notional_usd=self._locked_primary_notional_usd(),
         )
         codes = audit_live_state(state)
+        if self._is_oversize_short(coin) and "OVERSIZE_EXTERNAL_SHORT" not in codes:
+            codes.append("OVERSIZE_EXTERNAL_SHORT")
         if not codes:
             return
         log.error("RULE_WATCHDOG %s violations=%s", sym, ",".join(codes))
+        if "OVERSIZE_EXTERNAL_SHORT" in codes:
+            self._oversize_external_syms.add(sym)
         if should_emergency_halt(codes) and not self._user_exec_halted:
-            self._rule_halt_codes = list(codes)
-            self._rule_halt_ts = time.time()
-            self.set_exec_enabled(False)
+            self._enter_safe_mode("RULE_KERNEL_EMERGENCY_HALT", codes=list(codes))
             log.critical(
                 "RULE_KERNEL_EMERGENCY_HALT %s codes=%s — new entries blocked until manual resume",
                 sym,
@@ -838,6 +853,62 @@ class MomentumScanner:
         except Exception as e:
             log.warning("re-place TP %s magic=%s: %s", coin.symbol, leg.magic, e)
 
+    def _locked_primary_notional_usd(self) -> float:
+        """Hard max short notional for locked $100 partition @ 50% @ 5x (= $250)."""
+        self._force_locked_partition_usd(persist=False)
+        return float(self._partition_usd) * float(self._short_pct) / 100.0 * float(SHORT_LEVERAGE)
+
+    def _short_notional_usd(self, coin: CoinStrategy) -> float:
+        if not coin.short:
+            return 0.0
+        entry = float(coin.short.entry or 0)
+        qty = float(coin.short.qty or 0)
+        if entry <= 0 or qty <= 0:
+            return 0.0
+        return entry * qty
+
+    def _is_oversize_short(self, coin: CoinStrategy, *, slack: float = 1.05) -> bool:
+        """True when live short notional exceeds locked partition primary leg (AAVE-class)."""
+        max_n = self._locked_primary_notional_usd()
+        n = self._short_notional_usd(coin)
+        return max_n > 0 and n > max_n * slack
+
+    def _enter_safe_mode(self, reason: str, *, codes: list[str] | None = None) -> None:
+        """SAFE_MODE: freeze new entries; closes/reconcile still allowed. Never invent risk."""
+        if codes:
+            self._rule_halt_codes = list(codes)
+            self._rule_halt_ts = time.time()
+        if self._user_exec_halted:
+            log.critical("SAFE_MODE already active reason=%s codes=%s", reason, codes or self._rule_halt_codes)
+            return
+        log.critical(
+            "SAFE_MODE enter reason=%s codes=%s — new entries frozen until flat+manual resume",
+            reason,
+            ",".join(codes or []) or "none",
+        )
+        self.set_exec_enabled(False)
+
+    def _flag_oversize_external_short(self, coin: CoinStrategy) -> bool:
+        """Detect unexpected oversized short; freeze entries and block hedge adds."""
+        if not coin.short or not self._is_oversize_short(coin):
+            self._oversize_external_syms.discard(coin.symbol.upper())
+            return False
+        sym = coin.symbol.upper()
+        n = self._short_notional_usd(coin)
+        max_n = self._locked_primary_notional_usd()
+        self._oversize_external_syms.add(sym)
+        log.error(
+            "OVERSIZE_EXTERNAL_SHORT %s notional=%.2f max_locked=%.2f qty=%s entry=%s — "
+            "no L1/L2 add; flatten-only until SAFE_MODE cleared",
+            sym,
+            n,
+            max_n,
+            coin.short.qty,
+            coin.short.entry,
+        )
+        self._enter_safe_mode("OVERSIZE_EXTERNAL_SHORT", codes=["OVERSIZE_EXTERNAL_SHORT", sym])
+        return True
+
     def _refresh_exchange_tps(self, coin: CoinStrategy) -> None:
         """After any partial close — wipe resting algos and re-arm remaining legs."""
         self._cancel_symbol_orders(coin.symbol)
@@ -887,6 +958,8 @@ class MomentumScanner:
         else:
             self._emit_signal(coin, "entered")
             log.info("scanner adopted exchange SHORT %s qty=%s @ %s", sym, qty, fill)
+        # Desk lock: never inherit an AAVE-sized external short as normal strategy risk.
+        self._flag_oversize_external_short(coin)
         return True
 
     def _adopt_exchange_long1(
@@ -1309,6 +1382,12 @@ class MomentumScanner:
             result = (False, reason)
         elif self._user_exec_halted:
             result = (False, "EMERGENCY_STOP")
+        elif self._stuck_close_syms:
+            stuck = ",".join(sorted(self._stuck_close_syms.keys())[:4])
+            result = (False, f"SAFE_MODE_STUCK_CLOSE:{stuck}")
+        elif self._oversize_external_syms:
+            ov = ",".join(sorted(self._oversize_external_syms)[:4])
+            result = (False, f"SAFE_MODE_OVERSIZE_EXTERNAL:{ov}")
         elif getattr(self._connector, "api_auth_blocked", False):
             auth_reason = getattr(self._connector, "_api_auth_reason", "") or "Invalid API-key / IP / permissions"
             result = (False, f"API_AUTH_BLOCKED:{auth_reason[:80]}")
@@ -1952,6 +2031,7 @@ class MomentumScanner:
         coin.status = STATUS_CLOSED
         coin.highest_price = None
         coin.qualifying_pct = 0.0
+        self._oversize_external_syms.discard(str(coin.symbol or "").upper())
         coin.entry_signal_key = ""
         coin.submitted_entry_signal_id = ""
         coin.submitted_long1_signal_id = ""
@@ -2163,6 +2243,8 @@ class MomentumScanner:
                 "halt_ts": self._rule_halt_ts or None,
             },
             "stuck_close_symbols": sorted(self._stuck_close_syms.keys()),
+            "oversize_external_symbols": sorted(self._oversize_external_syms),
+            "safe_mode": bool(self._user_exec_halted or self._stuck_close_syms or self._oversize_external_syms),
             "exec_env_controlled": env_blocked,
             "api_auth": getattr(self._connector, "api_auth_status", lambda: {})(),
             "last_exec_error": self._last_exec_error,
@@ -2926,12 +3008,16 @@ class MomentumScanner:
                 and not (self._recovery_still_eligible(coin) and coin.long1 is None and coin.long2 is None)
             ):
                 log.info(
-                    "scanner %s SMART_EXIT pnl=%.4f target=%.4f hedges=%s short_underwater=%s",
+                    "scanner %s SMART_EXIT pnl=%.4f target=%.4f hedges=%s short_underwater=%s "
+                    "price=%.8f short_entry=%.8f adverse=%.3f",
                     sym,
                     coin.unrealized_pnl,
                     smart_target,
                     hedges_open,
                     self._short_underwater(coin) if coin.short else False,
+                    price,
+                    float(coin.short.entry) if coin.short else 0.0,
+                    self._short_adverse_pct(coin) if coin.short else 0.0,
                 )
                 self._close_all(coin, "SMART_EXIT")
                 return
@@ -3132,6 +3218,26 @@ class MomentumScanner:
             if not r.get("ok"):
                 log.warning("scanner close leg failed %s %s: %s", sym, leg_name, r.get("error") or r)
                 self._note_close_failure(sym, f"{leg_name}:{r.get('error') or 'close_leg_failed'}")
+                # Solo-leg incomplete flatten must freeze new entries (same desk lock as pair partial).
+                rem: list[dict[str, Any]] | None = None
+                try:
+                    rem = [
+                        p
+                        for p in (self._connector.positions(sym, force=True, bypass_rest_cool=True) or [])
+                        if float(p.get("volume") or 0) > 1e-12
+                    ]
+                except Exception:
+                    rem = [{"symbol": sym, "error": "position_query_failed"}]
+                if rem:
+                    self._mark_stuck_close(sym, f"LEG_{leg_name}_{reason or 'close_fail'}", rem)
+                    if not self._user_exec_halted:
+                        self.set_exec_enabled(False)
+                        log.critical(
+                            "PARTIAL_CLOSE_EMERGENCY_HALT %s solo_leg=%s remaining=%s",
+                            sym,
+                            leg_name,
+                            rem,
+                        )
                 return
             # Live only: verify expected residual before clearing scanner state.
             if not getattr(self._connector.cfg, "paper", False):

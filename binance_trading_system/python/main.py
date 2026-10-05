@@ -108,7 +108,12 @@ def _close_op_begin(op_id: str) -> dict[str, Any] | None:
         if existing:
             st = str(existing.get("status") or "")
             if st == "CLOSED" and isinstance(existing.get("result"), dict):
-                return dict(existing["result"])
+                # Only replay verified flat closes — never pending/closing as success.
+                cached = dict(existing["result"])
+                if cached.get("verified_flat") is False or cached.get("close_pending"):
+                    pass  # treat as retryable
+                else:
+                    return cached
             if st == "CLOSING":
                 raise HTTPException(
                     status_code=409,
@@ -119,17 +124,29 @@ def _close_op_begin(op_id: str) -> dict[str, Any] | None:
                         "status": "CLOSING",
                     },
                 )
-            if st == "CLOSE_FAILED" and isinstance(existing.get("result"), dict):
-                # Allow retry with same id after failure — clear and re-enter.
+            if st in ("CLOSE_FAILED", "CLOSE_PENDING_VERIFY") and isinstance(existing.get("result"), dict):
+                # Allow retry with same id after failure / unverified residual.
                 pass
         _close_ops[op_id] = {"status": "CLOSING", "ts": time.time(), "result": None}
     return None
 
 
 def _close_op_finish(op_id: str, *, ok: bool, result: dict[str, Any]) -> None:
+    """Cache close outcomes. Never label CLOSE_PENDING_VERIFY as CLOSED for idempotent replay."""
+    st = str(result.get("status") or "")
+    if st == "CLOSE_PENDING_VERIFY" or result.get("close_pending") or (
+        ok and result.get("verified_flat") is False
+    ):
+        cache_status = "CLOSE_PENDING_VERIFY"
+    elif st == "CLOSING" or result.get("verify_error"):
+        cache_status = "CLOSING"
+    elif ok:
+        cache_status = "CLOSED"
+    else:
+        cache_status = "CLOSE_FAILED"
     with _close_ops_lock:
         _close_ops[op_id] = {
-            "status": "CLOSED" if ok else "CLOSE_FAILED",
+            "status": cache_status,
             "ts": time.time(),
             "result": dict(result),
         }
@@ -1559,6 +1576,18 @@ def api_close(body: CloseBody):
                     body.position_side,
                     r["remaining"],
                 )
+                # Desk lock: incomplete manual flatten freezes new entries + background retry.
+                try:
+                    momentum_scanner._mark_stuck_close(sym, "CLOSE_PENDING_VERIFY", r.get("remaining"))
+                    if not getattr(momentum_scanner, "_user_exec_halted", False):
+                        momentum_scanner.set_exec_enabled(False)
+                        log.critical(
+                            "PARTIAL_CLOSE_EMERGENCY_HALT %s reason=CLOSE_PENDING_VERIFY remaining=%s",
+                            sym,
+                            r.get("remaining"),
+                        )
+                except Exception as e:
+                    log.warning("close pending stuck mark %s: %s", sym, e)
             else:
                 r["status"] = "CLOSED"
         else:
