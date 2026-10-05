@@ -12,7 +12,10 @@ from momentum_scanner import MomentumScanner
 
 
 def _scanner(connector: BinanceConnector) -> MomentumScanner:
-    return MomentumScanner(connector=connector, get_testnet=lambda: connector.cfg.testnet)
+    s = MomentumScanner(connector=connector, get_testnet=lambda: connector.cfg.testnet)
+    # Persisted FRA halt must not poison unit assertions.
+    s._user_exec_halted = False
+    return s
 
 
 def test_disconnected_blocks_exec() -> None:
@@ -27,7 +30,9 @@ def test_disconnected_blocks_exec() -> None:
         "api_key_missing",
         "binance_not_logged_in",
         "awaiting_account_verify",
+        "EMERGENCY_STOP",  # only if persist raced; _scanner clears halt
     ), reason
+    assert reason != "EMERGENCY_STOP", reason
 
 
 def test_connected_keys_arm_exec() -> None:

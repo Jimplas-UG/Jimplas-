@@ -212,6 +212,12 @@ def assert_frozen_contract() -> dict[str, Any]:
     close_src = inspect.getsource(bc.BinanceConnector.close_position)
     assert "marketMaxQty" in close_src or "max_cell" in close_src
     assert "Close LONG" in close_src or "_close_rank" in close_src
+    assert "long_residual_abort_short" in close_src
+    side_src = inspect.getsource(bc.BinanceConnector.close_by_position_side)
+    assert "max_cell" in side_src or "marketMaxQty" in side_src
+    assert "get_symbol_spec" in side_src
+    leg_src = inspect.getsource(bc.BinanceConnector.close_leg)
+    assert "close_by_position_side" in leg_src
     assert "PARTIAL_CLOSE_EMERGENCY_HALT" in inspect.getsource(ms.MomentumScanner._close_all)
 
     # Entry / adverse / TP / hedge pullback defaults (floors may raise short trail only).

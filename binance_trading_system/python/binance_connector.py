@@ -2451,82 +2451,133 @@ class BinanceConnector:
         pos_side = str(p.get("type", "")).upper()
         hedge_side = str(p.get("positionSide") or ps).upper()
         pos_vol = float(p.get("volume", 0))
-        info = self.exchange_info()
+        info = self.get_symbol_spec(sym)
+        step = float(info.get("marketStepSize") or info.get("stepSize") or 0.001)
+        min_q = float(info.get("marketMinQty") or info.get("minQty") or 0.001)
+        max_cell = [float(info.get("marketMaxQty") or info.get("maxQty") or 0)]
         # Full-leg exits (volume=None) always use live exchange size to avoid dust.
         # Partial exits must NEVER bump below-min qty up to minQty — that can wipe a sibling short.
         qty_src = pos_vol if volume is None else min(float(volume), pos_vol)
-        qty = round_to_step(qty_src, info["stepSize"])
+        remaining = round_to_step(qty_src, step)
         if volume is None:
-            if qty < info["minQty"]:
-                qty = info["minQty"]
-        elif qty + 1e-12 < float(info["minQty"]):
+            if remaining < min_q:
+                remaining = min_q
+        elif remaining + 1e-12 < min_q:
             return {
                 "ok": False,
-                "error": f"qty_below_min_with_sibling_safe_cap qty={qty} min={info['minQty']}",
+                "error": f"qty_below_min_with_sibling_safe_cap qty={remaining} min={min_q}",
                 "retryable": False,
             }
-        if qty > pos_vol + 1e-12:
-            qty = round_to_step(pos_vol, info["stepSize"])
-        if qty <= 0:
+        if remaining > pos_vol + 1e-12:
+            remaining = round_to_step(pos_vol, step)
+        if remaining <= 0:
             return {"ok": False, "error": "invalid_quantity"}
         exit_side = "SELL" if pos_side == "BUY" else "BUY"
-        cid = f"{CLIENT_ID_PREFIX}_CL_{ps}_{int(_time.time() * 1000)}"[:36]
-        params = self._market_close_params(
-            symbol=sym,
-            side=exit_side,
-            quantity=qty,
-            client_order_id=cid,
-            hedge_position_side=hedge_side if hedge_side in ("LONG", "SHORT") else ps,
-            entry_side_for_reduce=pos_side,
-        )
         t0 = _time.perf_counter()
-        try:
-            resp = self._request_keepalive(
-                "POST", "/fapi/v1/order", params, signed=True, timeout=8.0, bypass_rest_cool=True
+        closed_legs: list[dict[str, Any]] = []
+        chunk_i = 0
+        last_leg: dict[str, Any] = {}
+        while remaining > 1e-12:
+            market_max = float(max_cell[0] or 0)
+            chunk = remaining
+            if market_max > 0 and chunk > market_max:
+                chunk = round_to_step(market_max, step)
+                if chunk > market_max:
+                    chunk = max(min_q, round_to_step(market_max - step, step))
+            if chunk < min_q and volume is not None:
+                return {
+                    "ok": False,
+                    "error": f"chunk_below_min:{chunk}",
+                    "retryable": False,
+                    "closed": closed_legs,
+                }
+            if chunk < min_q:
+                chunk = min_q
+            cid = f"{CLIENT_ID_PREFIX}_CL_{ps}_{int(_time.time() * 1000)}_{chunk_i}"[:36]
+            params = self._market_close_params(
+                symbol=sym,
+                side=exit_side,
+                quantity=chunk,
+                client_order_id=cid,
+                hedge_position_side=hedge_side if hedge_side in ("LONG", "SHORT") else ps,
+                entry_side_for_reduce=pos_side,
             )
-        except RuntimeError as e:
-            if _is_percent_price_error(e):
-                log.warning(
-                    "close_by_position_side %s %s MARKET -4131 — band-clamped LIMIT IOC fallback",
-                    sym,
-                    ps,
+            try:
+                resp = self._request_keepalive(
+                    "POST", "/fapi/v1/order", params, signed=True, timeout=8.0, bypass_rest_cool=True
                 )
-                lim = self._limit_ioc_close_leg(
-                    symbol=sym,
-                    exit_side=exit_side,
-                    quantity=qty,
-                    hedge_side=hedge_side if hedge_side in ("LONG", "SHORT") else ps,
-                    entry_price=float(p.get("price_open") or 0),
-                )
-                if lim.get("ok"):
-                    lim["latency_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
-                    return lim
-                return {"ok": False, "error": lim.get("error") or str(e), "close_method": "limit_ioc"}
-            return {"ok": False, "error": str(e)}
-        order_id = resp.get("orderId")
-        entry = float(p.get("price_open") or 0)
-        fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
-        if fill <= 0:
-            fill = float(p.get("price_open") or 0)
-        rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
-        quote_qty = fill * qty
-        if abs(rpnl) < 1e-12:
-            rpnl = self._estimate_close_pnl(pos_side, entry, fill, qty)
-        else:
-            rpnl = self._finalize_close_pnl(sym, pos_side, entry, fill, qty, rpnl, quote_qty)
+            except RuntimeError as e:
+                if _is_percent_price_error(e):
+                    log.warning(
+                        "close_by_position_side %s %s MARKET -4131 — band-clamped LIMIT IOC fallback",
+                        sym,
+                        ps,
+                    )
+                    lim = self._limit_ioc_close_leg(
+                        symbol=sym,
+                        exit_side=exit_side,
+                        quantity=chunk,
+                        hedge_side=hedge_side if hedge_side in ("LONG", "SHORT") else ps,
+                        entry_price=float(p.get("price_open") or 0),
+                    )
+                    if lim.get("ok"):
+                        closed_legs.append(lim)
+                        remaining = round_to_step(max(0.0, remaining - float(lim.get("volume") or chunk)), step)
+                        chunk_i += 1
+                        continue
+                    return {
+                        "ok": False,
+                        "error": lim.get("error") or str(e),
+                        "close_method": "limit_ioc",
+                        "closed": closed_legs,
+                    }
+                msg = str(e)
+                if ("-4005" in msg or "max quantity" in msg.lower()) and chunk > min_q * 2:
+                    shrunk = round_to_step(chunk * 0.5, step)
+                    if shrunk >= min_q:
+                        log.warning(
+                            "close_by_position_side %s %s -4005 — shrink %.6g -> %.6g",
+                            sym,
+                            ps,
+                            chunk,
+                            shrunk,
+                        )
+                        max_cell[0] = shrunk
+                        continue
+                return {"ok": False, "error": msg, "closed": closed_legs}
+            order_id = resp.get("orderId")
+            entry = float(p.get("price_open") or 0)
+            fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
+            if fill <= 0:
+                fill = float(p.get("price_open") or 0)
+            filled_qty = float(resp.get("executedQty") or chunk)
+            rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
+            quote_qty = fill * filled_qty
+            if abs(rpnl) < 1e-12:
+                rpnl = self._estimate_close_pnl(pos_side, entry, fill, filled_qty)
+            else:
+                rpnl = self._finalize_close_pnl(sym, pos_side, entry, fill, filled_qty, rpnl, quote_qty)
+            last_leg = {
+                "symbol": sym,
+                "side": pos_side,
+                "position_side": ps,
+                "volume": filled_qty,
+                "fill_price": fill,
+                "entry_price": entry,
+                "profit": rpnl,
+                "realized_pnl": rpnl,
+                "commission": commission,
+                "order": order_id,
+            }
+            closed_legs.append(dict(last_leg))
+            remaining = round_to_step(max(0.0, remaining - filled_qty), step)
+            chunk_i += 1
+            if chunk_i > 40:
+                return {"ok": False, "error": "too_many_close_chunks", "closed": closed_legs}
+        if chunk_i > 1:
+            log.info("close_by_position_side %s %s closed in %s market chunks", sym, ps, chunk_i)
         self.invalidate_positions_cache()
-        leg_row = {
-            "symbol": sym,
-            "side": pos_side,
-            "position_side": ps,
-            "volume": qty,
-            "fill_price": fill,
-            "entry_price": entry,
-            "profit": rpnl,
-            "realized_pnl": rpnl,
-            "commission": commission,
-            "order": order_id,
-        }
+        leg_row = last_leg if last_leg else {"symbol": sym, "position_side": ps, "volume": 0.0}
         # One dust retry only — never recurse forever on unsellable residuals.
         if volume is None and not _dust_retry:
             leftover = [
@@ -2545,20 +2596,20 @@ class BinanceConnector:
                 log.warning("close_by_position_side %s %s leftover %.8f — retry once", sym, ps, left_vol)
                 retry = self.close_by_position_side(sym, ps, None, _dust_retry=True)
                 if retry.get("ok") and retry.get("closed"):
-                    closed = [leg_row] + list(retry.get("closed") or [])
+                    closed = list(closed_legs) + list(retry.get("closed") or [])
                     latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
                     out = {"ok": True, "closed": closed, **leg_row, "latency_ms": latency_ms, "broker": "binance"}
                     self.remember_close_deals(closed)
                     return out
-                if not retry.get("ok") and retry.get("error") != f"no_{ps.lower()}_leg":
-                    return {
-                        "ok": False,
-                        "error": retry.get("error") or "leftover_dust",
-                        "closed": [leg_row],
-                    }
+                return {
+                    "ok": False,
+                    "error": "partial_close_remaining_legs",
+                    "closed": closed_legs,
+                    "remaining_volume": left_vol,
+                }
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
-        out = {"ok": True, "closed": [leg_row], **leg_row, "latency_ms": latency_ms, "broker": "binance"}
-        self.remember_close_deals(out.get("closed"))
+        out = {"ok": True, "closed": closed_legs, **leg_row, "latency_ms": latency_ms, "broker": "binance"}
+        self.remember_close_deals(closed_legs)
         return out
 
     def trade_pnl_calendar(self, days: int = 400) -> dict[str, Any]:
@@ -2836,10 +2887,32 @@ class BinanceConnector:
 
         for i, p in enumerate(positions):
             _close_one(p, attempt=i)
+            # Never close SHORT if a LONG hedge residual remains — PORTAL orphan class.
+            is_long = (
+                str(p.get("positionSide") or "").upper() == "LONG"
+                or str(p.get("type") or "").upper() == "BUY"
+            )
+            if is_long:
+                still = self.positions(sym, force=True, bypass_rest_cool=True)
+                long_left = [
+                    x
+                    for x in still
+                    if str(x.get("positionSide") or "").upper() == "LONG"
+                    or str(x.get("type") or "").upper() == "BUY"
+                ]
+                if long_left:
+                    log.error(
+                        "close_position %s abort SHORT — LONG residual %.8f after hedge close attempt",
+                        sym,
+                        float(long_left[0].get("volume") or 0),
+                    )
+                    errors.append({"position_side": "LONG", "error": "long_residual_abort_short"})
+                    break
 
         # Second pass: close any remaining hedge legs (first pass may have partially failed).
         leftover = self.positions(sym, force=True, bypass_rest_cool=True)
         if leftover:
+            leftover = sorted(leftover, key=_close_rank)
             log.warning("close_position %s retrying %s leftover leg(s)", sym, len(leftover))
             try:
                 self.cancel_all_orders(sym, bypass_rest_cool=True)
@@ -2847,6 +2920,25 @@ class BinanceConnector:
                 pass
             for j, p in enumerate(leftover):
                 _close_one(p, attempt=100 + j)
+                is_long = (
+                    str(p.get("positionSide") or "").upper() == "LONG"
+                    or str(p.get("type") or "").upper() == "BUY"
+                )
+                if is_long:
+                    still = self.positions(sym, force=True, bypass_rest_cool=True)
+                    long_left = [
+                        x
+                        for x in still
+                        if str(x.get("positionSide") or "").upper() == "LONG"
+                        or str(x.get("type") or "").upper() == "BUY"
+                    ]
+                    if long_left:
+                        log.error(
+                            "close_position %s abort SHORT on retry — LONG residual remains",
+                            sym,
+                        )
+                        errors.append({"position_side": "LONG", "error": "long_residual_abort_short"})
+                        break
 
         remaining = self.positions(sym, force=True, bypass_rest_cool=True)
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
@@ -3129,59 +3221,13 @@ class BinanceConnector:
             from paper_simulator import paper_store
 
             return paper_store.close_leg(symbol, magic, volume)
-        sym = symbol.upper()
-        qty = float(volume or 0)
-        if qty <= 0:
-            pos = self.positions(sym)
-            if not pos:
-                return {"ok": False, "error": "no_position"}
-            qty = float(pos[0].get("volume", 0))
-        if qty <= 0:
-            return {"ok": False, "error": "invalid_volume"}
-
-        sides = close_leg_sides(magic)
+        magic_i = int(magic)
+        sides = close_leg_sides(magic_i)
         if sides is None:
-            return self.close_position(sym, qty)
-        close_side, hedge_side = sides
-
-        tick = self.book_ticker(sym)
-        if not tick:
-            return {"ok": False, "error": f"no tick for {sym}"}
-        info = self.symbol_spec(sym)
-        qty = round_to_step(qty, info["stepSize"])
-        qty, qty_err = self._validate_order_qty(qty, tick["bid"], info)
-        if qty_err:
-            return {"ok": False, "error": qty_err}
-
-        import time as _time
-
-        params = self._market_close_params(
-            symbol=sym,
-            side=close_side,
-            quantity=qty,
-            client_order_id=f"{CLIENT_ID_PREFIX}_CL_{magic_i}_{int(_time.time())}",
-            hedge_position_side=hedge_side,
-        )
-        try:
-            resp = self._request_keepalive(
-                "POST", "/fapi/v1/order", params, signed=True, timeout=8.0, bypass_rest_cool=True
-            )
-            order_id = resp.get("orderId")
-            fill = float(resp.get("avgPrice") or tick["bid"])
-            rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
-            return {
-                "ok": True,
-                "symbol": sym,
-                "volume": qty,
-                "fill_price": fill,
-                "realized_pnl": rpnl,
-                "profit": rpnl,
-                "commission": commission,
-                "order": order_id,
-                "magic": magic_i,
-            }
-        except RuntimeError as e:
-            return {"ok": False, "error": str(e)}
+            return self.close_position(symbol.upper(), volume)
+        _close_side, hedge_side = sides
+        # Delegate to chunked hedge-leg closer (MARKET max aware).
+        return self.close_by_position_side(symbol.upper(), hedge_side, volume)
 
 
 def config_from_env() -> BinanceConfig:

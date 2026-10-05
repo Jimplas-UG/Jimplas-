@@ -174,8 +174,13 @@ def test_close_chunks_market_max_and_longs_first() -> None:
     src = inspect.getsource(BinanceConnector.close_position)
     assert "marketMaxQty" in src or "max_cell" in src
     assert "_close_rank" in src
-    assert "chunks" in src.lower() or "chunk" in src
-    print("OK close_position chunks MARKET max and closes LONGs first")
+    assert "long_residual_abort_short" in src
+    assert "chunk" in src.lower()
+    side = inspect.getsource(BinanceConnector.close_by_position_side)
+    assert "max_cell" in side or "marketMaxQty" in side
+    leg = inspect.getsource(BinanceConnector.close_leg)
+    assert "close_by_position_side" in leg
+    print("OK close_position chunks MARKET max, aborts SHORT if LONG residual, side/leg chunked")
 
 
 if __name__ == "__main__":
