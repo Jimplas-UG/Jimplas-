@@ -142,13 +142,11 @@ class ExecutionEngine:
         session_ok: Callable[[], tuple[bool, str]] | None = None,
         max_open_trades: Callable[[], int] | None = None,
         open_trade_count: Callable[[], int] | None = None,
-        rule_intent: Callable[[ExecutionSignal, bool], Any] | None = None,
     ):
         self._connector = connector
         self._session_ok = session_ok
         self._max_open_trades = max_open_trades or (lambda: 1)
         self._open_trade_count = open_trade_count or (lambda: 0)
-        self._rule_intent = rule_intent
         self._events: deque[ExecutionEvent] = deque(maxlen=64)
         self._filled_client_ids: set[str] = set()
         self._inflight_client_ids: set[str] = set()
@@ -180,10 +178,6 @@ class ExecutionEngine:
     ) -> None:
         self._isolation_check = can_open
         self._close_pending_check = close_pending
-
-    def set_rule_intent(self, rule_intent: Callable[[ExecutionSignal, bool], Any] | None) -> None:
-        """Bind scanner OpenIntent builder — required for hard rule kernel on opens."""
-        self._rule_intent = rule_intent
 
     def _emit(
         self,
@@ -251,11 +245,6 @@ class ExecutionEngine:
         return True, ""
 
     def _validate_session(self) -> tuple[bool, str]:
-        if getattr(self._connector, "api_auth_blocked", False):
-            reason = getattr(self._connector, "_api_auth_reason", "") or "Invalid API-key / IP / permissions"
-            return False, f"API_AUTH_BLOCKED:{reason[:80]}"
-        if not getattr(self._connector, "signed_ready", True) and not getattr(self._connector.cfg, "paper", False):
-            return False, "awaiting_account_verify"
         if self._session_ok:
             return self._session_ok()
         cfg = self._connector.cfg
@@ -500,79 +489,10 @@ class ExecutionEngine:
             self._emit(signal, "risk_blocked", error=result.error)
             return result
 
-        # Hard rule kernel — last gate before signed order. No bypass path.
-        try:
-            from rule_kernel import preflight_open
-
-            intent = None
-            if self._rule_intent is not None:
-                intent = self._rule_intent(signal, manual)
-            if intent is None:
-                # Fail closed for auto scanner opens — never trade without kernel context.
-                if not manual:
-                    result.error = "rule_kernel_missing_intent"
-                    result.stage = "rule_blocked"
-                    self._log_failure(signal, reason=result.error, retry_decision="no_retry_kernel")
-                    self._emit(signal, "rule_blocked", error=result.error)
-                    return result
-            else:
-                # Attach market max from filters when builder omitted it.
-                if getattr(intent, "market_max_qty", 0) in (0, None) and info:
-                    intent.market_max_qty = float(info.get("marketMaxQty") or info.get("maxQty") or 0)
-                verdict = preflight_open(intent)
-                if not verdict.ok:
-                    result.error = verdict.reason
-                    result.stage = "rule_blocked"
-                    self._log_failure(signal, reason=result.error, retry_decision="no_retry_kernel")
-                    self._emit(signal, "rule_blocked", error=result.error)
-                    log.error(
-                        "RULE_KERNEL_BLOCK coin=%s leg=%s code=%s reason=%s",
-                        sym,
-                        signal.leg,
-                        verdict.code,
-                        verdict.reason,
-                    )
-                    return result
-        except Exception as e:
-            if not manual:
-                result.error = f"rule_kernel_error:{e}"
-                result.stage = "rule_blocked"
-                self._log_failure(signal, reason=result.error, retry_decision="no_retry_kernel")
-                self._emit(signal, "rule_blocked", error=result.error)
-                return result
-            log.warning("rule_kernel manual skip on error: %s", e)
-
         self._emit(signal, "sending", client_order_id=client_id)
         self._inflight_client_ids.add(client_id)
 
         try:
-            # Clamp to MARKET_LOT_SIZE BEFORE raising exchange leverage to 10x.
-            # Otherwise a -4005 Long1 leaves a naked short stuck at 10x (Binance blocks reduce).
-            order_qty = float(signal.quantity)
-            if hasattr(self._connector, "get_symbol_spec") and hasattr(self._connector, "_validate_order_qty"):
-                try:
-                    info = self._connector.get_symbol_spec(sym)
-                    px = float(signal.reference_price or 0) or 1.0
-                    clamped, qty_err = self._connector._validate_order_qty(order_qty, px, info)
-                    if qty_err and "above market max" in str(qty_err):
-                        result.error = qty_err
-                        result.stage = "risk_blocked"
-                        self._log_failure(signal, reason=result.error, retry_decision="no_retry")
-                        self._emit(signal, "risk_blocked", error=result.error)
-                        return result
-                    if clamped > 0 and abs(clamped - order_qty) / max(order_qty, 1e-12) > 0.001:
-                        log.info(
-                            "qty clamped to market max coin=%s leg=%s %.6g -> %.6g",
-                            sym,
-                            signal.leg,
-                            order_qty,
-                            clamped,
-                        )
-                        order_qty = clamped
-                        signal.quantity = clamped
-                except Exception as e:
-                    log.warning("qty preflight %s: %s", sym, e)
-
             self._connector.prepare_symbol_cached(sym, exchange_lev, "ISOLATED")
             # Manual: prepare_symbol_cached already set leverage; skip sync positionRisk.
             # Auto: ensure_exchange_leverage is a no-op when prepare cache is warm.
@@ -584,7 +504,7 @@ class ExecutionEngine:
                     order_resp = self._connector.place_market_order(
                         sym,
                         side,
-                        float(order_qty),
+                        float(signal.quantity),
                         client_order_id=client_id,
                         reference_price=signal.reference_price,
                         leverage=signal.leverage,
@@ -622,8 +542,6 @@ class ExecutionEngine:
                             result.error = err
                             result.binance_code = code
                             result.http_code = http
-                            if hasattr(self._connector, "note_api_auth_failure"):
-                                self._connector.note_api_auth_failure(err, http_code=http, binance_code=code)
                             if retryable and attempt < MAX_RETRIES:
                                 wait = RETRY_BACKOFF_MS[min(attempt, len(RETRY_BACKOFF_MS) - 1)] / 1000.0
                                 result.retry_decision = f"retry_{attempt + 1}_in_{wait}s"
@@ -767,16 +685,7 @@ class ExecutionEngine:
                     last_err = e
                     err = str(e)
                     code = _parse_binance_code(err)
-                    low = err.lower()
-                    retryable = (
-                        "timeout" in low
-                        or "timed out" in low
-                        or "urlerror" in low
-                        or "remote end closed" in low
-                        or "connection reset" in low
-                        or "connection aborted" in low
-                        or "broken pipe" in low
-                    )
+                    retryable = "timeout" in err.lower() or "timed out" in err.lower() or "URLError" in err
                     if retryable and hasattr(self._connector, "query_order_by_client_id"):
                         existing = self._connector.query_order_by_client_id(sym, client_id)
                         if existing and str(existing.get("status") or "").upper() in (
@@ -810,13 +719,7 @@ class ExecutionEngine:
                     break
 
             err = str(last_err) if last_err else "order_failed"
-            low = err.lower()
-            if (
-                "timeout" in low
-                or "timed out" in low
-                or "remote end closed" in low
-                or "connection reset" in low
-            ):
+            if "timeout" in err.lower() or "timed out" in err.lower():
                 err = f"uncertain_fill:{err}"
                 result.stage = "uncertain_fill"
             else:

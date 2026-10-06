@@ -108,12 +108,7 @@ def _close_op_begin(op_id: str) -> dict[str, Any] | None:
         if existing:
             st = str(existing.get("status") or "")
             if st == "CLOSED" and isinstance(existing.get("result"), dict):
-                # Only replay verified flat closes — never pending/closing as success.
-                cached = dict(existing["result"])
-                if cached.get("verified_flat") is False or cached.get("close_pending"):
-                    pass  # treat as retryable
-                else:
-                    return cached
+                return dict(existing["result"])
             if st == "CLOSING":
                 raise HTTPException(
                     status_code=409,
@@ -124,29 +119,17 @@ def _close_op_begin(op_id: str) -> dict[str, Any] | None:
                         "status": "CLOSING",
                     },
                 )
-            if st in ("CLOSE_FAILED", "CLOSE_PENDING_VERIFY") and isinstance(existing.get("result"), dict):
-                # Allow retry with same id after failure / unverified residual.
+            if st == "CLOSE_FAILED" and isinstance(existing.get("result"), dict):
+                # Allow retry with same id after failure — clear and re-enter.
                 pass
         _close_ops[op_id] = {"status": "CLOSING", "ts": time.time(), "result": None}
     return None
 
 
 def _close_op_finish(op_id: str, *, ok: bool, result: dict[str, Any]) -> None:
-    """Cache close outcomes. Never label CLOSE_PENDING_VERIFY as CLOSED for idempotent replay."""
-    st = str(result.get("status") or "")
-    if st == "CLOSE_PENDING_VERIFY" or result.get("close_pending") or (
-        ok and result.get("verified_flat") is False
-    ):
-        cache_status = "CLOSE_PENDING_VERIFY"
-    elif st == "CLOSING" or result.get("verify_error"):
-        cache_status = "CLOSING"
-    elif ok:
-        cache_status = "CLOSED"
-    else:
-        cache_status = "CLOSE_FAILED"
     with _close_ops_lock:
         _close_ops[op_id] = {
-            "status": cache_status,
+            "status": "CLOSED" if ok else "CLOSE_FAILED",
             "ts": time.time(),
             "result": dict(result),
         }
@@ -770,8 +753,7 @@ def api_diagnostics():
         "user_data_stream": user_data_stream.status(),
         "pair_isolation": pair_gate.status(
             momentum_scanner._global_active_symbol,
-            # Same as /health — never block diagnostics on live positionRisk (429/418).
-            connector.cached_positions,
+            lambda: connector.positions(),
         ),
         "execution": {
             "last_latency_ms": momentum_scanner.status().get("last_exec_latency_ms"),
@@ -1261,19 +1243,8 @@ async def ws_tick(websocket: WebSocket, symbol: str):
 def api_positions(symbol: str | None = None):
     cool = connector.rest_cooling_left()
     try:
-        # While cooling, serve cache only — phone poll storms were triggering 429 loops.
-        if cool > 0.05:
-            sticky = connector.cached_positions()
-            if symbol:
-                sym_u = symbol.upper()
-                sticky = [p for p in sticky if str(p.get("symbol") or "").upper() == sym_u]
-            return {
-                "ok": True,
-                "positions": sticky,
-                "stale": True,
-                "rest_cool_s": round(cool, 1),
-            }
         pos = connector.positions(symbol)
+        # During cool, connector may serve last-good without raising — flag for UI.
         stale = cool > 0.5
         return {
             "ok": True,
@@ -1305,11 +1276,11 @@ def api_order(body: OrderBody):
     sym = body.symbol.upper()
     side_u = body.side.upper()
 
-    # Prefer cached positions — never force positionRisk on every manual tap.
+    # Prefer cached positions (1.5s) — avoids positionRisk REST on every tap when warm.
     ok_iso, iso_reason = pair_gate.can_open(
         sym,
         momentum_scanner._global_active_symbol,
-        connector.cached_positions,
+        lambda: connector.positions(),
     )
     if not ok_iso:
         raise HTTPException(status_code=400, detail={"ok": False, "error": iso_reason})
@@ -1350,28 +1321,12 @@ def api_order(body: OrderBody):
         elif side_u == "SELL" and tp >= ref:
             tp = None
 
-    # Sep23-25 lock: manual opens cannot exceed locked $100 partition leg sizing.
-    req_qty = float(body.volume)
-    capped_qty, oversize = momentum_scanner.clamp_manual_open_qty(sym, side_u, float(ref), req_qty)
-    if oversize:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "ok": False,
-                "error": "manual_qty_exceeds_locked_partition",
-                "requested": req_qty,
-                "max_qty": capped_qty,
-                "partition_usd": 100.0,
-                "side": side_u,
-            },
-        )
-
     now_ms = int(time.time() * 1000)
     # Unique id every tap — old MANUAL_sym_side_magic blocked all re-orders as duplicates.
     signal = ExecutionSignal(
         symbol=sym,
         side=side_u,
-        quantity=float(capped_qty),
+        quantity=float(body.volume),
         reference_price=float(ref),
         leverage=SHORT_LEVERAGE,
         magic=int(body.magic),
@@ -1381,7 +1336,6 @@ def api_order(body: OrderBody):
         signal_id=f"MANUAL_{sym}_{side_u}_{body.magic}_{now_ms}",
         signal_ts_ms=now_ms,
         margin_type="ISOLATED",
-        partition_usd=100.0,
     )
     r = momentum_scanner.engine.execute(signal, manual=True)
     if not r.ok:
@@ -1416,7 +1370,7 @@ def api_order(body: OrderBody):
         "ok": True,
         "symbol": sym,
         "side": side_u,
-        "quantity": capped_qty,
+        "quantity": body.volume,
         "fill_price": r.fill_price,
         "order_id": r.order_id,
         "client_order_id": r.client_order_id,
@@ -1533,7 +1487,7 @@ def api_close(body: CloseBody):
 
         # Verify exchange state before telling the client CLOSED.
         try:
-            remaining = connector.positions(sym, force=True, bypass_rest_cool=True)
+            remaining = connector.positions(sym, force=True)
         except Exception as e:
             log.warning("close verify positions %s: %s", sym, e)
             remaining = None
@@ -1576,37 +1530,11 @@ def api_close(body: CloseBody):
                     body.position_side,
                     r["remaining"],
                 )
-                # Desk lock: incomplete manual flatten freezes new entries + background retry.
-                try:
-                    momentum_scanner._mark_stuck_close(sym, "CLOSE_PENDING_VERIFY", r.get("remaining"))
-                    if not getattr(momentum_scanner, "_user_exec_halted", False):
-                        momentum_scanner.set_exec_enabled(False)
-                        log.critical(
-                            "PARTIAL_CLOSE_EMERGENCY_HALT %s reason=CLOSE_PENDING_VERIFY remaining=%s",
-                            sym,
-                            r.get("remaining"),
-                        )
-                except Exception as e:
-                    log.warning("close pending stuck mark %s: %s", sym, e)
             else:
                 r["status"] = "CLOSED"
         else:
             r["status"] = "CLOSING"
             r["verify_error"] = "position_query_failed"
-
-        # Desk-critical: sync sticky last-good NOW so cool-path /api/positions cannot
-        # resurrect a closed leg and keep floating PnL painted on the phone.
-        try:
-            if r.get("ok"):
-                flatten_symbol = bool(r.get("verified_flat")) or bool(body.close_pair)
-                if body.position_side and str(body.position_side).upper() == "SHORT":
-                    flatten_symbol = True
-                if flatten_symbol and (remaining is None or len(remaining) == 0):
-                    connector.apply_symbol_positions_snapshot(sym, [])
-                elif remaining is not None:
-                    connector.apply_symbol_positions_snapshot(sym, list(remaining))
-        except Exception as e:
-            log.warning("close sticky snapshot %s: %s", sym, e)
 
         connector.invalidate_positions_cache()
         if r.get("ok"):
@@ -1619,8 +1547,6 @@ def api_close(body: CloseBody):
             head = list(getattr(connector, "_last_good_deals", None) or [])[:30]
             if head:
                 r["deals_head"] = head
-            r["positions_snapshot"] = list(remaining) if remaining is not None else []
-            r["positions_cleared"] = bool(r.get("verified_flat"))
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         r["latency_ms"] = r.get("latency_ms") or latency_ms
         r["close_operation_id"] = op_id
@@ -1738,15 +1664,6 @@ def api_close_all():
     finally:
         if flat:
             pair_gate.end_close_all(open_syms or ["*"])
-            # Wipe sticky so cool-path polls cannot resurrect every closed leg.
-            try:
-                connector.apply_all_positions_snapshot([])
-            except Exception:
-                try:
-                    for s in open_syms or []:
-                        connector.apply_symbol_positions_snapshot(s, [])
-                except Exception as e:
-                    log.warning("close-all sticky clear: %s", e)
         else:
             # Heal immediately if somehow already flat despite flat=False.
             pair_gate.release_stale_close_gates(lambda: connector.positions(force=True) or [])

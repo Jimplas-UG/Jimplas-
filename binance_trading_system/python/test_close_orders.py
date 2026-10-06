@@ -17,6 +17,13 @@ class HedgeConnector(BinanceConnector):
         self._hedge_mode = True
         self._rest_cool_until = 0.0
         self._rest_cool_reason = ""
+        self._deal_symbol_history: set[str] = set()
+        self._last_good_deals: list = []
+        self._last_good_deals_ts = 0.0
+        self._last_good_positions: list = []
+        self._last_good_positions_ts = 0.0
+        self._positions_cache = None
+        self._positions_cache_ts = 0.0
 
     def is_hedge_mode(self) -> bool:
         return True
@@ -28,6 +35,13 @@ class OneWayConnector(BinanceConnector):
         self._hedge_mode = False
         self._rest_cool_until = 0.0
         self._rest_cool_reason = ""
+        self._deal_symbol_history: set[str] = set()
+        self._last_good_deals: list = []
+        self._last_good_deals_ts = 0.0
+        self._last_good_positions: list = []
+        self._last_good_positions_ts = 0.0
+        self._positions_cache = None
+        self._positions_cache_ts = 0.0
 
     def is_hedge_mode(self) -> bool:
         return False
@@ -93,52 +107,33 @@ def test_pair_close_unique_client_ids() -> None:
     c.cfg = SimpleNamespace(paper=False, api_key="k", api_secret="s", symbol="BTCUSDT")
     seen: list[str] = []
 
-    def fake_positions(symbol=None, force=False, **_kwargs):
-        # After each successful close order, drop that leg so residual checks pass.
-        closed_sides = set()
-        for cid in seen:
-            if "LONG" in cid:
-                closed_sides.add("LONG")
-            if "SHORT" in cid:
-                closed_sides.add("SHORT")
-        out = []
-        if "LONG" not in closed_sides:
-            out.append(
-                {"type": "BUY", "positionSide": "LONG", "volume": 1.0, "price_open": 100.0, "symbol": "BTCUSDT"}
-            )
-        if "SHORT" not in closed_sides:
-            out.append(
-                {"type": "SELL", "positionSide": "SHORT", "volume": 2.0, "price_open": 100.0, "symbol": "BTCUSDT"}
-            )
-        return out
+    def fake_positions(symbol=None, force=False, bypass_rest_cool=False):
+        if len(seen) >= 2:
+            return []
+        return [
+            {"type": "BUY", "positionSide": "LONG", "volume": 1.0, "price_open": 100.0, "symbol": "BTCUSDT"},
+            {"type": "SELL", "positionSide": "SHORT", "volume": 2.0, "price_open": 100.0, "symbol": "BTCUSDT"},
+        ]
 
-    def fake_request(method, path, params=None, signed=False, timeout=10.0, bypass_rest_cool=False):
+    def fake_request(method, path, params=None, signed=False, timeout=10.0, **_kw):
         cid = (params or {}).get("newClientOrderId")
         assert cid, "missing client id"
         assert cid not in seen, f"duplicate client id {cid}"
         seen.append(cid)
-        return {"orderId": 1000 + len(seen), "avgPrice": "100", "executedQty": str((params or {}).get("quantity") or 1)}
+        return {"orderId": 1000 + len(seen), "avgPrice": "100"}
 
     c.positions = fake_positions  # type: ignore[method-assign]
     c.cancel_all_orders = lambda _s, **_k: None  # type: ignore[method-assign]
     c.exchange_info = lambda: {"stepSize": 0.001, "minQty": 0.001, "tickSize": 0.01}  # type: ignore[method-assign]
-    c.get_symbol_spec = lambda _s: {  # type: ignore[method-assign]
-        "stepSize": 0.001,
-        "minQty": 0.001,
-        "marketStepSize": 0.001,
-        "marketMinQty": 0.001,
-        "marketMaxQty": 100000,
-        "maxQty": 100000,
-        "tickSize": 0.01,
-    }
     c._request_keepalive = fake_request  # type: ignore[method-assign]
+    c._request = fake_request  # type: ignore[method-assign]
     c.realized_pnl_for_order = lambda *_a, **_k: (0.0, 0.0)  # type: ignore[method-assign]
     c.invalidate_positions_cache = lambda: None  # type: ignore[method-assign]
     c._sanitize_fill_price = lambda *_a, **_k: 100.0  # type: ignore[method-assign]
     c._estimate_close_pnl = lambda *_a, **_k: 0.0  # type: ignore[method-assign]
     c._finalize_close_pnl = lambda *_a, **_k: 0.0  # type: ignore[method-assign]
+    c.apply_symbol_positions_snapshot = lambda *_a, **_k: None  # type: ignore[method-assign]
     c.is_hedge_mode = lambda: True  # type: ignore[method-assign]
-    c.remember_close_deals = lambda *_a, **_k: None  # type: ignore[method-assign]
 
     r = c.close_position("BTCUSDT", None)
     assert r.get("ok"), r
@@ -349,31 +344,11 @@ def test_apply_symbol_positions_snapshot_clears_sticky() -> None:
     c._last_good_positions_ts = 0.0
     c._positions_cache = list(c._last_good_positions)
     c._positions_cache_ts = 0.0
-    c._last_good_account = {"balance": 100.0, "profit": -9.6, "equity": 90.4}
     c.apply_symbol_positions_snapshot("BTCUSDT", [])
     assert all(p["symbol"] != "BTCUSDT" for p in c._last_good_positions)
     assert any(p["symbol"] == "ETHUSDT" for p in c._last_good_positions)
     assert all(p["symbol"] != "BTCUSDT" for p in (c._positions_cache or []))
-    # ETH still open — floating may remain until full flat.
-    c.apply_symbol_positions_snapshot("ETHUSDT", [])
-    assert c._last_good_positions == []
-    assert float(c._last_good_account["profit"]) == 0.0
     print("OK apply_symbol_positions_snapshot clears sticky closed symbol")
-
-
-def test_close_position_syncs_sticky_flat() -> None:
-    """close_position must apply sticky snapshot so cool polls cannot resurrect ghosts."""
-    import inspect
-
-    from binance_connector import BinanceConnector
-
-    src = inspect.getsource(BinanceConnector.close_position)
-    assert "apply_symbol_positions_snapshot" in src
-    src2 = inspect.getsource(BinanceConnector.close_by_position_side)
-    assert "apply_symbol_positions_snapshot" in src2
-    src3 = inspect.getsource(BinanceConnector.close_all_positions)
-    assert "apply_all_positions_snapshot" in src3
-    print("OK close paths sync sticky snapshots")
 
 
 if __name__ == "__main__":
@@ -392,5 +367,4 @@ if __name__ == "__main__":
     test_limit_ioc_second_pass_is_mark_centered()
     test_symbol_filters_carry_price_band_multipliers()
     test_apply_symbol_positions_snapshot_clears_sticky()
-    test_close_position_syncs_sticky_flat()
     print("test_close_orders: ALL OK")

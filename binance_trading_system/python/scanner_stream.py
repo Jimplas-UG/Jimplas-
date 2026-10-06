@@ -22,17 +22,15 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 log = logging.getLogger("scanner_stream")
 
-# Binance USD-M split (2026-03-06); legacy /ws retired 2026-04-23.
-# !miniTicker@arr is regular market data → /market
-MAINNET_WS = "wss://fstream.binance.com/market/ws"
-TESTNET_WS = "wss://stream.binancefuture.com/market/ws"
+MAINNET_WS = "wss://fstream.binance.com/ws"
+TESTNET_WS = "wss://stream.binancefuture.com/ws"
 MAINNET_REST = "https://fapi.binance.com"
 TESTNET_REST = "https://testnet.binancefuture.com"
 RECONNECT_MIN_SEC = 0.02
 RECONNECT_MAX_SEC = 0.6
-REST_POLL_SEC = 0.4
+REST_POLL_SEC = 0.75
 WS_STALL_SEC = 2.5
-CLIENT_HB_SEC = 1.0
+CLIENT_HB_SEC = 1.5
 # Offload on_tick so asyncio can answer Binance WS keepalive pings (prevents 1011 timeouts).
 # Single worker + scanner RLock — prevents concurrent ticks from racing strategy state.
 _TICK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scanner-tick")
@@ -341,8 +339,6 @@ class BinanceScannerStream:
                     self._tick_count += 1
                     self._ws_tick_count += 1
                     self._last_ws_tick_mono = time.monotonic()
-                    if self._last_error == "ws_connected_but_silent":
-                        self._last_error = None
                 if not pending_map:
                     continue
                 if pending is not None and not pending.done():

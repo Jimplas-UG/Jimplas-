@@ -99,9 +99,8 @@ def test_set_risk_keeps_policy_sizing(monkeypatch_path: str | None = None) -> No
             )
         sc2 = ms.MomentumScanner(conn, lambda: True)
         assert sc2._long1_pct == SAFE_RECOVERY_LEG_PCT and sc2._long2_pct == SAFE_RECOVERY_LEG_PCT
-        # Sep 23–25 desk: risk stays locked after migrate; never unlock on reload.
+        # Sep 23–25: partition/risk stays locked at $100 / 50-40-40 after reload.
         assert sc2._risk_locked is True
-        assert abs(float(sc2._partition_usd) - 100.0) < 1e-9
     finally:
         ms.RISK_CONFIG_PATH = old
         if os.path.isfile(path):

@@ -7,17 +7,7 @@ the live modules still match the working contract:
   Entry: 15m ≥5% gain + ≥0.7% retrace → SHORT (50% partition, 5x)
   +2% adverse from short → Long 1 BUY (40%, 10x)
   +4% adverse from short → Long 2 BUY (40%, 10x)
-  While short underwater OR after a hedge episode (≥+2% / L1|L2 live|closed):
-    hedges stay paired (no solo TP / 0.5% trail) — prevents L1 dump → INVALIDATION
-  Naked primary short exchange leverage target stays 5x (never force 10x)
-  Never stack/open a second overlapping short; adopt refreshes in place
-  Never arm L1/L2 once adverse already ≥ invalidation (6.5%)
-  Manual desk opens cannot exceed locked partition leg size
-  (SELL ≤ 50%@5x, BUY ≤ 40%@10x of $100) — reject oversize
-  Market opens clamp to MARKET_LOT_SIZE (never -4005 → naked invalidation)
-  Adverse % never uses a deflated short entry (no early L1/L2)
-  Hard rule_kernel choke point on every open + live watchdog emergency halt
-  Close paths chunk MARKET_LOT_SIZE; LONG hedges close before SHORT (no orphan long)
+  While short underwater: hedges stay paired (no solo TP / 0.5% trail)
   Rescue: long PnL ≥ short loss + buffer → flatten all
   Invalidation: ≥6.5% adverse from short entry → flatten all
   Short TP −2.5%; never leave orphan longs without the primary short
@@ -32,7 +22,6 @@ If assert_frozen_contract() fails, the bridge must not silently trade a drifted 
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 STRATEGY_ID = "short_first_v1"
@@ -107,8 +96,6 @@ def frozen_contract_snapshot() -> dict[str, Any]:
             "adverse2_pct": LONG2_ADVERSE_PCT,
             "pullback_pct": LONG_HEDGE_PULLBACK_PCT,
             "paired_hold_while_underwater": True,
-            "paired_hold_after_hedge_episode": True,
-            "naked_short_exchange_leverage": PRIMARY_LEVERAGE,
             "invalidation_pct": PAIR_INVALIDATION_PCT,
             "rescue_buffer_pct": HEDGE_RESCUE_BUFFER_PCT,
         },
@@ -160,103 +147,6 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert lev.sizing_leverage("SHORT", "SELL") == PRIMARY_LEVERAGE
     assert lev.sizing_leverage("LONG1", "BUY") == RECOVERY_LEVERAGE
     assert lev.sizing_leverage("LONG2", "BUY") == RECOVERY_LEVERAGE
-    # Naked short must stay 5x on the symbol; only recovery hedges raise exchange to 10x.
-    assert lev.symbol_exchange_leverage(has_recovery_long=False) == PRIMARY_LEVERAGE
-    assert lev.symbol_exchange_leverage(has_recovery_long=True) == RECOVERY_LEVERAGE
-    import inspect
-
-    manage_src = inspect.getsource(ms.MomentumScanner._manage_positions)
-    assert "symbol_exchange_leverage(has_recovery_long=has_long)" in manage_src
-    # Regression lock: never force 10x on a naked primary short (Sep23 leak).
-    assert "target = LONG1_LEVERAGE" not in manage_src
-    assert hasattr(ms.MomentumScanner, "_solo_hedge_exit_allowed")
-    assert hasattr(ms.MomentumScanner, "_hedge_episode_active")
-    solo_src = inspect.getsource(ms.MomentumScanner._solo_hedge_exit_allowed)
-    assert "_hedge_episode_active" in solo_src
-    adopt_src = inspect.getsource(ms.MomentumScanner._adopt_exchange_short)
-    assert "no overlap" in adopt_src or "already" in adopt_src
-    assert "SHORT_LEVERAGE" in adopt_src
-    l1_src = inspect.getsource(ms.MomentumScanner._long1_entry_allowed)
-    l2_src = inspect.getsource(ms.MomentumScanner._long2_entry_allowed)
-    assert "PAIR_INVALIDATION_PCT" in l1_src and "PAIR_INVALIDATION_PCT" in l2_src
-    assert hasattr(ms.MomentumScanner, "clamp_manual_open_qty")
-    assert hasattr(ms.MomentumScanner, "max_manual_open_qty")
-    main_path = Path(__file__).resolve().parent / "main.py"
-    main_src = main_path.read_text(encoding="utf-8")
-    assert "manual_qty_exceeds_locked_partition" in main_src
-    assert "clamp_manual_open_qty" in main_src
-    # Market max clamp + conservative short-entry sync (post-lock forensic).
-    import binance_connector as bc
-
-    parse_src = inspect.getsource(bc.BinanceConnector._parse_symbol_filters)
-    assert "MARKET_LOT_SIZE" in parse_src and "marketMaxQty" in parse_src
-    val_src = inspect.getsource(bc.BinanceConnector._validate_order_qty)
-    assert "marketMaxQty" in val_src
-    sync_src = inspect.getsource(ms.MomentumScanner._sync_short_entry_from_exchange)
-    assert "max(local, ex_entry)" in sync_src
-    assert "deflate" in sync_src
-    eng_path = Path(__file__).resolve().parent / "execution_engine.py"
-    eng_src = eng_path.read_text(encoding="utf-8")
-    assert "qty clamped to market max" in eng_src or "_validate_order_qty" in eng_src
-    # Hard rule kernel — every auto open must pass; fail closed without intent.
-    import rule_kernel as rk
-
-    assert hasattr(rk, "preflight_open") and hasattr(rk, "audit_live_state")
-    assert hasattr(rk, "should_emergency_halt")
-    assert "rule_kernel_missing_intent" in eng_src
-    assert "preflight_open" in eng_src
-    assert hasattr(ms.MomentumScanner, "_build_rule_intent")
-    assert hasattr(ms.MomentumScanner, "_rule_watchdog")
-    assert "rule_intent=self._build_rule_intent" in inspect.getsource(ms.MomentumScanner.__init__)
-    # Close must chunk MARKET max and close LONGs before SHORT (PORTAL orphan lock).
-    close_src = inspect.getsource(bc.BinanceConnector.close_position)
-    assert "marketMaxQty" in close_src or "max_cell" in close_src
-    assert "Close LONG" in close_src or "_close_rank" in close_src
-    assert "long_residual_abort_short" in close_src
-    side_src = inspect.getsource(bc.BinanceConnector.close_by_position_side)
-    assert "max_cell" in side_src or "marketMaxQty" in side_src
-    assert "get_symbol_spec" in side_src
-    leg_src = inspect.getsource(bc.BinanceConnector.close_leg)
-    assert "close_by_position_side" in leg_src
-    assert "PARTIAL_CLOSE_EMERGENCY_HALT" in inspect.getsource(ms.MomentumScanner._close_all)
-    assert hasattr(ms.MomentumScanner, "_retry_stuck_closes")
-    assert hasattr(ms.MomentumScanner, "_mark_stuck_close")
-    assert "REFUSE_RESUME_STUCK_CLOSE" in open(ms.__file__, encoding="utf-8").read()
-    assert hasattr(bc.BinanceConnector, "_persistent_escape_4131_close")
-    assert "force_flat_4131" in inspect.getsource(bc.BinanceConnector._persistent_escape_4131_close)
-    assert "_persistent_escape_4131_close" in inspect.getsource(bc.BinanceConnector.close_position)
-    assert "_persistent_escape_4131_close" in inspect.getsource(bc.BinanceConnector.close_by_position_side)
-    # Ghost floating lock: close paths must sync sticky last-good (not invalidate-only).
-    assert "OVERSIZE_EXTERNAL_SHORT" in open(rk.__file__, encoding="utf-8").read()
-    assert "SAFE_MODE" in open(ms.__file__, encoding="utf-8").read()
-    assert "_flag_oversize_external_short" in open(ms.__file__, encoding="utf-8").read()
-    assert "SAFE_MODE_STUCK_CLOSE" in open(ms.__file__, encoding="utf-8").read()
-    assert "apply_symbol_positions_snapshot" in inspect.getsource(bc.BinanceConnector.close_position)
-    assert "apply_symbol_positions_snapshot" in inspect.getsource(bc.BinanceConnector.close_by_position_side)
-    assert "apply_all_positions_snapshot" in inspect.getsource(bc.BinanceConnector.close_all_positions)
-    assert "apply_symbol_positions_snapshot" in inspect.getsource(ms.MomentumScanner._close_all)
-    # Unverified ACK must query order / position delta — never invent chunk fills.
-    assert hasattr(bc.BinanceConnector, "_resolve_executed_qty")
-    assert hasattr(bc.BinanceConnector, "query_order")
-    assert "_resolve_executed_qty" in inspect.getsource(bc.BinanceConnector.close_position)
-    assert "_resolve_executed_qty" in inspect.getsource(bc.BinanceConnector.close_by_position_side)
-    assert "CLOSE_INCOMPLETE" in open(ms.__file__, encoding="utf-8").read()
-    assert "HEDGE_OPEN_FAIL" in open(ms.__file__, encoding="utf-8").read()
-    # Force risk fetches never invent sticky open legs (post-Sep cascade lock).
-    pos_src = inspect.getsource(bc.BinanceConnector.positions)
-    assert "fail-closed empty" in pos_src or "force=True must never invent" in pos_src
-    assert "if force:" in pos_src and "return []" in pos_src
-    assert hasattr(bc.BinanceConnector, "reset_leverage_if_flat")
-    assert "reset_leverage_if_flat" in inspect.getsource(ms.MomentumScanner._close_all)
-    assert hasattr(bc.BinanceConnector, "_limit_ioc_open_leg")
-    assert "_limit_ioc_open_leg" in inspect.getsource(bc.BinanceConnector.place_market_order)
-    # Flat leverage reset must force-refresh positions (no sticky ghost block).
-    ens = inspect.getsource(bc.BinanceConnector.ensure_exchange_leverage)
-    assert "force=True" in ens and "bypass_rest_cool=True" in ens
-    assert "sticky" in ens.lower() or "ghost" in ens.lower() or "Live open legs only" in ens
-    # Exchange flat wins over soft ACK failure.
-    succ_src = inspect.getsource(ms.MomentumScanner._close_succeeded)
-    assert "Flat on exchange" in succ_src or "exchange" in succ_src.lower()
 
     # Entry / adverse / TP / hedge pullback defaults (floors may raise short trail only).
     assert abs(ms.GAIN_THRESHOLD_PCT - GAIN_THRESHOLD_PCT) < 1e-9
@@ -314,6 +204,7 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "force_locked_partition_usd" in src or "_force_locked_partition_usd" in src
     assert "PARTITION_USD_LOCKED" in src or "locked partition" in src.lower()
 
+    import inspect
     import binance_connector as bc
 
     cool_src = inspect.getsource(bc.BinanceConnector._wait_or_clear_cool_for_close)

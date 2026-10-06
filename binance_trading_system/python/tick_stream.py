@@ -17,14 +17,12 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 log = logging.getLogger("tick_stream")
 
-# Binance USD-M split (2026-03-06); legacy /ws retired 2026-04-23.
-# bookTicker is high-frequency → /public
-MAINNET_WS = "wss://fstream.binance.com/public/ws"
-TESTNET_WS = "wss://stream.binancefuture.com/public/ws"
+MAINNET_WS = "wss://fstream.binance.com/ws"
+TESTNET_WS = "wss://stream.binancefuture.com/ws"
 MAX_TICK_AGE_SEC = 120.0
 RECONNECT_MIN_SEC = 0.02
 RECONNECT_MAX_SEC = 0.6
-CLIENT_HB_SEC = 1.0
+CLIENT_HB_SEC = 1.5
 
 
 def _parse_book_ticker(msg: dict[str, Any]) -> dict[str, Any] | None:
