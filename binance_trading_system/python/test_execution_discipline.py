@@ -311,6 +311,29 @@ def _close_cache_status(ok: bool, result: dict) -> str:
     return "CLOSE_FAILED"
 
 
+def test_force_positions_never_sticky_ghost() -> None:
+    """Sep23 clean chain: force=True must fail-closed empty, never sticky open ghosts."""
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._last_good_positions = [{"symbol": "EDUUSDT", "volume": 99.0, "positionSide": "SHORT"}]
+    c._positions_cache = list(c._last_good_positions)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("REST cooling (418)")
+
+    c._request = boom  # type: ignore
+    live = c.positions("EDUUSDT", force=True, bypass_rest_cool=True)
+    ui = c.positions("EDUUSDT", force=False)
+    ok = live == [] and len(ui) == 1 and float(ui[0].get("volume") or 0) == 99.0
+    _row(
+        "FORCE_POS_NO_STICKY_CASCADE",
+        "force=[] UI-sticky=ghost OK",
+        f"live={live} ui_n={len(ui)}",
+        ok,
+    )
+
+
 def test_reset_leverage_if_flat_marker() -> None:
     from binance_connector import BinanceConnector
     import inspect
@@ -404,6 +427,7 @@ if __name__ == "__main__":
     test_resolve_fill_unverified_no_invent()
     test_close_succeeded_exchange_flat_wins()
     test_incomplete_close_always_safe_mode()
+    test_force_positions_never_sticky_ghost()
     test_reset_leverage_if_flat_marker()
     test_ensure_leverage_ignores_sticky_ghost()
     test_pending_verify_not_cached_as_closed()

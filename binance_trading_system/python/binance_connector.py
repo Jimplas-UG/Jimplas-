@@ -2058,6 +2058,12 @@ class BinanceConnector:
             self._last_good_account = acct
 
     def positions(self, symbol: str | None = None, *, force: bool = False, bypass_rest_cool: bool = False) -> list[dict[str, Any]]:
+        """Fetch open positions.
+
+        Sep 23–25 clean chain: RISK paths must use force=True and never consume sticky
+        ghosts (that cascade kept 10x/20x after flat and flooded kernel_naked blocks).
+        Sticky last-good is UI/cool-path only (force=False).
+        """
         if self.cfg.paper:
             from paper_simulator import paper_store
 
@@ -2084,8 +2090,7 @@ class BinanceConnector:
             su = sym.upper()
             return [p for p in base if str(p.get("symbol") or "").upper() == su]
 
-        # During 418/429 cool, never re-enter positionRisk — phone polls were spamming warnings
-        # and starving order/account REST (looks like "broken trading" on a funded testnet).
+        # UI cool-path only — never for force=True risk decisions.
         if not bypass_rest_cool and not force and self.rest_cooling_left() > 0.05:
             return _sticky(symbol)
 
@@ -2102,13 +2107,20 @@ class BinanceConnector:
             )
         except Exception as e:
             msg = str(e)
-            # One line per cool window — not one per phone poll.
             if "cooling" in msg.lower():
                 if not getattr(self, "_positions_cool_log_ts", 0) or time.time() - self._positions_cool_log_ts > 5:
-                    log.warning("positions: %s (serving cache)", msg)
+                    log.warning(
+                        "positions: %s (%s)",
+                        msg,
+                        "fail-closed empty" if force else "serving UI sticky",
+                    )
                     self._positions_cool_log_ts = time.time()
             else:
                 log.warning("positions: %s", msg)
+            # CRITICAL: force=True must never invent open legs from sticky — that is the
+            # post-Sep cascade (ghost open → keep 10x → kernel_naked spam).
+            if force:
+                return []
             return _sticky(symbol)
         if not isinstance(data, list):
             data = [data] if data else []
@@ -2165,7 +2177,8 @@ class BinanceConnector:
         return out
 
     def has_open_position(self, symbol: str | None = None) -> bool:
-        return len(self.positions(symbol)) > 0
+        # Live only — sticky ghosts must not report a false open book.
+        return len(self.positions(symbol, force=True, bypass_rest_cool=True)) > 0
 
     def open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
         sym = (symbol or self.cfg.symbol).upper()
