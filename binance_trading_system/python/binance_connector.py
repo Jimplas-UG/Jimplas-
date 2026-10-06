@@ -1794,7 +1794,11 @@ class BinanceConnector:
         return est
 
     def ensure_exchange_leverage(self, symbol: str, leverage: int | None = None) -> bool:
-        """Set symbol leverage on Binance (primary Short 5x / recovery Longs 10x)."""
+        """Set symbol leverage on Binance (primary Short 5x / recovery Longs 10x).
+
+        When flat, always force the target (sticky ghosts / prepared-cache must not keep 10x/20x
+        on a naked short — that surfaces as kernel_naked_short_lev_*_not_5 forever).
+        """
         from leverage_policy import ALLOWED_LEVERAGES, SHORT_LEVERAGE
 
         target = int(leverage if leverage is not None else SHORT_LEVERAGE)
@@ -1806,51 +1810,34 @@ class BinanceConnector:
             return True
         if not self.cfg.api_key:
             return False
-        # Trust prepare_symbol_cached only briefly — re-verify so failed POSTs cannot stick.
-        if self.is_symbol_prepared(sym, target):
-            key = (sym, target, "ISOLATED")
-            ts = float(self._prepared_cache.get(key) or 0.0)
-            age = time.time() - ts
-            if age < 60.0:
-                self.cfg.leverage = target
-                self.cfg.symbol = sym
-                return True
-            try:
-                current = self.symbol_leverage(sym)
-                if current == target:
-                    self.cfg.leverage = target
-                    self.cfg.symbol = sym
-                    self._prepared_cache[key] = time.time()
-                    return True
-                log.warning(
-                    "prepared cache stale %s: exchange=%sx wanted=%sx — re-set",
-                    sym,
-                    current,
-                    target,
-                )
-                self._prepared_cache.pop(key, None)
-            except Exception as e:
-                log.warning("leverage verify %s: %s", sym, e)
-                self._prepared_cache.pop(key, None)
-        current = self.symbol_leverage(sym)
-        if current == target:
+
+        try:
+            current = int(self.symbol_leverage(sym))
+        except Exception as e:
+            log.warning("ensure_exchange_leverage %s read: %s", sym, e)
+            current = int(self.cfg.leverage or 0)
+
+        if current == target and current > 0:
             self.cfg.leverage = target
+            self.cfg.symbol = sym
             self._prepared_cache[(sym, target, "ISOLATED")] = time.time()
             return True
-        # Isolated + open position: Binance rejects leverage reductions. Keep the higher
-        # exchange leverage and stop retrying until the symbol is flat.
-        if current > target:
-            fail_key = (sym, "reduce_blocked")
-            last = float(self._leverage_fail_cache.get(fail_key) or 0.0)
-            if time.time() - last < 300.0:
-                self.cfg.leverage = current
-                return True
+
+        # Live open legs only — never trust sticky last-good (ghost blocks 5x reset).
+        try:
             open_legs = [
                 p
-                for p in self.positions(sym, force=False)
+                for p in self.positions(sym, force=True, bypass_rest_cool=True)
                 if float(p.get("volume") or 0) > 1e-12
             ]
-            if open_legs:
+        except Exception:
+            open_legs = []
+
+        # Isolated + open position: Binance rejects leverage reductions. Keep higher lev.
+        if current > target and open_legs:
+            fail_key = (sym, "reduce_blocked")
+            last = float(self._leverage_fail_cache.get(fail_key) or 0.0)
+            if time.time() - last >= 30.0:
                 self._leverage_fail_cache[fail_key] = time.time()
                 log.info(
                     "exchange leverage %s stays %sx (cannot reduce to %sx with open position)",
@@ -1858,9 +1845,13 @@ class BinanceConnector:
                     current,
                     target,
                 )
-                self.cfg.leverage = current
-                self._prepared_cache[(sym, current, "ISOLATED")] = time.time()
-                return True
+            self.cfg.leverage = current
+            self._prepared_cache[(sym, current, "ISOLATED")] = time.time()
+            return True
+
+        # Flat (or increasing lev): POST the target. Clear stale prepared/fail caches first.
+        self._prepared_cache = {k: v for k, v in self._prepared_cache.items() if k[0] != sym}
+        self._leverage_fail_cache.pop((sym, "reduce_blocked"), None)
         try:
             self._request(
                 "POST",
@@ -1870,21 +1861,20 @@ class BinanceConnector:
             )
             self.cfg.leverage = target
             self.cfg.symbol = sym
-            self._prepared_cache = {k: v for k, v in self._prepared_cache.items() if k[0] != sym}
             self._prepared_cache[(sym, target, "ISOLATED")] = time.time()
-            self._leverage_fail_cache.pop((sym, "reduce_blocked"), None)
             log.info("exchange leverage %s set %sx -> %sx", sym, current, target)
             return True
         except RuntimeError as e:
             msg = str(e)
             if "Leverage reduction is not supported" in msg or "-2027" in msg or "-4141" in msg:
                 self._leverage_fail_cache[(sym, "reduce_blocked")] = time.time()
-                self.cfg.leverage = current
-                self._prepared_cache[(sym, current, "ISOLATED")] = time.time()
+                self.cfg.leverage = current if current > 0 else target
+                self._prepared_cache[(sym, self.cfg.leverage, "ISOLATED")] = time.time()
                 log.info(
-                    "exchange leverage %s keep %sx — reduction blocked with open position",
+                    "exchange leverage %s keep %sx — reduction blocked (%s)",
                     sym,
-                    current,
+                    self.cfg.leverage,
+                    msg[:80],
                 )
                 return True
             log.warning("ensure_exchange_leverage %s: %s", sym, e)
@@ -2840,12 +2830,49 @@ class BinanceConnector:
                 self.invalidate_positions_cache()
                 continue
             except RuntimeError as e:
+                msg = str(e)
+                # -2022 ReduceOnly rejected: usually already flat or qty desync — reconcile live.
+                if "-2022" in msg or "ReduceOnly" in msg.lower():
+                    try:
+                        live = self.positions(sym, force=True, bypass_rest_cool=True) or []
+                        live_qty = 0.0
+                        for p in live:
+                            side = str(p.get("positionSide") or "").upper()
+                            typ = str(p.get("type") or "").upper()
+                            if hs == "LONG" and (side == "LONG" or typ == "BUY"):
+                                live_qty += float(p.get("volume") or 0)
+                            elif hs == "SHORT" and (side == "SHORT" or (typ == "SELL" and side != "LONG")):
+                                live_qty += float(p.get("volume") or 0)
+                            elif hs not in ("LONG", "SHORT"):
+                                live_qty += float(p.get("volume") or 0)
+                        live_qty = round_to_step(live_qty, step)
+                        if live_qty <= 1e-12:
+                            log.info(
+                                "force_flat_4131 %s -2022 but exchange flat — treat closed",
+                                sym,
+                            )
+                            remaining = 0.0
+                            last_err = "reduce_only_already_flat"
+                            break
+                        if live_qty + 1e-12 < remaining:
+                            log.info(
+                                "force_flat_4131 %s -2022 reconcile remaining %.8f -> %.8f",
+                                sym,
+                                remaining,
+                                live_qty,
+                            )
+                            remaining = live_qty
+                        last_err = msg
+                    except Exception as re:
+                        last_err = f"{msg}; reconcile={re}"
+                    _time.sleep(CLOSE_FORCE_FLAT_SLEEP_S)
+                    continue
                 if not _is_percent_price_error(e):
-                    last_err = str(e)
+                    last_err = msg
                     log.warning("force_flat_4131 market %s: %s", sym, e)
                     _time.sleep(CLOSE_FORCE_FLAT_SLEEP_S)
                     continue
-                last_err = str(e)
+                last_err = msg
             # 2) LIMIT IOC walk (fresh book each call)
             lim = self._limit_ioc_close_leg(
                 symbol=sym,

@@ -311,6 +311,33 @@ def _close_cache_status(ok: bool, result: dict) -> str:
     return "CLOSE_FAILED"
 
 
+def test_ensure_leverage_ignores_sticky_ghost() -> None:
+    """Flat book with sticky ghost must still allow 5x reset (no false reduce_blocked)."""
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._last_good_positions = [{"symbol": "EDUUSDT", "volume": 100.0, "positionSide": "SHORT"}]
+    c.symbol_leverage = lambda symbol=None: 20  # type: ignore
+    posted: list[int] = []
+
+    def _req(method, path, params=None, signed=False, **_k):
+        if path == "/fapi/v1/leverage":
+            posted.append(int(params.get("leverage") or 0))
+            return {"leverage": params.get("leverage")}
+        return {}
+
+    c._request = _req  # type: ignore
+    # Live force query returns flat
+    c.positions = lambda symbol=None, force=False, bypass_rest_cool=False: []  # type: ignore
+    ok = c.ensure_exchange_leverage("EDUUSDT", 5)
+    _row(
+        "LEV_RESET_IGNORES_STICKY_GHOST",
+        "POST leverage=5 when force positions empty",
+        f"ok={ok} posted={posted}",
+        ok is True and posted == [5],
+    )
+
+
 def test_pending_verify_not_cached_as_closed() -> None:
     main_path = Path(__file__).resolve().parent / "main.py"
     src = main_path.read_text(encoding="utf-8")
@@ -360,5 +387,6 @@ if __name__ == "__main__":
     test_resolve_fill_unverified_no_invent()
     test_close_succeeded_exchange_flat_wins()
     test_incomplete_close_always_safe_mode()
+    test_ensure_leverage_ignores_sticky_ghost()
     test_pending_verify_not_cached_as_closed()
     print("test_execution_discipline: ALL OK")

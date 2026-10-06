@@ -545,7 +545,7 @@ class MomentumScanner:
 
         sym = str(getattr(signal, "symbol", "") or "").upper()
         coin = self._coins.get(sym)
-        # Before naked SHORT, force 5x while flat so kernel does not see stuck 10x.
+        # Before naked SHORT, force 5x while flat so kernel does not see stuck 10x/20x.
         leg_u = str(getattr(signal, "leg", "") or "").upper()
         if not manual and leg_u == "SHORT" and hasattr(self._connector, "ensure_exchange_leverage"):
             if not self._exchange_has_short(sym) and not self._exchange_has_long(sym):
@@ -559,6 +559,21 @@ class MomentumScanner:
                 lev = int(self._connector.symbol_leverage(sym))
             except Exception:
                 lev = None
+        # Second chance: prepared/sticky ghosts used to leave lev at 10/20 after flat.
+        if (
+            not manual
+            and leg_u == "SHORT"
+            and lev is not None
+            and lev > SHORT_LEVERAGE
+            and not self._exchange_has_short(sym)
+            and not self._exchange_has_long(sym)
+            and hasattr(self._connector, "ensure_exchange_leverage")
+        ):
+            try:
+                self._connector.ensure_exchange_leverage(sym, SHORT_LEVERAGE)
+                lev = int(self._connector.symbol_leverage(sym))
+            except Exception:
+                pass
         mmax = 0.0
         if hasattr(self._connector, "get_symbol_spec"):
             try:
@@ -2863,6 +2878,25 @@ class MomentumScanner:
                 err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym} LONG1: {err}"
                 log.warning("scanner LONG1 failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
+                # -4131 / PERCENT_PRICE on hedge open leaves naked short — freeze new exposure.
+                if coin.short and (
+                    "-4131" in err
+                    or "PERCENT_PRICE" in err.upper()
+                    or "percent_price" in err.lower()
+                ):
+                    self._enter_safe_mode(
+                        "HEDGE_OPEN_FAIL",
+                        codes=["HEDGE_OPEN_FAIL", sym, "LONG1", "-4131"],
+                    )
+                    self._mark_stuck_close(
+                        sym,
+                        "HEDGE_OPEN_FAIL_LONG1",
+                        [{"leg": "SHORT", "note": "long1_open_4131", "volume": coin.short.qty}],
+                    )
+                    log.critical(
+                        "HEDGE_OPEN_FAIL SAFE_MODE %s LONG1 -4131 with short still open — flatten-only",
+                        sym,
+                    )
                 if getattr(self._connector, "is_api_auth_error", None) and self._connector.is_api_auth_error(err):
                     self._connector.note_api_auth_failure(err, http_code=r.http_code, binance_code=r.binance_code)
                     self.invalidate_session_cache()
@@ -2930,6 +2964,24 @@ class MomentumScanner:
                 err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym} LONG2: {err}"
                 log.warning("scanner LONG2 failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
+                if coin.short and (
+                    "-4131" in err
+                    or "PERCENT_PRICE" in err.upper()
+                    or "percent_price" in err.lower()
+                ):
+                    self._enter_safe_mode(
+                        "HEDGE_OPEN_FAIL",
+                        codes=["HEDGE_OPEN_FAIL", sym, "LONG2", "-4131"],
+                    )
+                    self._mark_stuck_close(
+                        sym,
+                        "HEDGE_OPEN_FAIL_LONG2",
+                        [{"leg": "SHORT", "note": "long2_open_4131", "volume": coin.short.qty}],
+                    )
+                    log.critical(
+                        "HEDGE_OPEN_FAIL SAFE_MODE %s LONG2 -4131 with short still open — flatten-only",
+                        sym,
+                    )
                 if getattr(self._connector, "is_api_auth_error", None) and self._connector.is_api_auth_error(err):
                     self._connector.note_api_auth_failure(err, http_code=r.http_code, binance_code=r.binance_code)
                     self.invalidate_session_cache()
