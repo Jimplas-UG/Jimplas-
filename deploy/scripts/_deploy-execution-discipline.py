@@ -43,6 +43,8 @@ assert hasattr(BinanceConnector, 'query_order')
 assert hasattr(BinanceConnector, 'reset_leverage_if_flat')
 assert hasattr(BinanceConnector, '_limit_ioc_open_leg')
 assert '_resolve_executed_qty' in inspect.getsource(BinanceConnector.close_position)
+pos_src = inspect.getsource(BinanceConnector.positions)
+assert 'fail-closed empty' in pos_src and 'if force:' in pos_src
 assert 'CLOSE_INCOMPLETE' in open('momentum_scanner.py', encoding='utf-8').read()
 assert 'HEDGE_OPEN_FAIL' in open('momentum_scanner.py', encoding='utf-8').read()
 assert 'reset_leverage_if_flat' in inspect.getsource(MomentumScanner._close_all)
