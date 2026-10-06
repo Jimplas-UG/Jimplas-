@@ -2809,6 +2809,16 @@ class MomentumScanner:
                 err = str(r.error or "order_failed")
                 self._last_exec_error = f"{sym}: {err}"
                 log.warning("scanner SHORT failed %s: %s latency_ms=%s", sym, err, r.latency_ms)
+                # Stuck 10x/20x after hedge: reset while flat and cool briefly — stop kernel spam.
+                if "kernel_naked_short_lev" in err and hasattr(self._connector, "reset_leverage_if_flat"):
+                    try:
+                        self._connector.reset_leverage_if_flat(sym, SHORT_LEVERAGE)
+                        log.info("scanner SHORT lev-reset after kernel block %s", sym)
+                    except Exception as e:
+                        log.warning("scanner SHORT lev-reset %s: %s", sym, e)
+                    # Brief cool only — full ENTRY_COOLDOWN_MS would miss valid re-entries.
+                    self._entry_cooldown_until_ms[sym] = int(time.time() * 1000) + 15_000
+                    log.info("scanner SHORT brief cool 15s after lev-reset %s", sym)
                 if getattr(self._connector, "is_api_auth_error", None) and self._connector.is_api_auth_error(err):
                     self._connector.note_api_auth_failure(err, http_code=r.http_code, binance_code=r.binance_code)
                     self.invalidate_session_cache()
@@ -3496,6 +3506,12 @@ class MomentumScanner:
                     source="scanner",
                 )
                 log.info("scanner closed %s reason=%s latency_ms=%s", sym, reason, close_result["latency_ms"])
+                # Permanent: after flat, force primary 5x so next naked short is not kernel-blocked.
+                if hasattr(self._connector, "reset_leverage_if_flat"):
+                    try:
+                        self._connector.reset_leverage_if_flat(sym, SHORT_LEVERAGE)
+                    except Exception as e:
+                        log.warning("post-flat leverage reset %s: %s", sym, e)
                 self._bump_trades_closed()
                 if self._one_at_a_time:
                     self._maybe_execute_best_pending()

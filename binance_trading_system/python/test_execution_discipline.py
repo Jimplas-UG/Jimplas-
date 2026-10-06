@@ -311,6 +311,23 @@ def _close_cache_status(ok: bool, result: dict) -> str:
     return "CLOSE_FAILED"
 
 
+def test_reset_leverage_if_flat_marker() -> None:
+    from binance_connector import BinanceConnector
+    import inspect
+
+    ok = hasattr(BinanceConnector, "reset_leverage_if_flat") and hasattr(
+        BinanceConnector, "_limit_ioc_open_leg"
+    )
+    src = inspect.getsource(BinanceConnector.place_market_order)
+    ok = ok and "_limit_ioc_open_leg" in src
+    _row(
+        "POST_FLAT_LEV_AND_HEDGE_OPEN_4131",
+        "reset_leverage_if_flat + limit_ioc_open on LONG -4131",
+        f"ok={ok}",
+        ok,
+    )
+
+
 def test_ensure_leverage_ignores_sticky_ghost() -> None:
     """Flat book with sticky ghost must still allow 5x reset (no false reduce_blocked)."""
     from binance_connector import BinanceConnector, BinanceConfig
@@ -387,6 +404,7 @@ if __name__ == "__main__":
     test_resolve_fill_unverified_no_invent()
     test_close_succeeded_exchange_flat_wins()
     test_incomplete_close_always_safe_mode()
+    test_reset_leverage_if_flat_marker()
     test_ensure_leverage_ignores_sticky_ghost()
     test_pending_verify_not_cached_as_closed()
     print("test_execution_discipline: ALL OK")

@@ -974,6 +974,90 @@ class BinanceConnector:
             "retryable": retryable,
         }
 
+    def _limit_ioc_open_leg(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: float,
+        hedge_side: str,
+        reference_price: float = 0.0,
+    ) -> dict[str, Any]:
+        """LIMIT IOC open for recovery longs when MARKET dies on -4131 PERCENT_PRICE."""
+        import time as _time
+
+        sym = symbol.upper()
+        side_u = side.upper()
+        hs = hedge_side if hedge_side in ("LONG", "SHORT") else "LONG"
+        spec = self._close_price_spec(sym)
+        step = float(spec.get("stepSize") or 0.001)
+        tick = float(spec.get("tickSize") or 0.0001)
+        qty = round_to_step(float(quantity), step)
+        if qty <= 0:
+            return {"ok": False, "error": "invalid_quantity"}
+        book = self.book_ticker(sym) or {}
+        bid = float(book.get("bid") or 0)
+        ask = float(book.get("ask") or 0)
+        mark = float(self.mark_price(sym) or reference_price or 0)
+        mult_up = _float_or_none(spec.get("multiplierUp"))
+        mult_down = _float_or_none(spec.get("multiplierDown"))
+        candidates, _band_min, _band_max = build_limit_ioc_candidates(
+            exit_side=side_u,
+            bid=bid,
+            ask=ask,
+            mark=mark,
+            tick=tick,
+            multiplier_up=mult_up,
+            multiplier_down=mult_down,
+            mark_centered=True,
+        )
+        last_err = "ioc_open_unfilled"
+        for px in candidates[:8]:
+            cid = f"{CLIENT_ID_PREFIX}_LO_{hs}_{int(_time.time() * 1000)}"[:36]
+            params: dict[str, Any] = {
+                "symbol": sym,
+                "side": side_u,
+                "type": "LIMIT",
+                "timeInForce": "IOC",
+                "quantity": qty,
+                "price": px,
+                "newClientOrderId": cid,
+                "positionSide": hs,
+            }
+            try:
+                resp = self._request_keepalive(
+                    "POST", "/fapi/v1/order", params, signed=True, timeout=10.0, bypass_rest_cool=True
+                )
+            except Exception as e:
+                last_err = str(e)
+                log.warning("limit_ioc_open %s %s px=%s: %s", sym, hs, px, e)
+                _time.sleep(0.05)
+                continue
+            filled, ack_px, src = self._resolve_executed_qty(resp, symbol=sym, order_id=resp.get("orderId"))
+            if filled <= 1e-12:
+                last_err = f"ioc_open_unfilled status={resp.get('status')}"
+                continue
+            fill = float(ack_px or resp.get("avgPrice") or px)
+            log.info(
+                "limit_ioc_open_ok %s %s qty=%.8f px=%s via=%s (after MARKET -4131)",
+                sym,
+                hs,
+                filled,
+                fill,
+                src,
+            )
+            return {
+                "ok": True,
+                "symbol": sym,
+                "side": side_u,
+                "quantity": filled,
+                "fill_price": fill,
+                "order_id": resp.get("orderId"),
+                "retryable": False,
+                "close_method": "limit_ioc_open_after_4131",
+            }
+        return {"ok": False, "error": last_err, "retryable": False}
+
     def place_market_order(
         self,
         symbol: str,
@@ -1043,6 +1127,20 @@ class BinanceConnector:
         try:
             entry_resp = self._request_keepalive("POST", "/fapi/v1/order", params, signed=True, timeout=8.0)
         except Exception as e:
+            # Hedge opens (Long1/Long2) hit -4131 on thin books — one LIMIT IOC escape
+            # before failing (same desk failure class as close-path -4131).
+            if _is_percent_price_error(e) and leg_u in ("LONG1", "LONG2", "LONG") and side_u == "BUY":
+                lim = self._limit_ioc_open_leg(
+                    symbol=sym,
+                    side=side_u,
+                    quantity=qty,
+                    hedge_side="LONG",
+                    reference_price=price,
+                )
+                if lim.get("ok"):
+                    lim["latency_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
+                    lim["close_method"] = lim.get("close_method") or "limit_ioc_open_after_4131"
+                    return lim
             parsed = self._parse_order_error(e)
             parsed["ok"] = False
             parsed["latency_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
@@ -1879,6 +1977,24 @@ class BinanceConnector:
                 return True
             log.warning("ensure_exchange_leverage %s: %s", sym, e)
             return False
+
+    def reset_leverage_if_flat(self, symbol: str, leverage: int | None = None) -> bool:
+        """After a verified flatten: clear sticky/prepared caches and force primary leverage.
+
+        Permanent desk lock — never leave a flat symbol stuck at 10x/20x from a prior hedge.
+        """
+        from leverage_policy import SHORT_LEVERAGE
+
+        sym = symbol.upper()
+        target = int(leverage if leverage is not None else SHORT_LEVERAGE)
+        # Drop sticky ghost for this symbol so risk paths cannot see a fake open leg.
+        try:
+            self.apply_symbol_positions_snapshot(sym, [])
+        except Exception:
+            pass
+        self._prepared_cache = {k: v for k, v in self._prepared_cache.items() if k[0] != sym}
+        self._leverage_fail_cache.pop((sym, "reduce_blocked"), None)
+        return self.ensure_exchange_leverage(sym, target)
 
     def invalidate_positions_cache(self) -> None:
         # Drop TTL cache only — keep last-good so UI does not flash FLAT on cool/WS events.

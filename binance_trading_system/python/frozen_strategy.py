@@ -242,6 +242,10 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "_resolve_executed_qty" in inspect.getsource(bc.BinanceConnector.close_by_position_side)
     assert "CLOSE_INCOMPLETE" in open(ms.__file__, encoding="utf-8").read()
     assert "HEDGE_OPEN_FAIL" in open(ms.__file__, encoding="utf-8").read()
+    assert hasattr(bc.BinanceConnector, "reset_leverage_if_flat")
+    assert "reset_leverage_if_flat" in inspect.getsource(ms.MomentumScanner._close_all)
+    assert hasattr(bc.BinanceConnector, "_limit_ioc_open_leg")
+    assert "_limit_ioc_open_leg" in inspect.getsource(bc.BinanceConnector.place_market_order)
     # Flat leverage reset must force-refresh positions (no sticky ghost block).
     ens = inspect.getsource(bc.BinanceConnector.ensure_exchange_leverage)
     assert "force=True" in ens and "bypass_rest_cool=True" in ens
