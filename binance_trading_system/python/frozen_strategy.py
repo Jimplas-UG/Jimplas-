@@ -213,6 +213,21 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "immediate flatten" not in cool_src, "instant cool-clear must never return"
     assert "forced to 12s" in cool_src or "ignoring max_wait_s" in cool_src
 
+    # Capital locks restored on Sep23 core (no Oct cascade/halt layers).
+    assert hasattr(ms.MomentumScanner, "_hedge_episode_active")
+    assert hasattr(ms.MomentumScanner, "_solo_hedge_exit_allowed")
+    assert hasattr(ms.MomentumScanner, "clamp_manual_open_qty")
+    assert "PAIR_INVALIDATION_PCT" in inspect.getsource(ms.MomentumScanner._long1_entry_allowed)
+    assert "PAIR_INVALIDATION_PCT" in inspect.getsource(ms.MomentumScanner._long2_entry_allowed)
+    manage_src = inspect.getsource(ms.MomentumScanner._manage_positions)
+    assert "target = LONG1_LEVERAGE" not in manage_src
+    assert "symbol_exchange_leverage" in manage_src
+    assert "marketMaxQty" in inspect.getsource(bc.BinanceConnector._parse_symbol_filters)
+    assert "long_residual_abort_short" in inspect.getsource(bc.BinanceConnector.close_position)
+    pos_src = inspect.getsource(bc.BinanceConnector.positions)
+    assert "fail-closed empty" in pos_src
+    assert "if force:" in pos_src and "return []" in pos_src
+
     return frozen_contract_snapshot()
 
 

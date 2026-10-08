@@ -1322,11 +1322,24 @@ def api_order(body: OrderBody):
             tp = None
 
     now_ms = int(time.time() * 1000)
+    req_qty = float(body.volume)
+    qty, rejected = momentum_scanner.clamp_manual_open_qty(sym, side_u, float(ref), req_qty)
+    if rejected:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "error": "manual_qty_exceeds_locked_partition",
+                "max_qty": qty,
+                "requested": req_qty,
+                "partition_usd": 100.0,
+            },
+        )
     # Unique id every tap — old MANUAL_sym_side_magic blocked all re-orders as duplicates.
     signal = ExecutionSignal(
         symbol=sym,
         side=side_u,
-        quantity=float(body.volume),
+        quantity=float(qty),
         reference_price=float(ref),
         leverage=SHORT_LEVERAGE,
         magic=int(body.magic),

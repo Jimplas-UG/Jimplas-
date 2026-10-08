@@ -24,6 +24,25 @@ class HedgeConnector(BinanceConnector):
         self._last_good_positions_ts = 0.0
         self._positions_cache = None
         self._positions_cache_ts = 0.0
+        self._all_specs_cache = {
+            "BTCUSDT": {
+                "stepSize": 0.001,
+                "minQty": 0.001,
+                "maxQty": 1000000,
+                "marketMaxQty": 1000000,
+                "marketMinQty": 0.001,
+                "marketStepSize": 0.001,
+            },
+            "TACUSDT": {
+                "stepSize": 0.001,
+                "minQty": 0.001,
+                "maxQty": 1000000,
+                "marketMaxQty": 1000000,
+                "marketMinQty": 0.001,
+                "marketStepSize": 0.001,
+            },
+        }
+        self._all_specs_loaded_at = 1e18
 
     def is_hedge_mode(self) -> bool:
         return True
@@ -42,6 +61,17 @@ class OneWayConnector(BinanceConnector):
         self._last_good_positions_ts = 0.0
         self._positions_cache = None
         self._positions_cache_ts = 0.0
+        self._all_specs_cache = {
+            "TACUSDT": {
+                "stepSize": 0.001,
+                "minQty": 0.001,
+                "maxQty": 1000000,
+                "marketMaxQty": 1000000,
+                "marketMinQty": 0.001,
+                "marketStepSize": 0.001,
+            }
+        }
+        self._all_specs_loaded_at = 1e18
 
     def is_hedge_mode(self) -> bool:
         return False

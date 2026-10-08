@@ -29,6 +29,7 @@ FILES = [
     "binance_trading_system/python/test_strategy_guards.py",
     "binance_trading_system/python/test_frozen_strategy.py",
     "binance_trading_system/python/test_leverage_policy.py",
+    "binance_trading_system/python/test_sep23_capital_locks.py",
 ]
 
 REMOVE = [
@@ -49,12 +50,20 @@ test ! -f rule_kernel.py
 {PY} test_strategy_guards.py
 {PY} test_close_orders.py
 {PY} test_execution_engine.py
+{PY} test_sep23_capital_locks.py
 {PY} - <<'PY'
 from frozen_strategy import assert_frozen_contract
+import inspect
+from momentum_scanner import MomentumScanner
+from binance_connector import BinanceConnector
 snap = assert_frozen_contract()
 assert snap['strategy_id'] == 'short_first_v1'
 assert abs(float(snap['ops']['partition_usd']) - 100.0) < 1e-9
+assert 'target = LONG1_LEVERAGE' not in inspect.getsource(MomentumScanner._manage_positions)
+assert 'long_residual_abort_short' in inspect.getsource(BinanceConnector.close_position)
+assert hasattr(MomentumScanner, '_solo_hedge_exit_allowed')
 print('CONTRACT', snap['strategy_id'], 'part', snap['ops']['partition_usd'])
+print('SEP23_CAPITAL_LOCKS_OK')
 print('SEP23_BASELINE_MARKERS_OK')
 PY
 systemctl restart bilshenz-binance-api bilshenz-forward-bot

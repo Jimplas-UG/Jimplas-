@@ -1,32 +1,26 @@
 ---
-description: Sep 23–25 baseline only — do not reintroduce Oct layered cascades.
+description: Sep 23–25 capital locks on restored baseline — never force naked 10x / solo dump / -4005 orphans.
 alwaysApply: true
 ---
 
-# Desk baseline — Sep 23–25 only (`f194e4e`)
+# Sep 23–25 capital locks (restored on `f194e4e` core)
 
-On **2026-10-06** the operator explicitly ordered: strip post–Sep 23–25 experiments and stick to the winning desk only.
+Operator ordered Oct cascade layers removed, then ordered these **capital locks** back after live rule breaks (naked short forced 10x, solo LONG1 pullbacks, −4005 orphans, AAVE oversize).
 
-## Locked baseline
+## Hard locks — do not weaken
 
-- Commit: `f194e4e` — Lock Sep 23–25 desk at $100 partition
-- Strategy: `short_first_v1` via `frozen_strategy.py`
-- Knobs: gain 5 / retrace 0.7 / L1 2 / L2 4 / inv 6.5 / TP 2.5 / SMART 6 / lev 5×10 / partitions 50–40–40 / **$100 only**
-- SMART_EXIT requires short profit when hedges open; manual close confirms; close cool ≤12s
+1. **Naked short exchange target = 5x** — `_manage_positions` must use `symbol_exchange_leverage(has_recovery_long=…)`. **Forbidden:** `target = LONG1_LEVERAGE` when naked.
+2. **Hedge episode paired hold** — once adverse peak ≥ +2% or L1/L2 live/closed, **no solo** Long TP / 0.5% pullback while short still open (`_solo_hedge_exit_allowed` / `_try_close_hedge_leg`).
+3. **No L1/L2 at/past 6.5% invalidation** — gates in `_long1_entry_allowed` / `_long2_entry_allowed`.
+4. **Manual opens capped** to $100 partition legs via `clamp_manual_open_qty` (reject oversize).
+5. **MARKET_LOT_SIZE** clamp on opens; **chunked closes**, LONG before SHORT, **abort SHORT if LONG residual**.
+6. **`force=True` positions fail-closed empty** — never sticky ghosts into risk/leverage.
 
-## Do NOT reintroduce (removed Oct experiments)
+## Still forbidden (Oct cascade)
 
-These burned the desk with cascade spam / halt storms. Do not bring them back unless the user **explicitly** orders a new strategy:
+Do not reintroduce `rule_kernel` spam / SAFE_MODE halt storms. Knobs stay $100 / 5–0.7–2–4–6.5 / 5×10 / 50–40–40.
 
-- `rule_kernel.py` + live emergency-halt watchdog
-- `SAFE_MODE` / `OVERSIZE_EXTERNAL_SHORT` / `CLOSE_INCOMPLETE` layering
-- `test_violation_locks.py` / `test_execution_discipline.py` Oct suites
-- LIMIT-IOC hedge-open cascades, sticky→risk ghost leverage patches stacked on top of sticky
+## Tests
 
-Sticky last-good for **UI cool** is Sep-era and OK. Risk paths must still follow exchange truth as in the Sep 23–25 connector.
-
-## Allowed
-
-- Bugfixes that restore this Sep 23–25 contract (not invent new halt layers)
-- UI / APK / WS / ghost-floating display guards
-- Deploy / observability scripts
+- `python test_sep23_capital_locks.py`
+- `assert_frozen_contract()` markers for the locks above
