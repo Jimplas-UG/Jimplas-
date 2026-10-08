@@ -224,6 +224,9 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "symbol_exchange_leverage" in manage_src
     assert "marketMaxQty" in inspect.getsource(bc.BinanceConnector._parse_symbol_filters)
     assert "long_residual_abort_short" in inspect.getsource(bc.BinanceConnector.close_position)
+    side_src = inspect.getsource(bc.BinanceConnector.close_by_position_side)
+    assert "marketMaxQty" in side_src or "market_max" in side_src
+    assert "too_many_close_chunks" in side_src
     pos_src = inspect.getsource(bc.BinanceConnector.positions)
     assert "fail-closed empty" in pos_src
     assert "if force:" in pos_src and "return []" in pos_src

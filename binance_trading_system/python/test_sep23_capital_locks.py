@@ -110,6 +110,8 @@ def test_close_chunks_and_abort() -> None:
     assert "long_residual_abort_short" in src
     assert "marketMaxQty" in src or "market_max" in src
     assert "Close LONG" in src or "_close_rank" in src
+    side = inspect.getsource(BinanceConnector.close_by_position_side)
+    assert "market_max" in side and "too_many_close_chunks" in side
     parse = inspect.getsource(BinanceConnector._parse_symbol_filters)
     assert "marketMaxQty" in parse
     print("OK close_position chunks MARKET max, aborts SHORT if LONG residual")

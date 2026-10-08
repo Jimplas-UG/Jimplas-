@@ -1648,9 +1648,13 @@ class MomentumScanner:
             if self._exchange_has_long(sym) and not self._exchange_has_short(sym):
                 log.warning("reconcile %s flatten orphan long without short", sym)
                 try:
-                    self._connector.close_position(sym, None)
+                    r = self._connector.close_position(sym, None)
                 except Exception as e:
                     log.warning("reconcile flatten %s: %s", sym, e)
+                    continue
+                if not r.get("ok"):
+                    log.warning("reconcile %s flatten incomplete — keep blocking entries", sym)
+                    continue
                 coin = self._coins.get(sym)
                 if coin:
                     self._reset_coin_state(coin)
