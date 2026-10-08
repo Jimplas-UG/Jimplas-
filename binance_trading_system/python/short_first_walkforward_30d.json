@@ -1,0 +1,1991 @@
+{
+  "strategy": "short_first_v1",
+  "data": "binance USD-M public 15m klines",
+  "costs": {
+    "fee_rate": 0.0004,
+    "slip_pct": 0.05
+  },
+  "desk": "one trade at a time, no 24h time-stop (WINDOW_MARK = still open at window end)",
+  "rules": {
+    "strategy_id": "short_first_v1",
+    "strategy_name": "Short \u2192 Long 1 \u2192 Long 2",
+    "primary": {
+      "leg": "SHORT",
+      "side": "SELL",
+      "magic": 88001,
+      "partition_pct": 50.0,
+      "leverage": 5,
+      "status": "Short"
+    },
+    "recovery": {
+      "leg1": "LONG1",
+      "leg2": "LONG2",
+      "side": "BUY",
+      "magic1": 88002,
+      "magic2": 88003,
+      "partition_pct": 40.0,
+      "leverage": 10,
+      "status1": "Long 1",
+      "status2": "Long 2",
+      "adverse1_pct": 2.0,
+      "adverse2_pct": 4.0,
+      "pullback_pct": 0.5,
+      "paired_hold_while_underwater": true,
+      "invalidation_pct": 6.5,
+      "rescue_buffer_pct": 1.0
+    },
+    "entry": {
+      "gain_pct": 5.0,
+      "retrace_pct": 0.7
+    },
+    "tp": {
+      "short_pct": 2.5,
+      "long_pct": 2.5
+    },
+    "ops": {
+      "smart_exit_net_pct": 6.0,
+      "smart_exit_requires_short_profit_if_hedged": true,
+      "close_rest_cool_max_wait_s": 12.0,
+      "manual_close_confirm_required": true,
+      "partition_usd": 100.0,
+      "partition_usd_locked": true
+    }
+  },
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "ZECUSDT",
+    "SNDKUSDT",
+    "NEARUSDT",
+    "XRPUSDT",
+    "CLUSDT",
+    "SPCXUSDT",
+    "BZUSDT",
+    "SKHYNIXUSDT",
+    "HYPEUSDT",
+    "OGNUSDT",
+    "DOGEUSDT",
+    "KORUUSDT",
+    "MUUSDT"
+  ],
+  "days": 60,
+  "walk_forward_days": 30,
+  "backtest": {
+    "label": "backtest",
+    "from_ms": 1786311900000,
+    "to_ms": 1788903900000,
+    "from_utc": "2026-08-09 21:45",
+    "to_utc": "2026-09-08 21:45",
+    "summary": {
+      "strategy": "short_first_v1",
+      "trades": 57,
+      "wins": 47,
+      "losses": 10,
+      "win_rate": 82.5,
+      "net_pnl": 174.65,
+      "avg_pnl": 3.06,
+      "avg_win": 6.18,
+      "avg_loss": -11.56,
+      "max_dd": 0.74,
+      "end_equity": 5174.65,
+      "start_equity": 5000.0,
+      "partition_usd": 100.0,
+      "by_reason": {
+        "RESCUE": 13,
+        "INVALIDATION": 6,
+        "SHORT_TP": 38
+      },
+      "hedge_rate_l1": 45.6,
+      "hedge_rate_l2": 29.8,
+      "skipped_overlap": 121,
+      "rule_exits": 57,
+      "window_marks": 0,
+      "rule_net_pnl": 174.65,
+      "window_mark_pnl": 0
+    },
+    "per_reason_pnl": {
+      "RESCUE": {
+        "n": 13,
+        "pnl": 36.46
+      },
+      "INVALIDATION": {
+        "n": 6,
+        "pnl": 72.09
+      },
+      "SHORT_TP": {
+        "n": 38,
+        "pnl": 66.09
+      }
+    },
+    "per_symbol": {
+      "BTCUSDT": {
+        "trades": 1,
+        "pnl": 0.46,
+        "bars": 2880,
+        "l1": 1,
+        "l2": 1
+      },
+      "ETHUSDT": {
+        "trades": 4,
+        "pnl": 14.76,
+        "bars": 2880,
+        "l1": 2,
+        "l2": 1
+      },
+      "SOLUSDT": {
+        "trades": 7,
+        "pnl": 22.81,
+        "bars": 2880,
+        "l1": 3,
+        "l2": 2
+      },
+      "ZECUSDT": {
+        "trades": 33,
+        "pnl": 125.69,
+        "bars": 2880,
+        "l1": 15,
+        "l2": 11
+      },
+      "SNDKUSDT": {
+        "trades": 19,
+        "pnl": 78.49,
+        "bars": 2880,
+        "l1": 6,
+        "l2": 4
+      },
+      "NEARUSDT": {
+        "trades": 13,
+        "pnl": -2.25,
+        "bars": 2880,
+        "l1": 7,
+        "l2": 5
+      },
+      "XRPUSDT": {
+        "trades": 15,
+        "pnl": -8.46,
+        "bars": 2880,
+        "l1": 6,
+        "l2": 1
+      },
+      "CLUSDT": {
+        "trades": 0,
+        "pnl": 0,
+        "bars": 2880,
+        "l1": 0,
+        "l2": 0
+      },
+      "SPCXUSDT": {
+        "trades": 3,
+        "pnl": 17.4,
+        "bars": 2880,
+        "l1": 0,
+        "l2": 0
+      },
+      "BZUSDT": {
+        "trades": 0,
+        "pnl": 0,
+        "bars": 2880,
+        "l1": 0,
+        "l2": 0
+      },
+      "SKHYNIXUSDT": {
+        "trades": 9,
+        "pnl": 39.95,
+        "bars": 2880,
+        "l1": 3,
+        "l2": 3
+      },
+      "HYPEUSDT": {
+        "trades": 7,
+        "pnl": 9.83,
+        "bars": 2880,
+        "l1": 0,
+        "l2": 0
+      },
+      "OGNUSDT": {
+        "trades": 7,
+        "pnl": 38.72,
+        "bars": 2880,
+        "l1": 1,
+        "l2": 1
+      },
+      "DOGEUSDT": {
+        "trades": 9,
+        "pnl": 43.05,
+        "bars": 2880,
+        "l1": 2,
+        "l2": 2
+      },
+      "KORUUSDT": {
+        "trades": 47,
+        "pnl": 76.68,
+        "bars": 2880,
+        "l1": 15,
+        "l2": 10
+      },
+      "MUUSDT": {
+        "trades": 4,
+        "pnl": 5.17,
+        "bars": 2880,
+        "l1": 4,
+        "l2": 4
+      }
+    }
+  },
+  "forward": {
+    "label": "forward",
+    "from_ms": 1788903900000,
+    "to_ms": 1791495900001,
+    "from_utc": "2026-09-08 21:45",
+    "to_utc": "2026-10-08 21:45",
+    "summary": {
+      "strategy": "short_first_v1",
+      "trades": 87,
+      "wins": 72,
+      "losses": 15,
+      "win_rate": 82.8,
+      "net_pnl": 284.22,
+      "avg_pnl": 3.27,
+      "avg_win": 5.32,
+      "avg_loss": -6.59,
+      "max_dd": 0.43,
+      "end_equity": 5284.22,
+      "start_equity": 5000.0,
+      "partition_usd": 100.0,
+      "by_reason": {
+        "SHORT_TP": 61,
+        "RESCUE": 22,
+        "INVALIDATION": 3,
+        "WINDOW_MARK": 1
+      },
+      "hedge_rate_l1": 37.9,
+      "hedge_rate_l2": 28.7,
+      "skipped_overlap": 98,
+      "rule_exits": 86,
+      "window_marks": 1,
+      "rule_net_pnl": 291.85,
+      "window_mark_pnl": -7.63
+    },
+    "per_reason_pnl": {
+      "SHORT_TP": {
+        "n": 61,
+        "pnl": 225.21
+      },
+      "RESCUE": {
+        "n": 22,
+        "pnl": 32.17
+      },
+      "INVALIDATION": {
+        "n": 3,
+        "pnl": 34.45
+      },
+      "WINDOW_MARK": {
+        "n": 1,
+        "pnl": -7.63
+      }
+    },
+    "per_symbol": {
+      "BTCUSDT": {
+        "trades": 0,
+        "pnl": 0,
+        "bars": 2881,
+        "l1": 0,
+        "l2": 0
+      },
+      "ETHUSDT": {
+        "trades": 1,
+        "pnl": 5.8,
+        "bars": 2881,
+        "l1": 0,
+        "l2": 0
+      },
+      "SOLUSDT": {
+        "trades": 2,
+        "pnl": 4.98,
+        "bars": 2881,
+        "l1": 1,
+        "l2": 1
+      },
+      "ZECUSDT": {
+        "trades": 35,
+        "pnl": 138.72,
+        "bars": 2881,
+        "l1": 11,
+        "l2": 8
+      },
+      "SNDKUSDT": {
+        "trades": 3,
+        "pnl": 17.4,
+        "bars": 2881,
+        "l1": 0,
+        "l2": 0
+      },
+      "NEARUSDT": {
+        "trades": 73,
+        "pnl": 179.62,
+        "bars": 2881,
+        "l1": 30,
+        "l2": 21
+      },
+      "XRPUSDT": {
+        "trades": 6,
+        "pnl": 16.06,
+        "bars": 2881,
+        "l1": 2,
+        "l2": 2
+      },
+      "CLUSDT": {
+        "trades": 1,
+        "pnl": 5.8,
+        "bars": 2881,
+        "l1": 0,
+        "l2": 0
+      },
+      "SPCXUSDT": {
+        "trades": 3,
+        "pnl": 9.97,
+        "bars": 2881,
+        "l1": 2,
+        "l2": 2
+      },
+      "BZUSDT": {
+        "trades": 1,
+        "pnl": 5.8,
+        "bars": 2881,
+        "l1": 0,
+        "l2": 0
+      },
+      "SKHYNIXUSDT": {
+        "trades": 0,
+        "pnl": 0,
+        "bars": 2881,
+        "l1": 0,
+        "l2": 0
+      },
+      "HYPEUSDT": {
+        "trades": 2,
+        "pnl": -6.77,
+        "bars": 2881,
+        "l1": 1,
+        "l2": 0
+      },
+      "OGNUSDT": {
+        "trades": 27,
+        "pnl": 89.99,
+        "bars": 2881,
+        "l1": 6,
+        "l2": 3
+      },
+      "DOGEUSDT": {
+        "trades": 10,
+        "pnl": 52.18,
+        "bars": 2881,
+        "l1": 1,
+        "l2": 1
+      },
+      "KORUUSDT": {
+        "trades": 20,
+        "pnl": 9.94,
+        "bars": 2881,
+        "l1": 9,
+        "l2": 4
+      },
+      "MUUSDT": {
+        "trades": 1,
+        "pnl": -12.57,
+        "bars": 2881,
+        "l1": 1,
+        "l2": 0
+      }
+    }
+  },
+  "backtest_trades": [
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1786371300000,
+      "exit_t": 1786501800000,
+      "pnl": 0.9372,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.95,
+      "mfe": 1.61
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1786541400000,
+      "exit_t": 1786579200000,
+      "pnl": 9.4889,
+      "reason": "INVALIDATION",
+      "l1": true,
+      "l2": true,
+      "mae": 6.57,
+      "mfe": 1.15
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1786634100000,
+      "exit_t": 1786650300000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.56,
+      "mfe": 3.3
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1786675500000,
+      "exit_t": 1786698900000,
+      "pnl": 0.2783,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.82,
+      "mfe": 0.52
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1786716000000,
+      "exit_t": 1786717800000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.3,
+      "mfe": 2.82
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1786719600000,
+      "exit_t": 1786932900000,
+      "pnl": 3.0939,
+      "reason": "INVALIDATION",
+      "l1": true,
+      "l2": false,
+      "mae": 8.52,
+      "mfe": 1.67
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1786934700000,
+      "exit_t": 1786977000000,
+      "pnl": -0.7112,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.63,
+      "mfe": 1.82
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1786978800000,
+      "exit_t": 1786993200000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.44,
+      "mfe": 2.67
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1787013900000,
+      "exit_t": 1787017500000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.94,
+      "mfe": 4.57
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1787017500000,
+      "exit_t": 1787040000000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.31,
+      "mfe": 3.85
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1787042700000,
+      "exit_t": 1787043600000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.1,
+      "mfe": 2.75
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1787052600000,
+      "exit_t": 1787060700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.83,
+      "mfe": 3.27
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1787061600000,
+      "exit_t": 1787063400000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 2.26,
+      "mfe": 2.98
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1787064300000,
+      "exit_t": 1787069700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.43,
+      "mfe": 2.97
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1787082300000,
+      "exit_t": 1787097600000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.72,
+      "mfe": 5.21
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1787102100000,
+      "exit_t": 1787104800000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.38,
+      "mfe": 3.82
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1787108400000,
+      "exit_t": 1787121900000,
+      "pnl": 4.4292,
+      "reason": "INVALIDATION",
+      "l1": true,
+      "l2": false,
+      "mae": 9.46,
+      "mfe": 1.69
+    },
+    {
+      "symbol": "SKHYNIXUSDT",
+      "entry_t": 1787126400000,
+      "exit_t": 1787146200000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.72,
+      "mfe": 2.68
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1787146200000,
+      "exit_t": 1787147100000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.71,
+      "mfe": 4.58
+    },
+    {
+      "symbol": "SPCXUSDT",
+      "entry_t": 1787147100000,
+      "exit_t": 1787233500000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.51,
+      "mfe": 3.98
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1787237100000,
+      "exit_t": 1787250600000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.78,
+      "mfe": 2.56
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1787263200000,
+      "exit_t": 1787288400000,
+      "pnl": 6.3318,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.97,
+      "mfe": 0.41
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1787298300000,
+      "exit_t": 1787328900000,
+      "pnl": 7.1762,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 6.13,
+      "mfe": 2.4
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1787340600000,
+      "exit_t": 1787343300000,
+      "pnl": 0.7779,
+      "reason": "INVALIDATION",
+      "l1": true,
+      "l2": false,
+      "mae": 6.89,
+      "mfe": 0.0
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1787349600000,
+      "exit_t": 1787363100000,
+      "pnl": 34.8963,
+      "reason": "INVALIDATION",
+      "l1": true,
+      "l2": true,
+      "mae": 11.39,
+      "mfe": 2.17
+    },
+    {
+      "symbol": "XRPUSDT",
+      "entry_t": 1787368500000,
+      "exit_t": 1787373000000,
+      "pnl": 2.1758,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.18,
+      "mfe": 1.27
+    },
+    {
+      "symbol": "SOLUSDT",
+      "entry_t": 1787373900000,
+      "exit_t": 1787374800000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.94,
+      "mfe": 12.2
+    },
+    {
+      "symbol": "XRPUSDT",
+      "entry_t": 1787374800000,
+      "exit_t": 1787375700000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 2.11,
+      "mfe": 5.64
+    },
+    {
+      "symbol": "ETHUSDT",
+      "entry_t": 1787376600000,
+      "exit_t": 1787461200000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.65,
+      "mfe": 2.85
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1787479200000,
+      "exit_t": 1787491800000,
+      "pnl": 7.6981,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 6.23,
+      "mfe": 1.03
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1787493600000,
+      "exit_t": 1787495400000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.83,
+      "mfe": 3.18
+    },
+    {
+      "symbol": "XRPUSDT",
+      "entry_t": 1787495400000,
+      "exit_t": 1787559300000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 3.32,
+      "mfe": 2.97
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1787578200000,
+      "exit_t": 1787586300000,
+      "pnl": -0.629,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.65,
+      "mfe": 0.6
+    },
+    {
+      "symbol": "MUUSDT",
+      "entry_t": 1787589900000,
+      "exit_t": 1787778000000,
+      "pnl": 4.3348,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.59,
+      "mfe": 2.0
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1787779800000,
+      "exit_t": 1787791500000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 2.07,
+      "mfe": 4.62
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1787798700000,
+      "exit_t": 1787807700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.32,
+      "mfe": 2.82
+    },
+    {
+      "symbol": "OGNUSDT",
+      "entry_t": 1787813100000,
+      "exit_t": 1787884200000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.91,
+      "mfe": 2.71
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1787927400000,
+      "exit_t": 1788131700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.88,
+      "mfe": 2.67
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1788134400000,
+      "exit_t": 1788145200000,
+      "pnl": 1.9167,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.13,
+      "mfe": 0.62
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1788157800000,
+      "exit_t": 1788189300000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.99,
+      "mfe": 2.86
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1788206400000,
+      "exit_t": 1788252300000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.31,
+      "mfe": 2.59
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1788253200000,
+      "exit_t": 1788280200000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 2.23,
+      "mfe": 2.93
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1788282000000,
+      "exit_t": 1788286500000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.36,
+      "mfe": 2.6
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1788309900000,
+      "exit_t": 1788321600000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.02,
+      "mfe": 3.1
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1788356700000,
+      "exit_t": 1788508800000,
+      "pnl": -0.5526,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.66,
+      "mfe": 0.63
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1788512400000,
+      "exit_t": 1788525000000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.34,
+      "mfe": 3.98
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1788525000000,
+      "exit_t": 1788549300000,
+      "pnl": 19.4027,
+      "reason": "INVALIDATION",
+      "l1": true,
+      "l2": true,
+      "mae": 8.45,
+      "mfe": 2.41
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1788551100000,
+      "exit_t": 1788552900000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.33,
+      "mfe": 3.04
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1788553800000,
+      "exit_t": 1788567300000,
+      "pnl": 6.4401,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.99,
+      "mfe": 1.84
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1788570900000,
+      "exit_t": 1788622200000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 2.79,
+      "mfe": 3.32
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "entry_t": 1788630300000,
+      "exit_t": 1788633000000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.63,
+      "mfe": 2.78
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "entry_t": 1788634800000,
+      "exit_t": 1788687000000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.62,
+      "mfe": 3.59
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1788687900000,
+      "exit_t": 1788731100000,
+      "pnl": 1.0547,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.97,
+      "mfe": 2.09
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1788766200000,
+      "exit_t": 1788840000000,
+      "pnl": -38.2871,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": true,
+      "mae": 4.03,
+      "mfe": 2.72
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1788846300000,
+      "exit_t": 1788848100000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.22,
+      "mfe": 2.73
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1788852600000,
+      "exit_t": 1788854400000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.18,
+      "mfe": 3.13
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1788879600000,
+      "exit_t": 1788888600000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.88,
+      "mfe": 2.7
+    }
+  ],
+  "forward_trades": [
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1788929100000,
+      "exit_t": 1788931800000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.39,
+      "mfe": 2.76
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1788940800000,
+      "exit_t": 1788960600000,
+      "pnl": 1.5942,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.07,
+      "mfe": 0.0
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1788963300000,
+      "exit_t": 1788966000000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.09,
+      "mfe": 4.43
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1788968700000,
+      "exit_t": 1789001100000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.95,
+      "mfe": 2.8
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1789043400000,
+      "exit_t": 1789047000000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.18,
+      "mfe": 3.32
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1789047900000,
+      "exit_t": 1789069500000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 3.33,
+      "mfe": 2.58
+    },
+    {
+      "symbol": "CLUSDT",
+      "entry_t": 1789075800000,
+      "exit_t": 1789088400000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.53,
+      "mfe": 2.97
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789113600000,
+      "exit_t": 1789129800000,
+      "pnl": 4.2578,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.58,
+      "mfe": 1.91
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1789131600000,
+      "exit_t": 1789133400000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.35,
+      "mfe": 2.51
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1789133400000,
+      "exit_t": 1789276500000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.1,
+      "mfe": 4.1
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1789312500000,
+      "exit_t": 1789342200000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 2.7,
+      "mfe": 2.64
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1789343100000,
+      "exit_t": 1789344000000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.29,
+      "mfe": 3.34
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1789353000000,
+      "exit_t": 1789362900000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.94,
+      "mfe": 3.38
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1789392600000,
+      "exit_t": 1789396200000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 2.44,
+      "mfe": 3.95
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1789404300000,
+      "exit_t": 1789415100000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.39,
+      "mfe": 4.43
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1789417800000,
+      "exit_t": 1789419600000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.4,
+      "mfe": 2.92
+    },
+    {
+      "symbol": "XRPUSDT",
+      "entry_t": 1789497000000,
+      "exit_t": 1789497900000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.04,
+      "mfe": 2.58
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789498800000,
+      "exit_t": 1789556400000,
+      "pnl": -0.0896,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.75,
+      "mfe": 1.96
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1789566300000,
+      "exit_t": 1789581600000,
+      "pnl": 6.7524,
+      "reason": "INVALIDATION",
+      "l1": true,
+      "l2": false,
+      "mae": 11.09,
+      "mfe": 1.24
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1789583400000,
+      "exit_t": 1789586100000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.58,
+      "mfe": 6.13
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789591500000,
+      "exit_t": 1789604100000,
+      "pnl": -0.7214,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.63,
+      "mfe": 1.0
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789655400000,
+      "exit_t": 1789663500000,
+      "pnl": 1.1447,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.99,
+      "mfe": 1.18
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789669800000,
+      "exit_t": 1789685100000,
+      "pnl": -0.1248,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.74,
+      "mfe": 1.58
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789695000000,
+      "exit_t": 1789700400000,
+      "pnl": 11.4762,
+      "reason": "INVALIDATION",
+      "l1": true,
+      "l2": true,
+      "mae": 6.95,
+      "mfe": 1.16
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789706700000,
+      "exit_t": 1789708500000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.36,
+      "mfe": 2.78
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789739100000,
+      "exit_t": 1789743600000,
+      "pnl": 6.9038,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 6.08,
+      "mfe": 0.0
+    },
+    {
+      "symbol": "XRPUSDT",
+      "entry_t": 1789743600000,
+      "exit_t": 1789827300000,
+      "pnl": 0.4833,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.86,
+      "mfe": 1.15
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789844400000,
+      "exit_t": 1789857900000,
+      "pnl": -0.7385,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.63,
+      "mfe": 0.44
+    },
+    {
+      "symbol": "OGNUSDT",
+      "entry_t": 1789865100000,
+      "exit_t": 1789872300000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.61,
+      "mfe": 2.79
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789909200000,
+      "exit_t": 1789919100000,
+      "pnl": 5.2865,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.77,
+      "mfe": 2.3
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789922700000,
+      "exit_t": 1789923600000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.57,
+      "mfe": 3.93
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789925400000,
+      "exit_t": 1789927200000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.39,
+      "mfe": 2.73
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1789935300000,
+      "exit_t": 1789938000000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.55,
+      "mfe": 3.45
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789951500000,
+      "exit_t": 1789955100000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.11,
+      "mfe": 3.33
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789964100000,
+      "exit_t": 1789969500000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.72,
+      "mfe": 2.6
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1789979400000,
+      "exit_t": 1789984800000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 2.08,
+      "mfe": 2.59
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "entry_t": 1790012700000,
+      "exit_t": 1790028900000,
+      "pnl": -0.015,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.77,
+      "mfe": 0.4
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790040600000,
+      "exit_t": 1790044200000,
+      "pnl": 1.9013,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.13,
+      "mfe": 0.8
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790045100000,
+      "exit_t": 1790049600000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.94,
+      "mfe": 4.03
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "entry_t": 1790049600000,
+      "exit_t": 1790051400000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.81,
+      "mfe": 2.94
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "entry_t": 1790052300000,
+      "exit_t": 1790072100000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.64,
+      "mfe": 2.59
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790080200000,
+      "exit_t": 1790084700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.12,
+      "mfe": 3.47
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1790085600000,
+      "exit_t": 1790089200000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.07,
+      "mfe": 2.71
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790094600000,
+      "exit_t": 1790102700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.24,
+      "mfe": 2.74
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1790120700000,
+      "exit_t": 1790127900000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.19,
+      "mfe": 2.64
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790141400000,
+      "exit_t": 1790159400000,
+      "pnl": 2.4429,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.23,
+      "mfe": 2.06
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790164800000,
+      "exit_t": 1790168400000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.14,
+      "mfe": 2.56
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1790172000000,
+      "exit_t": 1790172900000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.05,
+      "mfe": 2.59
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "entry_t": 1790173800000,
+      "exit_t": 1790179200000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.67,
+      "mfe": 3.83
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1790181000000,
+      "exit_t": 1790182800000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.16,
+      "mfe": 3.02
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790185500000,
+      "exit_t": 1790187300000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.07,
+      "mfe": 2.73
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790189100000,
+      "exit_t": 1790195400000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.05,
+      "mfe": 2.58
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790225100000,
+      "exit_t": 1790228700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.34,
+      "mfe": 3.96
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790236800000,
+      "exit_t": 1790239500000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.17,
+      "mfe": 3.31
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790248500000,
+      "exit_t": 1790254800000,
+      "pnl": -0.7067,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.63,
+      "mfe": 0.16
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790260200000,
+      "exit_t": 1790261100000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.26,
+      "mfe": 4.23
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790267400000,
+      "exit_t": 1790288100000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 3.91,
+      "mfe": 2.5
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790305200000,
+      "exit_t": 1790325900000,
+      "pnl": 2.4083,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.23,
+      "mfe": 0.95
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790329500000,
+      "exit_t": 1790341200000,
+      "pnl": 0.5696,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.88,
+      "mfe": 0.38
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790344800000,
+      "exit_t": 1790356500000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 3.36,
+      "mfe": 2.53
+    },
+    {
+      "symbol": "OGNUSDT",
+      "entry_t": 1790362800000,
+      "exit_t": 1790364600000,
+      "pnl": 16.2167,
+      "reason": "INVALIDATION",
+      "l1": true,
+      "l2": true,
+      "mae": 7.85,
+      "mfe": 0.51
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790364600000,
+      "exit_t": 1790370900000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.05,
+      "mfe": 2.8
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790371800000,
+      "exit_t": 1790429400000,
+      "pnl": -12.5671,
+      "reason": "SHORT_TP",
+      "l1": true,
+      "l2": false,
+      "mae": 2.14,
+      "mfe": 2.73
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1790459100000,
+      "exit_t": 1790471700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.11,
+      "mfe": 2.73
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790493300000,
+      "exit_t": 1790498700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.12,
+      "mfe": 2.52
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1790525700000,
+      "exit_t": 1790576100000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 2.0,
+      "mfe": 2.61
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790604900000,
+      "exit_t": 1790607600000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.82,
+      "mfe": 3.6
+    },
+    {
+      "symbol": "KORUUSDT",
+      "entry_t": 1790613000000,
+      "exit_t": 1790687700000,
+      "pnl": -0.7922,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 4.62,
+      "mfe": 1.47
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1790694900000,
+      "exit_t": 1790771400000,
+      "pnl": 1.8574,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.12,
+      "mfe": 0.74
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790771400000,
+      "exit_t": 1790777700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.7,
+      "mfe": 3.2
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1790786700000,
+      "exit_t": 1790792100000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.57,
+      "mfe": 2.59
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790838900000,
+      "exit_t": 1790843400000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.89,
+      "mfe": 2.64
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790859600000,
+      "exit_t": 1790882100000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.61,
+      "mfe": 3.71
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1790919000000,
+      "exit_t": 1790961300000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 1.88,
+      "mfe": 2.54
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1790964900000,
+      "exit_t": 1791069300000,
+      "pnl": 1.2366,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.0,
+      "mfe": 1.18
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1791185400000,
+      "exit_t": 1791189900000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.63,
+      "mfe": 2.8
+    },
+    {
+      "symbol": "OGNUSDT",
+      "entry_t": 1791210600000,
+      "exit_t": 1791211500000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.62,
+      "mfe": 6.24
+    },
+    {
+      "symbol": "SPCXUSDT",
+      "entry_t": 1791212400000,
+      "exit_t": 1791293400000,
+      "pnl": 2.2719,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.2,
+      "mfe": 0.6
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1791338400000,
+      "exit_t": 1791353700000,
+      "pnl": 1.6257,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.08,
+      "mfe": 0.76
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1791354600000,
+      "exit_t": 1791365400000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.65,
+      "mfe": 3.48
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1791369000000,
+      "exit_t": 1791396900000,
+      "pnl": 1.3769,
+      "reason": "RESCUE",
+      "l1": true,
+      "l2": true,
+      "mae": 5.03,
+      "mfe": 1.24
+    },
+    {
+      "symbol": "SNDKUSDT",
+      "entry_t": 1791400500000,
+      "exit_t": 1791466200000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.93,
+      "mfe": 3.34
+    },
+    {
+      "symbol": "OGNUSDT",
+      "entry_t": 1791469800000,
+      "exit_t": 1791470700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.86,
+      "mfe": 8.19
+    },
+    {
+      "symbol": "ZECUSDT",
+      "entry_t": 1791471600000,
+      "exit_t": 1791472500000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.63,
+      "mfe": 3.14
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1791472500000,
+      "exit_t": 1791473400000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.3,
+      "mfe": 2.95
+    },
+    {
+      "symbol": "NEARUSDT",
+      "entry_t": 1791476100000,
+      "exit_t": 1791479700000,
+      "pnl": 5.8,
+      "reason": "SHORT_TP",
+      "l1": false,
+      "l2": false,
+      "mae": 0.37,
+      "mfe": 5.46
+    },
+    {
+      "symbol": "XRPUSDT",
+      "entry_t": 1791479700000,
+      "exit_t": 1791495900000,
+      "pnl": -7.627,
+      "reason": "WINDOW_MARK",
+      "l1": true,
+      "l2": true,
+      "mae": 4.0,
+      "mfe": 0.78
+    }
+  ]
+}
