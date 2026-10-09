@@ -44,6 +44,13 @@ MIN_LIVE_ENTRY_PCT = float(os.environ.get("SCANNER_MIN_LIVE_ENTRY_PCT", "2.0"))
 MIN_LIVE_VS_LATCH_FRAC = float(os.environ.get("SCANNER_MIN_LIVE_VS_LATCH", "0.45"))
 # After flatten, block same-symbol re-entry so a dead pump cannot instantly re-grab the slot.
 ENTRY_COOLDOWN_MS = int(os.environ.get("SCANNER_ENTRY_COOLDOWN_MS", "300000"))
+# After a failed hedge episode, keep the name out longer — protects the Sep grind cadence.
+INVALIDATION_COOLDOWN_MS = int(os.environ.get("SCANNER_INVALIDATION_COOLDOWN_MS", "1200000"))  # 20m
+EPISODE_COOLDOWN_MS = int(os.environ.get("SCANNER_EPISODE_COOLDOWN_MS", "600000"))  # 10m
+# Desk quality: only fade names with enough 24h quote volume (USDT). Not a strategy knob.
+MIN_QUOTE_VOL_24H = float(os.environ.get("SCANNER_MIN_QUOTE_VOL_24H", "10000000"))
+# Reconcile less often — 5s force REST was a live 429 source.
+RECONCILE_INTERVAL_MS = int(os.environ.get("SCANNER_RECONCILE_MS", "12000"))
 # Do not short after the move is largely over (chasing a dump from peak).
 MAX_RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_MAX_RETRACE_ENTRY_PCT", "12.0"))
 SHORT_TP_PCT = float(os.environ.get("SCANNER_SHORT_TP_PCT", "2.5"))
@@ -245,6 +252,8 @@ class MomentumScanner:
         )
         self._last_exec_latency_ms: float | None = None
         self._last_reconcile_ms: int = 0
+        self._volume_map_ready: bool = False
+        self._liquidity_skip_log_ms: dict[str, int] = {}
         # Close-failure backoff per symbol — a stuck close (e.g. -4131/-4016 walk) must not
         # be retried on every tick for minutes. `_close_fail_ms` = next allowed attempt.
         self._close_fail_ms: dict[str, int] = {}
@@ -1122,10 +1131,36 @@ class MomentumScanner:
         floor = max(MIN_LIVE_ENTRY_PCT, peak * max(0.2, min(0.9, MIN_LIVE_VS_LATCH_FRAC)))
         return live >= floor
 
+    def _liquidity_ok(self, coin: CoinStrategy) -> bool:
+        """Reject illiquid names before they can grab the one-trade slot.
+
+        Strategy thresholds unchanged. Floor is 24h quote volume in USDT.
+        If the volume map has never landed, allow (boot) — once ready, enforce.
+        """
+        if MIN_QUOTE_VOL_24H <= 0:
+            return True
+        vol = float(coin.quote_vol_24h or 0.0)
+        if not self._volume_map_ready and vol <= 0:
+            return True
+        if vol + 1e-9 >= MIN_QUOTE_VOL_24H:
+            return True
+        now_ms = int(time.time() * 1000)
+        last = int(self._liquidity_skip_log_ms.get(coin.symbol) or 0)
+        if now_ms - last >= 30000:
+            self._liquidity_skip_log_ms[coin.symbol] = now_ms
+            log.info(
+                "scanner liquidity skip %s vol24h=%.0f < min=%.0f",
+                coin.symbol,
+                vol,
+                MIN_QUOTE_VOL_24H,
+            )
+        return False
+
     def _entry_signal_ok(self, coin: CoinStrategy) -> bool:
         latched = (coin.qualifying_pct or 0.0) >= GAIN_THRESHOLD_PCT
         return (
             latched
+            and self._liquidity_ok(coin)
             and self._live_entry_ok(coin)
             and self._retrace_entry_ok(coin)
             and self._pump_still_alive(coin)
@@ -1135,16 +1170,37 @@ class MomentumScanner:
         until = int(self._entry_cooldown_until_ms.get(symbol.upper()) or 0)
         return until > int(time.time() * 1000)
 
+    def _cooldown_ms_for_reason(self, reason: str) -> int:
+        """Longer cool after failed hedge episodes; keep default after clean SHORT_TP."""
+        r = (reason or "").upper()
+        if "INVALIDATION" in r:
+            return max(ENTRY_COOLDOWN_MS, INVALIDATION_COOLDOWN_MS)
+        if any(
+            x in r
+            for x in (
+                "ORPHAN",
+                "SHORT_GONE",
+                "RESCUE",
+                "PAIR_FLATTEN",
+                "ORPHAN_RECOVERY",
+            )
+        ):
+            return max(ENTRY_COOLDOWN_MS, EPISODE_COOLDOWN_MS)
+        return max(0, ENTRY_COOLDOWN_MS)
+
     def _arm_entry_cooldown(self, symbol: str, reason: str = "") -> None:
-        if ENTRY_COOLDOWN_MS <= 0:
+        cool_ms = self._cooldown_ms_for_reason(reason)
+        if cool_ms <= 0:
             return
         sym = symbol.upper()
-        until = int(time.time() * 1000) + ENTRY_COOLDOWN_MS
-        self._entry_cooldown_until_ms[sym] = until
+        until = int(time.time() * 1000) + cool_ms
+        prev = int(self._entry_cooldown_until_ms.get(sym) or 0)
+        if until > prev:
+            self._entry_cooldown_until_ms[sym] = until
         log.info(
             "scanner entry cooldown %s for %ss reason=%s",
             sym,
-            ENTRY_COOLDOWN_MS // 1000,
+            cool_ms // 1000,
             reason or "flatten",
         )
 
@@ -1885,9 +1941,14 @@ class MomentumScanner:
         return self._global_active_symbol() is not None
 
     def _entry_score(self, coin: CoinStrategy) -> float:
-        """Rank pending candidates — highest momentum + confirmed retrace wins."""
+        """Rank pending candidates — momentum + retrace, prefer liquid names."""
+        import math
+
         tf_bonus = {"15m": 1.5, "5m": 1.0, "3m": 0.75, "1m": 0.5}.get(coin.best_tf, 0.0)
-        return coin.best_pct * 10.0 + coin.retrace_pct * 2.0 + tf_bonus
+        vol = max(float(coin.quote_vol_24h or 0.0), 1.0)
+        # Mild preference for size — never overrides a dead pump that fails signal gates.
+        vol_bonus = min(4.0, max(0.0, math.log10(vol / 1_000_000.0)))
+        return coin.best_pct * 10.0 + coin.retrace_pct * 2.0 + tf_bonus + vol_bonus
 
     def _pending_candidates(self) -> list[CoinStrategy]:
         now_ms = int(time.time() * 1000)
@@ -1901,6 +1962,8 @@ class MomentumScanner:
                 continue
             self._demote_stale_pending(coin)
             if coin.status != STATUS_PENDING:
+                continue
+            if not self._liquidity_ok(coin):
                 continue
             if not self._retrace_entry_ok(coin):
                 continue
@@ -1991,6 +2054,11 @@ class MomentumScanner:
             "execution_events": self._engine.events()[:12],
             "strategy_id": "short_first_v1",
             "strategy_name": "Short → Long 1 → Long 2",
+            "min_quote_vol_24h": MIN_QUOTE_VOL_24H,
+            "volume_map_ready": self._volume_map_ready,
+            "invalidation_cooldown_s": INVALIDATION_COOLDOWN_MS // 1000,
+            "episode_cooldown_s": EPISODE_COOLDOWN_MS // 1000,
+            "reconcile_interval_ms": RECONCILE_INTERVAL_MS,
         }
 
     def load_symbols(self, symbols: list[str]) -> None:
@@ -2029,8 +2097,14 @@ class MomentumScanner:
     ) -> None:
         now_ms = int(ts_ms or time.time() * 1000)
         # Periodic exchange sync — catches orphan shorts outside scanner state.
+        # Skip while REST-cool: force reads are unavailable and were inventing orphans.
         if not getattr(self._connector.cfg, "paper", False):
-            if now_ms - self._last_reconcile_ms >= 5000:
+            cool_left = 0.0
+            try:
+                cool_left = float(getattr(self._connector, "rest_cooling_left", lambda: 0.0)() or 0.0)
+            except Exception:
+                cool_left = 0.0
+            if cool_left <= 0.25 and now_ms - self._last_reconcile_ms >= max(3000, RECONCILE_INTERVAL_MS):
                 self._last_reconcile_ms = now_ms
                 try:
                     self.reconcile_from_exchange()
@@ -2172,6 +2246,8 @@ class MomentumScanner:
                 continue
             coin.quote_vol_24h = float(vol)
             n += 1
+        if n > 0:
+            self._volume_map_ready = True
         return n
 
     def apply_funding_rate_map(self, rate_map: dict[str, float]) -> int:
@@ -2394,6 +2470,9 @@ class MomentumScanner:
                 return
         if self._in_entry_cooldown(sym):
             log.info("scanner SHORT cooldown %s — skip re-entry", sym)
+            return
+        if not self._liquidity_ok(coin):
+            self._last_exec_error = f"{sym}: liquidity_below_min"
             return
         if pair_gate.is_close_pending(sym):
             return

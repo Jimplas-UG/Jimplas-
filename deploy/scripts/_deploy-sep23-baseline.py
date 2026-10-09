@@ -30,6 +30,7 @@ FILES = [
     "binance_trading_system/python/test_frozen_strategy.py",
     "binance_trading_system/python/test_leverage_policy.py",
     "binance_trading_system/python/test_sep23_capital_locks.py",
+    "binance_trading_system/python/test_desk_quality.py",
 ]
 
 REMOVE = [
@@ -51,6 +52,7 @@ test ! -f rule_kernel.py
 {PY} test_close_orders.py
 {PY} test_execution_engine.py
 {PY} test_sep23_capital_locks.py
+{PY} test_desk_quality.py
 {PY} - <<'PY'
 from frozen_strategy import assert_frozen_contract
 import inspect
@@ -69,8 +71,11 @@ assert 'raise PositionsUnavailable' in pos_src
 assert 'coherence deferred' in inspect.getsource(MomentumScanner._ensure_pair_coherence)
 assert 'positions_unavailable' in inspect.getsource(MomentumScanner._reconcile_from_exchange_locked)
 print('CONTRACT', snap['strategy_id'], 'part', snap['ops']['partition_usd'])
+assert hasattr(MomentumScanner, '_liquidity_ok')
+assert 'confirmed_positions' in inspect.getsource(BinanceConnector)
 print('SEP23_CAPITAL_LOCKS_OK')
 print('POSITIONS_TRUTH_OK')
+print('DESK_QUALITY_OK')
 print('SEP23_BASELINE_MARKERS_OK')
 PY
 systemctl restart bilshenz-binance-api bilshenz-forward-bot

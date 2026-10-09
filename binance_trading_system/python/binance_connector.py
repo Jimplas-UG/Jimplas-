@@ -1110,11 +1110,33 @@ class BinanceConnector:
             log.warning("ensure_hedge_mode: %s", msg)
             return False, msg
 
-    def exchange_short_qty(self, symbol: str | None = None) -> float:
+    def confirmed_positions(
+        self,
+        symbol: str | None = None,
+        *,
+        max_age_s: float = 1.5,
+        bypass_rest_cool: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Hot-path book: reuse a fresh *confirmed* snapshot; else force REST.
+
+        Never invents flat from sticky on error (raises PositionsUnavailable).
+        Cuts per-tick force spam that caused live 429 → false SHORT_GONE.
+        """
+        sym = (symbol or "").upper() or None
+        now = time.time()
+        age = now - float(self._last_good_positions_ts or 0.0)
+        if self._last_good_positions_ts > 0 and age <= max(0.05, float(max_age_s)):
+            rows = list(self._last_good_positions)
+            if sym:
+                rows = [p for p in rows if str(p.get("symbol") or "").upper() == sym]
+            return rows
+        return self.positions(sym, force=True, bypass_rest_cool=bypass_rest_cool)
+
+    def exchange_short_qty(self, symbol: str | None = None, *, max_age_s: float = 1.5) -> float:
         """Open short leg size on symbol (hedge SHORT or one-way SELL)."""
         sym = (symbol or self.cfg.symbol).upper()
         total = 0.0
-        for p in self.positions(sym, force=True):
+        for p in self.confirmed_positions(sym, max_age_s=max_age_s):
             if str(p.get("symbol") or "").upper() != sym:
                 continue
             pos_side = str(p.get("positionSide") or "").upper()
@@ -1125,11 +1147,11 @@ class BinanceConnector:
                 total += float(p.get("volume") or 0)
         return total
 
-    def exchange_long_qty(self, symbol: str | None = None) -> float:
+    def exchange_long_qty(self, symbol: str | None = None, *, max_age_s: float = 1.5) -> float:
         """Open long leg size on symbol (hedge LONG or one-way BUY)."""
         sym = (symbol or self.cfg.symbol).upper()
         total = 0.0
-        for p in self.positions(sym, force=True):
+        for p in self.confirmed_positions(sym, max_age_s=max_age_s):
             if str(p.get("symbol") or "").upper() != sym:
                 continue
             pos_side = str(p.get("positionSide") or "").upper()
