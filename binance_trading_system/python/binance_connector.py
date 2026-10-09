@@ -34,6 +34,14 @@ LIMIT_IOC_ATTEMPT_SLEEP_S = 0.06
 LIMIT_IOC_MAX_ATTEMPTS = 12
 
 
+class PositionsUnavailable(RuntimeError):
+    """Signed positionRisk could not be confirmed (429/418/cool/network).
+
+    This is NOT flat. Callers that flatten, retire legs, or reset leverage must
+    defer — never treat an unavailable book as empty.
+    """
+
+
 def _truthy(v: str | None) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -1744,11 +1752,15 @@ class BinanceConnector:
                 self.cfg.leverage = current
                 return True
             # Live open legs only — sticky ghosts must not block 5x reset.
-            open_legs = [
-                p
-                for p in self.positions(sym, force=True, bypass_rest_cool=True)
-                if float(p.get("volume") or 0) > 1e-12
-            ]
+            # If the book is unconfirmed, assume open (never force a reduce on a guess).
+            try:
+                open_legs = [
+                    p
+                    for p in self.positions(sym, force=True, bypass_rest_cool=True)
+                    if float(p.get("volume") or 0) > 1e-12
+                ]
+            except PositionsUnavailable:
+                open_legs = [{"symbol": sym, "volume": 1.0}]
             if open_legs:
                 self._leverage_fail_cache[fail_key] = time.time()
                 log.info(
@@ -1827,6 +1839,12 @@ class BinanceConnector:
             and now - self._positions_cache_ts < self._positions_cache_ttl
         ):
             return list(self._positions_cache)
+        # force=True during REST cool: uncertain book — never pretend flat.
+        if force and not bypass_rest_cool and self.rest_cooling_left() > 0.05:
+            raise PositionsUnavailable(
+                f"REST cooling ({self._rest_cool_reason or 'rate'}) "
+                f"{self.rest_cooling_left():.0f}s — positions unconfirmed"
+            )
         try:
             params: dict[str, Any] = {}
             if symbol:
@@ -1838,15 +1856,15 @@ class BinanceConnector:
                 signed=True,
                 bypass_rest_cool=bypass_rest_cool,
             )
+        except PositionsUnavailable:
+            raise
         except Exception as e:
-            log.warning(
-                "positions: %s (%s)",
-                e,
-                "fail-closed empty" if force else "serving UI sticky",
-            )
-            # force=True must never invent open legs from sticky (ghost → keep 10x cascade).
+            # force=True must never invent open legs from sticky (ghost → 10x cascade),
+            # AND must never invent flat from 429/cool (false SHORT_GONE / orphan chase).
             if force:
-                return []
+                log.warning("positions: %s (unavailable — not empty)", e)
+                raise PositionsUnavailable(str(e)) from e
+            log.warning("positions: %s (serving UI sticky)", e)
             if symbol is None:
                 if self._positions_cache is not None:
                     return list(self._positions_cache)
@@ -2617,7 +2635,10 @@ class BinanceConnector:
 
         sym = (symbol or self.cfg.symbol).upper()
         self._wait_or_clear_cool_for_close()
-        positions = self.positions(sym, force=True, bypass_rest_cool=True)
+        try:
+            positions = self.positions(sym, force=True, bypass_rest_cool=True)
+        except PositionsUnavailable as e:
+            return {"ok": False, "error": "positions_unavailable", "detail": str(e)}
         if not positions:
             return {"ok": False, "error": "no_open_position"}
 

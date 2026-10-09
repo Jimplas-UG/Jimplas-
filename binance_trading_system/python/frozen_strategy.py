@@ -228,8 +228,15 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "marketMaxQty" in side_src or "market_max" in side_src
     assert "too_many_close_chunks" in side_src
     pos_src = inspect.getsource(bc.BinanceConnector.positions)
-    assert "fail-closed empty" in pos_src
-    assert "if force:" in pos_src and "return []" in pos_src
+    assert "unavailable — not empty" in pos_src
+    assert "PositionsUnavailable" in pos_src
+    assert hasattr(bc, "PositionsUnavailable")
+    # force=True must never invent flat from REST errors (false SHORT_GONE / orphan).
+    assert "raise PositionsUnavailable" in pos_src
+    recon_src = inspect.getsource(ms.MomentumScanner._reconcile_from_exchange_locked)
+    assert "positions_unavailable" in recon_src or "PositionsUnavailable" in recon_src
+    coh_src = inspect.getsource(ms.MomentumScanner._ensure_pair_coherence)
+    assert "coherence deferred" in coh_src
 
     return frozen_contract_snapshot()
 

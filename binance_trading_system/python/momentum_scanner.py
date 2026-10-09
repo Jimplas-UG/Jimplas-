@@ -1480,15 +1480,32 @@ class MomentumScanner:
                 return False
             return coin.short is not None or coin.long1 is not None or coin.long2 is not None
 
-        has_short = self._exchange_has_short(sym)
-        has_long = self._exchange_has_long(sym)
+        try:
+            has_short = self._exchange_has_short(sym)
+            has_long = self._exchange_has_long(sym)
+        except Exception as e:
+            # 429/cool/unavailable → keep scanner state; never false SHORT_GONE / orphan flatten.
+            from binance_connector import PositionsUnavailable
+
+            if isinstance(e, PositionsUnavailable) or "positions unconfirmed" in str(e).lower() or "REST cooling" in str(e):
+                log.warning("scanner %s coherence deferred — positions unavailable: %s", sym, e)
+                return bool(coin.short or coin.long1 or coin.long2)
+            raise
 
         # Live short the scanner lost track of (restart / missed ACK) — adopt and keep managing.
         if has_short and not coin.short:
             shorts, longs = self._adopt_symbol_from_exchange(coin)
             if shorts or longs:
                 log.info("scanner %s adopted exchange pair during coherence check", sym)
-            has_long = self._exchange_has_long(sym)
+            try:
+                has_long = self._exchange_has_long(sym)
+            except Exception as e:
+                from binance_connector import PositionsUnavailable
+
+                if isinstance(e, PositionsUnavailable) or "REST cooling" in str(e):
+                    log.warning("scanner %s coherence deferred after adopt — %s", sym, e)
+                    return True
+                raise
 
         if coin.short and not has_short:
             log.info("scanner %s short closed on exchange — flattening full pair", sym)
@@ -1636,7 +1653,19 @@ class MomentumScanner:
             return self._reconcile_from_exchange_locked()
 
     def _reconcile_from_exchange_locked(self) -> dict[str, Any]:
-        positions = self._exchange_positions()
+        # Orphan / flat decisions require a *confirmed* book. Sticky or 429-empty must not
+        # invent orphans or wipe live scanner state (live US/RLC incidents).
+        from binance_connector import PositionsUnavailable
+
+        try:
+            positions = self._connector.positions(force=True)
+        except PositionsUnavailable as e:
+            log.warning("reconcile deferred — positions unavailable: %s", e)
+            return {"ok": False, "deferred": True, "error": "positions_unavailable", "detail": str(e)}
+        except Exception as e:
+            log.warning("reconcile deferred — positions fetch failed: %s", e)
+            return {"ok": False, "deferred": True, "error": "positions_fetch_failed", "detail": str(e)}
+
         open_syms = {
             str(p.get("symbol") or "").upper()
             for p in positions
@@ -1645,7 +1674,13 @@ class MomentumScanner:
         reset: list[str] = []
         # Exchange-first: any long without a short is illegal under short-first rules.
         for sym in sorted(open_syms):
-            if self._exchange_has_long(sym) and not self._exchange_has_short(sym):
+            try:
+                has_long = self._exchange_has_long(sym)
+                has_short = self._exchange_has_short(sym)
+            except PositionsUnavailable as e:
+                log.warning("reconcile %s skip orphan check — positions unavailable: %s", sym, e)
+                continue
+            if has_long and not has_short:
                 log.warning("reconcile %s flatten orphan long without short", sym)
                 try:
                     r = self._connector.close_position(sym, None)
@@ -1673,7 +1708,12 @@ class MomentumScanner:
         for coin in list(self._coins.values()):
             sym = coin.symbol
             if sym in open_syms:
-                if not self._exchange_has_short(sym) and (coin.long1 or coin.long2):
+                try:
+                    short_live = self._exchange_has_short(sym)
+                except PositionsUnavailable as e:
+                    log.warning("reconcile %s skip recovery check — positions unavailable: %s", sym, e)
+                    continue
+                if not short_live and (coin.long1 or coin.long2):
                     log.warning("reconcile %s flatten scanner recovery without short", sym)
                     try:
                         self._connector.close_position(sym, None)
@@ -1682,6 +1722,7 @@ class MomentumScanner:
                     self._reset_coin_state(coin)
                     reset.append(sym)
                 continue
+            # Confirmed absent from exchange book — safe to clear scanner state.
             if coin.short or coin.long1 or coin.long2 or coin.status in (
                 STATUS_SHORT,
                 STATUS_LONG1,
@@ -2991,6 +3032,7 @@ class MomentumScanner:
                 if left:
                     return False
             except Exception as e:
+                # Unconfirmed book ≠ flat — do not clear scanner state.
                 log.warning("close success verify %s: %s", sym, e)
                 return False
         return True
@@ -3024,9 +3066,19 @@ class MomentumScanner:
             else:
                 try:
                     live = self._connector.positions(sym, force=True)
-                except Exception:
-                    live = []
-                if live:
+                except Exception as e:
+                    # 429/cool must NOT become already_flat (resets state while legs live).
+                    log.warning("scanner close %s deferred — positions unavailable: %s", sym, e)
+                    close_result = {
+                        "ok": False,
+                        "error": "positions_unavailable",
+                        "detail": str(e),
+                        "broker": "binance",
+                    }
+                    live = None
+                if live is None:
+                    pass
+                elif live:
                     close_result = self._connector.close_position(sym, None)
                 else:
                     close_result = {"ok": True, "closed": [], "broker": "binance", "note": "already_flat"}

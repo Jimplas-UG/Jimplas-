@@ -62,8 +62,15 @@ assert abs(float(snap['ops']['partition_usd']) - 100.0) < 1e-9
 assert 'target = LONG1_LEVERAGE' not in inspect.getsource(MomentumScanner._manage_positions)
 assert 'long_residual_abort_short' in inspect.getsource(BinanceConnector.close_position)
 assert hasattr(MomentumScanner, '_solo_hedge_exit_allowed')
+from binance_connector import PositionsUnavailable
+pos_src = inspect.getsource(BinanceConnector.positions)
+assert 'unavailable — not empty' in pos_src
+assert 'raise PositionsUnavailable' in pos_src
+assert 'coherence deferred' in inspect.getsource(MomentumScanner._ensure_pair_coherence)
+assert 'positions_unavailable' in inspect.getsource(MomentumScanner._reconcile_from_exchange_locked)
 print('CONTRACT', snap['strategy_id'], 'part', snap['ops']['partition_usd'])
 print('SEP23_CAPITAL_LOCKS_OK')
+print('POSITIONS_TRUTH_OK')
 print('SEP23_BASELINE_MARKERS_OK')
 PY
 systemctl restart bilshenz-binance-api bilshenz-forward-bot

@@ -117,22 +117,84 @@ def test_close_chunks_and_abort() -> None:
     print("OK close_position chunks MARKET max, aborts SHORT if LONG residual")
 
 
-def test_force_positions_fail_closed() -> None:
-    from binance_connector import BinanceConnector, BinanceConfig
+def test_force_positions_unavailable_not_flat() -> None:
+    from binance_connector import BinanceConnector, BinanceConfig, PositionsUnavailable
 
     c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
     c._last_good_positions = [{"symbol": "EDUUSDT", "volume": 99.0, "positionSide": "SHORT"}]
     c._positions_cache = list(c._last_good_positions)
 
     def boom(*_a, **_k):
-        raise RuntimeError("REST cooling (418)")
+        raise RuntimeError("REST cooling (429)")
 
     c._request = boom  # type: ignore
-    live = c.positions("EDUUSDT", force=True, bypass_rest_cool=True)
+    raised = False
+    try:
+        c.positions("EDUUSDT", force=True, bypass_rest_cool=True)
+    except PositionsUnavailable:
+        raised = True
+    assert raised, "force=True on REST error must raise PositionsUnavailable (not return [])"
     ui = c.positions("EDUUSDT", force=False)
-    assert live == []
     assert len(ui) == 1
-    print("OK force positions fail-closed empty (UI sticky OK)")
+    print("OK force positions unavailable — not empty; UI sticky OK")
+
+
+def test_force_cool_short_circuit_unavailable() -> None:
+    from binance_connector import BinanceConnector, BinanceConfig, PositionsUnavailable
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._rest_cool_until = __import__("time").monotonic() + 30.0
+    c._rest_cool_reason = "429"
+    raised = False
+    try:
+        c.positions("USUSDT", force=True, bypass_rest_cool=False)
+    except PositionsUnavailable as e:
+        raised = True
+        assert "unconfirmed" in str(e).lower() or "cooling" in str(e).lower()
+    assert raised
+    print("OK force positions during cool -> unavailable (not flat)")
+
+
+def test_reconcile_defers_when_unavailable() -> None:
+    class Conn:
+        cfg = SimpleNamespace(paper=False)
+
+        def positions(self, symbol=None, force=False, bypass_rest_cool=False):
+            from binance_connector import PositionsUnavailable
+
+            raise PositionsUnavailable("REST cooling (429) 1s — positions unconfirmed")
+
+    sc = MomentumScanner(Conn(), lambda: True)  # type: ignore[arg-type]
+    out = sc._reconcile_from_exchange_locked()
+    assert out.get("deferred") is True
+    assert out.get("error") == "positions_unavailable"
+    print("OK reconcile defers on positions unavailable")
+
+
+def test_close_all_no_already_flat_on_unavailable() -> None:
+    from momentum_scanner import LegPosition, STATUS_SHORT
+
+    class Conn:
+        cfg = SimpleNamespace(paper=False)
+
+        def positions(self, symbol=None, force=False, bypass_rest_cool=False):
+            from binance_connector import PositionsUnavailable
+
+            raise PositionsUnavailable("429")
+
+        def invalidate_positions_cache(self):
+            return None
+
+    sc = MomentumScanner(Conn(), lambda: True)  # type: ignore[arg-type]
+    coin = CoinStrategy(symbol="USUSDT")
+    coin.short = LegPosition(side="SELL", entry=1.0, qty=10.0, leverage=5, magic=88001)
+    coin.status = STATUS_SHORT
+    sc._coins["USUSDT"] = coin
+    r = sc._close_all(coin, "SHORT_GONE_EXCHANGE")
+    assert r.get("ok") is False
+    assert r.get("error") == "positions_unavailable"
+    assert coin.short is not None, "scanner state must survive unavailable close"
+    print("OK close_all does not already_flat on unavailable")
 
 
 def test_frozen() -> None:
@@ -151,6 +213,9 @@ if __name__ == "__main__":
     test_manage_never_forces_naked_10x()
     test_manual_qty_locked()
     test_close_chunks_and_abort()
-    test_force_positions_fail_closed()
+    test_force_positions_unavailable_not_flat()
+    test_force_cool_short_circuit_unavailable()
+    test_reconcile_defers_when_unavailable()
+    test_close_all_no_already_flat_on_unavailable()
     test_frozen()
     print("test_sep23_capital_locks: ALL OK")
