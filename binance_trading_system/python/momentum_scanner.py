@@ -45,14 +45,15 @@ MIN_LIVE_ENTRY_PCT = float(os.environ.get("SCANNER_MIN_LIVE_ENTRY_PCT", "2.0"))
 # Reject end-of-pump entries: live 15m must keep at least this fraction of latched peak gain.
 MIN_LIVE_VS_LATCH_FRAC = float(os.environ.get("SCANNER_MIN_LIVE_VS_LATCH", "0.45"))
 # After flatten, block same-symbol re-entry so a dead pump cannot instantly re-grab the slot.
-ENTRY_COOLDOWN_MS = int(os.environ.get("SCANNER_ENTRY_COOLDOWN_MS", "300000"))
+# Floors are permanent — env may raise, never disable below Sep desk cadence.
+ENTRY_COOLDOWN_MS = max(300_000, int(os.environ.get("SCANNER_ENTRY_COOLDOWN_MS", "300000")))
 # After a failed hedge episode, keep the name out longer — protects the Sep grind cadence.
-INVALIDATION_COOLDOWN_MS = int(os.environ.get("SCANNER_INVALIDATION_COOLDOWN_MS", "1200000"))  # 20m
-EPISODE_COOLDOWN_MS = int(os.environ.get("SCANNER_EPISODE_COOLDOWN_MS", "600000"))  # 10m
+INVALIDATION_COOLDOWN_MS = max(1_200_000, int(os.environ.get("SCANNER_INVALIDATION_COOLDOWN_MS", "1200000")))  # 20m
+EPISODE_COOLDOWN_MS = max(600_000, int(os.environ.get("SCANNER_EPISODE_COOLDOWN_MS", "600000")))  # 10m
 # Desk quality: only fade names with enough 24h quote volume (USDT). Not a strategy knob.
-MIN_QUOTE_VOL_24H = float(os.environ.get("SCANNER_MIN_QUOTE_VOL_24H", "10000000"))
+MIN_QUOTE_VOL_24H = max(10_000_000.0, float(os.environ.get("SCANNER_MIN_QUOTE_VOL_24H", "10000000")))
 # Reconcile less often — 5s force REST was a live 429 source.
-RECONCILE_INTERVAL_MS = int(os.environ.get("SCANNER_RECONCILE_MS", "12000"))
+RECONCILE_INTERVAL_MS = max(12_000, int(os.environ.get("SCANNER_RECONCILE_MS", "12000")))
 # Do not short after the move is largely over (chasing a dump from peak).
 MAX_RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_MAX_RETRACE_ENTRY_PCT", "12.0"))
 SHORT_TP_PCT = float(os.environ.get("SCANNER_SHORT_TP_PCT", "2.5"))
@@ -75,7 +76,10 @@ SHORT_TRAIL_MIN_MFE_PCT = clamp_pullback_mfe_pct(
     float(os.environ.get("SCANNER_SHORT_PULLBACK_MFE_PCT", "1.5"))
 )
 # Settle delay after the primary short fills before any recovery long may arm.
-LONG_ENTRY_DELAY_MS = int(os.environ.get("SCANNER_LONG_DELAY_MS", "3000"))
+# Floor 3s — env may lengthen, never zero (early L1/L2 race).
+LONG_ENTRY_DELAY_MS = max(3_000, int(os.environ.get("SCANNER_LONG_DELAY_MS", "3000")))
+# Adopt/external short notional may not exceed this × locked short target ($250).
+MAX_ADOPT_SHORT_NOTIONAL_MULT = 1.25
 # Smart exit floor — env 1.0 is forced up to 6.0; 0 disables.
 SMART_EXIT_NET_PCT = clamp_smart_exit_pct(float(os.environ.get("SCANNER_SMART_EXIT_PCT", "6.0")))
 EXIT_COST_BUFFER_PCT = clamp_exit_cost_pct(float(os.environ.get("SCANNER_EXIT_COST_PCT", "0.8")))
@@ -739,6 +743,20 @@ class MomentumScanner:
         self._place_leg_exchange_tp(coin, coin.long1)
         self._place_leg_exchange_tp(coin, coin.long2)
 
+    def _locked_short_notional_usd(self) -> float:
+        """Sep23 short target notional: $100 × 50% × 5x = $250."""
+        self._force_locked_partition_usd(persist=False)
+        return float(self._partition_usd) * float(self._short_pct) / 100.0 * float(SHORT_LEVERAGE)
+
+    def _short_notional_within_partition(self, qty: float, entry: float) -> bool:
+        """Refuse AAVE-class oversize adopt into the scanner (manual bomb → managed leak)."""
+        px = float(entry or 0)
+        q = float(qty or 0)
+        if px <= 0 or q <= 0:
+            return False
+        cap = self._locked_short_notional_usd() * float(MAX_ADOPT_SHORT_NOTIONAL_MULT)
+        return (q * px) <= cap + 1.0
+
     def _adopt_exchange_short(
         self,
         coin: CoinStrategy,
@@ -755,6 +773,15 @@ class MomentumScanner:
         fill = float(leg.get("price_open") or fallback_entry or coin.price or 0)
         qty = float(leg.get("volume") or fallback_qty or 0)
         if fill <= 0 or qty <= 1e-12:
+            return False
+        if not self._short_notional_within_partition(qty, fill):
+            log.warning(
+                "scanner adopt SHORT refused %s — notional %.2f exceeds locked short cap %.2f "
+                "(manual/external oversize; not managed)",
+                sym,
+                qty * fill,
+                self._locked_short_notional_usd() * MAX_ADOPT_SHORT_NOTIONAL_MULT,
+            )
             return False
         coin.short = LegPosition("SELL", fill, qty, SHORT_LEVERAGE, MAGIC_SHORT, tp)
         coin.status = STATUS_SHORT

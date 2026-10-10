@@ -2353,6 +2353,29 @@ class BinanceConnector:
 
         self._wait_or_clear_cool_for_close()
 
+        # PORTAL lock: never close SHORT while a LONG residual is live on the same symbol.
+        # Full-pair flatten must go through close_position (LONG first).
+        if ps == "SHORT":
+            book = self.positions(sym, force=True, bypass_rest_cool=True)
+            long_left = [
+                p
+                for p in book
+                if str(p.get("positionSide") or "").upper() == "LONG"
+                or str(p.get("type") or "").upper() == "BUY"
+            ]
+            if long_left:
+                log.error(
+                    "close_by_position_side %s abort SHORT — LONG residual %.8f (use close_position)",
+                    sym,
+                    float(long_left[0].get("volume") or 0),
+                )
+                return {
+                    "ok": False,
+                    "error": "long_residual_abort_short",
+                    "retryable": False,
+                    "long_residual": float(long_left[0].get("volume") or 0),
+                }
+
         targets = [
             p
             for p in self.positions(sym, force=True, bypass_rest_cool=True)
@@ -2459,6 +2482,14 @@ class BinanceConnector:
                         )
                         max_cell[0] = shrunk
                         continue
+                if "-2022" in msg or "reduceonly" in msg.lower():
+                    log.info(
+                        "close_by_position_side %s %s -2022 reduce-only — already flat for chunk",
+                        sym,
+                        ps,
+                    )
+                    remaining = 0.0
+                    break
                 return {"ok": False, "error": msg, "closed": closed_chunks}
             order_id = resp.get("orderId")
             fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
@@ -2768,6 +2799,15 @@ class BinanceConnector:
                             )
                             max_cell[0] = shrunk
                             continue
+                    # -2022 ReduceOnly rejected: leg already flat — stop storm, do not retry.
+                    if "-2022" in msg or "reduceonly" in msg.lower():
+                        log.info(
+                            "close_position %s %s -2022 reduce-only — treating chunk as already flat",
+                            sym,
+                            side_tag,
+                        )
+                        remaining = 0.0
+                        return
                     errors.append({"position_side": side_tag, "error": msg})
                     log.warning("close_position %s %s failed: %s", sym, side_tag, e)
                     return

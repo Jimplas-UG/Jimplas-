@@ -502,13 +502,9 @@ export async function postBinanceClosePosition(
       }
       let snippet = trimSnippet(text || (res.ok ? 'OK' : 'Empty body'));
       if (!res.ok) {
-        if (res.status === 429 && attempt < 2) {
-          await new Promise((r) => setTimeout(r, 400));
-          continue;
-        }
         const coolMsg = String(j.detail?.error || j.error || snippet || '');
-        // Frozen Sep 23–25 close cool: wait the reported cool window (capped), then retry.
-        if (/REST cooling|418|IP banned/i.test(coolMsg) && attempt < 2) {
+        // Frozen Sep 23–25 close cool: 429 / REST cool wait reported window (capped 12s) — never 400ms stub.
+        if ((res.status === 429 || /REST cooling|418|IP banned|positions_unavailable/i.test(coolMsg)) && attempt < 2) {
           const m = coolMsg.match(/(\d+)\s*s/);
           const waitS = Math.min(Math.max(Number(m?.[1]) || 3, 1), 12);
           await new Promise((r) => setTimeout(r, waitS * 1000 + 250));

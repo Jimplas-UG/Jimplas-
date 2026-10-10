@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from binance_connector import BinanceConnector, config_from_env, _truthy
+from binance_connector import BinanceConnector, PositionsUnavailable, config_from_env, _truthy
 from position_manager import PositionManager
 from tick_stream import BinanceTickStream
 from momentum_scanner import MomentumScanner
@@ -1394,6 +1394,24 @@ def api_order(body: OrderBody):
     }
 
 
+def _force_positions_or_503(symbol: str | None = None):
+    """force=True position read — 429/cool is NOT flat (never invent empty book)."""
+    try:
+        if symbol:
+            return connector.positions(symbol, force=True)
+        return connector.positions(force=True)
+    except PositionsUnavailable as e:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "ok": False,
+                "error": "positions_unavailable",
+                "detail": str(e),
+                "retryable": True,
+            },
+        ) from e
+
+
 @app.post("/api/close")
 def api_close(body: CloseBody):
     if os.environ.get("FORWARD_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
@@ -1422,7 +1440,7 @@ def api_close(body: CloseBody):
                 r = connector.close_position(sym, None)
             # If scanner path left a hedge leg, force-flatten remaining exchange legs.
             if r.get("ok"):
-                leftover = connector.positions(sym, force=True)
+                leftover = _force_positions_or_503(sym)
                 if leftover:
                     log.warning("close_pair %s leftover after strategy close — forcing flatten", sym)
                     r2 = connector.close_position(sym, None)
@@ -1450,7 +1468,7 @@ def api_close(body: CloseBody):
                 err = r.get("error") or "close_failed"
                 if r.get("already_flat") or str(err).startswith("no_"):
                     # Exchange already flat for this leg — treat as closed + reconcile.
-                    left = connector.positions(sym, force=True)
+                    left = _force_positions_or_503(sym)
                     connector.apply_symbol_positions_snapshot(sym, left)
                     r = {
                         "ok": True,
@@ -1464,7 +1482,7 @@ def api_close(body: CloseBody):
                 else:
                     raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
         else:
-            positions = connector.positions(sym, force=True)
+            positions = _force_positions_or_503(sym)
             if len(positions) > 1:
                 raise HTTPException(
                     status_code=400,
@@ -1501,6 +1519,9 @@ def api_close(body: CloseBody):
         # Verify exchange state before telling the client CLOSED.
         try:
             remaining = connector.positions(sym, force=True)
+        except PositionsUnavailable as e:
+            log.warning("close verify positions unavailable %s: %s — not inventing flat", sym, e)
+            remaining = None
         except Exception as e:
             log.warning("close verify positions %s: %s", sym, e)
             remaining = None

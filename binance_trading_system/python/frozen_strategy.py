@@ -18,6 +18,9 @@ the live modules still match the working contract:
   Smart exit: 6% of partition net — with hedges open, only when short is in profit
   Manual closes require confirm; REST cool on close waits up to 12s then clears
   Partition USD locked at $100 (Sep 23–25) — mainnet/testnet switch must not change it
+  Permanent anti-cascade: no rule_kernel / SAFE_MODE; no instant cool-clear;
+  PORTAL LONG-before-SHORT; adopt short notional ≤ 1.25×$250; liquidity ≥ $10M;
+  episode/invalidation cool floors; Long settle ≥ 3s; 429 ≠ flat
 
 If assert_frozen_contract() fails, the bridge must not silently trade a drifted policy.
 """
@@ -233,6 +236,10 @@ def assert_frozen_contract() -> dict[str, Any]:
     side_src = inspect.getsource(bc.BinanceConnector.close_by_position_side)
     assert "marketMaxQty" in side_src or "market_max" in side_src
     assert "too_many_close_chunks" in side_src
+    assert "long_residual_abort_short" in side_src, "PORTAL: SHORT close must refuse LONG residual"
+    assert "-2022" in side_src or "reduceonly" in side_src.lower()
+    close_src = inspect.getsource(bc.BinanceConnector.close_position)
+    assert "-2022" in close_src or "reduceonly" in close_src.lower()
     pos_src = inspect.getsource(bc.BinanceConnector.positions)
     assert "unavailable — not empty" in pos_src
     assert "PositionsUnavailable" in pos_src
@@ -243,6 +250,25 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "positions_unavailable" in recon_src or "PositionsUnavailable" in recon_src
     coh_src = inspect.getsource(ms.MomentumScanner._ensure_pair_coherence)
     assert "coherence deferred" in coh_src
+
+    # Permanent anti-cascade / anti-drift locks (Oct forensic — never reintroduce).
+    from pathlib import Path as _Path
+
+    assert not _Path(ms.__file__).with_name("rule_kernel.py").exists(), "rule_kernel.py must stay deleted"
+    assert "SAFE_MODE" not in src, "SAFE_MODE cascade must never return to momentum_scanner"
+    assert "rule_kernel" not in src.lower()
+    assert float(ms.MIN_QUOTE_VOL_24H) >= 10_000_000.0
+    assert int(ms.INVALIDATION_COOLDOWN_MS) >= 1_200_000
+    assert int(ms.EPISODE_COOLDOWN_MS) >= 600_000
+    assert int(ms.ENTRY_COOLDOWN_MS) >= 300_000
+    assert int(ms.LONG_ENTRY_DELAY_MS) >= 3_000
+    assert hasattr(ms.MomentumScanner, "_short_notional_within_partition")
+    assert hasattr(ms.MomentumScanner, "_locked_short_notional_usd")
+    assert "notional" in inspect.getsource(ms.MomentumScanner._adopt_exchange_short)
+    main_path = _Path(ms.__file__).with_name("main.py")
+    main_src = main_path.read_text(encoding="utf-8")
+    assert "_force_positions_or_503" in main_src
+    assert "PositionsUnavailable" in main_src
 
     return frozen_contract_snapshot()
 

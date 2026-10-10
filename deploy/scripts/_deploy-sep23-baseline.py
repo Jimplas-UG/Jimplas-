@@ -32,6 +32,7 @@ FILES = [
     "binance_trading_system/python/test_sep23_capital_locks.py",
     "binance_trading_system/python/test_desk_quality.py",
     "binance_trading_system/python/test_scanner_15m.py",
+    "binance_trading_system/python/test_permanent_leak_locks.py",
 ]
 
 REMOVE = [
@@ -54,6 +55,7 @@ test ! -f rule_kernel.py
 {PY} test_execution_engine.py
 {PY} test_sep23_capital_locks.py
 {PY} test_desk_quality.py
+{PY} test_permanent_leak_locks.py
 {PY} -c "from test_scanner_15m import test_short_tp_hedged_net_red_defers, test_short_tp_with_longs_flattens_full_pair, test_short_tp_at_2_5_pct; test_short_tp_at_2_5_pct(); test_short_tp_hedged_net_red_defers(); test_short_tp_with_longs_flattens_full_pair(); print('HEDGED_SHORT_TP_OK')"
 {PY} - <<'PY'
 from frozen_strategy import assert_frozen_contract
@@ -81,6 +83,7 @@ print('SEP23_CAPITAL_LOCKS_OK')
 print('POSITIONS_TRUTH_OK')
 print('DESK_QUALITY_OK')
 print('HEDGED_SHORT_TP_NET_OK')
+print('PERMANENT_LEAK_LOCKS_OK')
 print('SEP23_BASELINE_MARKERS_OK')
 PY
 systemctl restart bilshenz-binance-api bilshenz-forward-bot
