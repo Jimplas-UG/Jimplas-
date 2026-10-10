@@ -6,7 +6,9 @@ Entry: 15m move >= 5% gain, then >= 0.7% retrace from peak → Short (50% partit
 Recovery: +2% adverse from Short → Long 1 (40%, 10x); at +4% → Long 2 (40%, 10x).
 Each recovery long requires a confirmed primary short, settle delay, and live adverse
 (not peak-only latch). While the short is underwater, Long 1 / Long 2 stay paired
-(no independent TP/0.5% trail) until rescue, invalidation, or short TP flattens all.
+(no independent TP/0.5% trail) until rescue, invalidation, or a *net-clear* short TP
+flattens all. Hard SHORT_TP while hedges are open is deferred when episode net is still
+red (same discipline as SHORT_PULLBACK) — wait RESCUE / INVALIDATION / SMART_EXIT.
 Short TP at 2.5% down; the short trail keeps a profitable-MFE floor so it never acts
 as a hard stop. Recovery longs are never left without the primary short.
 """
@@ -617,9 +619,20 @@ class MomentumScanner:
             return False
         # Keep the short open while recovery longs are still underwater.
         if coin.long1 or coin.long2:
-            if coin.unrealized_pnl < self._exit_cost_buffer_usd():
+            if not self._hedged_short_exit_net_ok(coin):
                 return False
         return True
+
+    def _hedged_short_exit_net_ok(self, coin: CoinStrategy) -> bool:
+        """
+        Hedged SHORT_TP / SHORT_PULLBACK may flatten only when episode net clears costs.
+
+        Mirrors Sep SMART_EXIT discipline: never nuke L1/L2 into a net-red book just
+        because the naked short mark hit -2.5%. Naked shorts (no hedges) always OK.
+        """
+        if not (coin.long1 or coin.long2):
+            return True
+        return float(coin.unrealized_pnl or 0.0) >= self._exit_cost_buffer_usd()
 
     def _long_hedge_pullback_pct(self, peak: float, price: float) -> float:
         if peak <= 0 or price <= 0:
@@ -2877,6 +2890,18 @@ class MomentumScanner:
                 )
                 short_exit_reason = "SHORT_PULLBACK"
             if short_exit_reason:
+                # Hedged hard-TP must not flatten a net-red episode (C98/RLC leak).
+                # Same net gate as SHORT_PULLBACK; orphan longs still forbidden once we do close.
+                if not self._hedged_short_exit_net_ok(coin):
+                    log.info(
+                        "scanner %s defer %s — hedges open net=%.4f < cost_buf=%.4f "
+                        "(paired hold until RESCUE/INVALIDATION/SMART_EXIT)",
+                        sym,
+                        short_exit_reason,
+                        coin.unrealized_pnl,
+                        cost_buf,
+                    )
+                    return
                 # Recovery longs may never outlive the primary short.
                 self._close_all(coin, short_exit_reason)
                 return

@@ -11,6 +11,8 @@ the live modules still match the working contract:
   Rescue: long PnL ≥ short loss + buffer → flatten all
   Invalidation: ≥6.5% adverse from short entry → flatten all
   Short TP −2.5%; never leave orphan longs without the primary short
+  Hedged SHORT_TP / SHORT_PULLBACK flatten only when episode net clears exit costs
+  (defer net-red hedged hard-TP — wait RESCUE / INVALIDATION / SMART_EXIT)
   Shared LONG close must never wipe/retire the sibling recovery leg
   (Long1 close must not permanently kill Long2, and vice versa)
   Smart exit: 6% of partition net — with hedges open, only when short is in profit
@@ -222,6 +224,10 @@ def assert_frozen_contract() -> dict[str, Any]:
     manage_src = inspect.getsource(ms.MomentumScanner._manage_positions)
     assert "target = LONG1_LEVERAGE" not in manage_src
     assert "symbol_exchange_leverage" in manage_src
+    # Hedged SHORT_TP must share SHORT_PULLBACK's net-clear gate (no net-red flatten).
+    assert hasattr(ms.MomentumScanner, "_hedged_short_exit_net_ok")
+    assert "_hedged_short_exit_net_ok" in manage_src
+    assert "defer" in manage_src
     assert "marketMaxQty" in inspect.getsource(bc.BinanceConnector._parse_symbol_filters)
     assert "long_residual_abort_short" in inspect.getsource(bc.BinanceConnector.close_position)
     side_src = inspect.getsource(bc.BinanceConnector.close_by_position_side)
