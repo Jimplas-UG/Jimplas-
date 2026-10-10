@@ -31,6 +31,7 @@ FILES = [
     "binance_trading_system/python/test_leverage_policy.py",
     "binance_trading_system/python/test_sep23_capital_locks.py",
     "binance_trading_system/python/test_desk_quality.py",
+    "binance_trading_system/python/test_scanner_15m.py",
 ]
 
 REMOVE = [
@@ -53,6 +54,7 @@ test ! -f rule_kernel.py
 {PY} test_execution_engine.py
 {PY} test_sep23_capital_locks.py
 {PY} test_desk_quality.py
+{PY} -c "from test_scanner_15m import test_short_tp_hedged_net_red_defers, test_short_tp_with_longs_flattens_full_pair, test_short_tp_at_2_5_pct; test_short_tp_at_2_5_pct(); test_short_tp_hedged_net_red_defers(); test_short_tp_with_longs_flattens_full_pair(); print('HEDGED_SHORT_TP_OK')"
 {PY} - <<'PY'
 from frozen_strategy import assert_frozen_contract
 import inspect
@@ -64,6 +66,8 @@ assert abs(float(snap['ops']['partition_usd']) - 100.0) < 1e-9
 assert 'target = LONG1_LEVERAGE' not in inspect.getsource(MomentumScanner._manage_positions)
 assert 'long_residual_abort_short' in inspect.getsource(BinanceConnector.close_position)
 assert hasattr(MomentumScanner, '_solo_hedge_exit_allowed')
+assert hasattr(MomentumScanner, '_hedged_short_exit_net_ok')
+assert '_hedged_short_exit_net_ok' in inspect.getsource(MomentumScanner._manage_positions)
 from binance_connector import PositionsUnavailable
 pos_src = inspect.getsource(BinanceConnector.positions)
 assert 'unavailable — not empty' in pos_src
@@ -76,6 +80,7 @@ assert 'confirmed_positions' in inspect.getsource(BinanceConnector)
 print('SEP23_CAPITAL_LOCKS_OK')
 print('POSITIONS_TRUTH_OK')
 print('DESK_QUALITY_OK')
+print('HEDGED_SHORT_TP_NET_OK')
 print('SEP23_BASELINE_MARKERS_OK')
 PY
 systemctl restart bilshenz-binance-api bilshenz-forward-bot
