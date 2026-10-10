@@ -33,6 +33,10 @@ FILES = [
     "binance_trading_system/python/test_desk_quality.py",
     "binance_trading_system/python/test_scanner_15m.py",
     "binance_trading_system/python/test_permanent_leak_locks.py",
+    "frontend/broker/binanceFuturesApi.js",
+    "frontend/components/OpenPositionsPanel.js",
+    "frontend/lib/liveFloatingPnl.js",
+    "frontend/lib/liveFloatingPnl.test.js",
 ]
 
 REMOVE = [
@@ -106,8 +110,21 @@ def main() -> None:
     c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     c.connect(HOST, username="root", pkey=pkey, timeout=45, look_for_keys=False, allow_agent=False)
     sftp = c.open_sftp()
+
+    def _ensure_remote_dir(remote_file: str) -> None:
+        parts = remote_file.strip("/").split("/")[:-1]
+        cur = ""
+        for p in parts:
+            cur += "/" + p
+            try:
+                sftp.stat(cur)
+            except OSError:
+                sftp.mkdir(cur)
+
     for rel in FILES:
-        sftp.put(str(ROOT / rel), f"/opt/bilshenz/{rel}")
+        remote = f"/opt/bilshenz/{rel}"
+        _ensure_remote_dir(remote)
+        sftp.put(str(ROOT / rel), remote)
         print("uploaded", rel)
     sftp.close()
     _, o, e = c.exec_command(CMD, timeout=240)

@@ -126,15 +126,19 @@ def test_api_close_never_invents_flat_on_429() -> None:
 
 def test_client_close_429_waits_cool_window() -> None:
     fe = ROOT / "frontend" / "broker" / "binanceFuturesApi.js"
+    assert fe.exists(), f"missing {fe}"
     src = fe.read_text(encoding="utf-8")
-    assert "setTimeout(r, 400)" not in src or "waitS * 1000" in src
+    assert "waitS * 1000" in src
     assert "Math.min(Math.max(Number(m?.[1]) || 3, 1), 12)" in src
     assert "positions_unavailable" in src
-    print("OK client close 429 waits ≤12s cool window")
+    # Must not use the old 400ms stub as the 429 path.
+    assert "res.status === 429 && attempt < 2" not in src or "waitS" in src.split("429")[1][:400]
+    print("OK client close 429 waits <=12s cool window")
 
 
 def test_ui_manual_close_requires_confirm() -> None:
     panel = ROOT / "frontend" / "components" / "OpenPositionsPanel.js"
+    assert panel.exists(), f"missing {panel}"
     src = panel.read_text(encoding="utf-8")
     assert "confirmCloseLeg" in src
     assert "Cancel" in src
@@ -144,6 +148,7 @@ def test_ui_manual_close_requires_confirm() -> None:
 
 def test_ghost_floating_same_symbol_only() -> None:
     pnl = ROOT / "frontend" / "lib" / "liveFloatingPnl.js"
+    assert pnl.exists(), f"missing {pnl}"
     src = pnl.read_text(encoding="utf-8")
     assert "MAX_MARK_REL_MOVE" in src
     assert "heroFloatingPnl" in src
