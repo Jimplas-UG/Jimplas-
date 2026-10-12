@@ -256,6 +256,15 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert hasattr(ms.MomentumScanner, "_exchange_positions_for_gate")
     conf_src = inspect.getsource(bc.BinanceConnector.confirmed_positions)
     assert "30.0" in conf_src
+    # Exit residual truth — never invent full-chunk fills or ok-with-leftover.
+    assert hasattr(bc.BinanceConnector, "_confirmed_executed_qty")
+    assert hasattr(bc.BinanceConnector, "_reconcile_close_timeout")
+    cbs_src = inspect.getsource(bc.BinanceConnector.close_by_position_side)
+    assert "partial_close_remaining_legs" in cbs_src
+    assert "_confirmed_executed_qty" in cbs_src
+    # Mandatory exits must force through close_backoff.
+    assert "force=True" in manage_src and "INVALIDATION" in manage_src
+    assert hasattr(ms.MomentumScanner, "_record_exit_outcome")
 
     # Permanent anti-cascade / anti-drift locks (Oct forensic — never reintroduce).
     from pathlib import Path as _Path
@@ -275,6 +284,9 @@ def assert_frozen_contract() -> dict[str, Any]:
     main_src = main_path.read_text(encoding="utf-8")
     assert "_force_positions_or_503" in main_src
     assert "PositionsUnavailable" in main_src
+    assert "CLOSE_INCOMPLETE" in main_src, "api_close must not CLOSE_OK without verified flat"
+    assert "manual_buy_requires_open_short" in main_src
+    assert "_exchange_positions_for_gate" in main_src
 
     return frozen_contract_snapshot()
 

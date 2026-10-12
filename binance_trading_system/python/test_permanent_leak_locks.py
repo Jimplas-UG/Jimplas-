@@ -248,6 +248,146 @@ def test_confirmed_positions_trusts_last_good_during_cool() -> None:
     print("OK confirmed_positions trusts last_good up to 30s during cool")
 
 
+def test_close_by_side_never_ok_with_residual() -> None:
+    """PORTAL class: close_by_position_side must not return ok while side still live."""
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._hedge_mode = True
+    calls = {"n": 0}
+
+    def fake_positions(symbol=None, force=False, bypass_rest_cool=False):
+        calls["n"] += 1
+        # Always report leftover LONG — residual gate must fail closed.
+        return [{"symbol": "PORTALUSDT", "volume": 50000.0, "positionSide": "LONG", "type": "BUY", "price_open": 1.0}]
+
+    def fake_request(*_a, **_k):
+        raise RuntimeError("should not MARKET when we stub loop — use residual path")
+
+    c.positions = fake_positions  # type: ignore
+    c.get_symbol_spec = lambda _s: {  # type: ignore
+        "marketStepSize": 1.0,
+        "stepSize": 1.0,
+        "marketMinQty": 1.0,
+        "minQty": 1.0,
+        "marketMaxQty": 30000.0,
+        "maxQty": 30000.0,
+    }
+    c.cancel_all_orders = lambda *_a, **_k: None  # type: ignore
+    c._wait_or_clear_cool_for_close = lambda **_k: 0.0  # type: ignore
+    c._request_keepalive = fake_request  # type: ignore
+    c._market_close_params = lambda **k: k  # type: ignore
+    c.apply_symbol_positions_snapshot = lambda *_a, **_k: None  # type: ignore
+    c.remember_close_deals = lambda *_a, **_k: None  # type: ignore
+
+    # Force path: empty closed chunks then residual check — volume=None full close.
+    # Simulate loop exit with remaining=0 local but live residual via _position_side_qty.
+    c._position_side_qty = lambda _s, _ps: 50000.0  # type: ignore
+    # Hijack the while-loop by making first positions empty for targets... need targets.
+    # Re-stub: first call returns target, subsequent residual via _position_side_qty.
+    state = {"i": 0}
+
+    def pos2(symbol=None, force=False, bypass_rest_cool=False):
+        state["i"] += 1
+        return [
+            {
+                "symbol": "PORTALUSDT",
+                "volume": 100.0,
+                "positionSide": "LONG",
+                "type": "BUY",
+                "price_open": 1.0,
+            }
+        ]
+
+    c.positions = pos2  # type: ignore
+
+    # MARKET succeeds with missing executedQty → must not invent full chunk.
+    def keepalive(*_a, **_k):
+        return {"orderId": 1, "avgPrice": "1.0"}  # no executedQty
+
+    c._request_keepalive = keepalive  # type: ignore
+    c.query_order_by_client_id = lambda *_a, **_k: None  # type: ignore
+    c.realized_pnl_for_order = lambda *_a, **_k: (0.0, 0.0)  # type: ignore
+    c._sanitize_fill_price = lambda *_a, **_k: 1.0  # type: ignore
+    c._estimate_close_pnl = lambda *_a, **_k: 0.0  # type: ignore
+    c._finalize_close_pnl = lambda *_a, **_k: 0.0  # type: ignore
+
+    r = c.close_by_position_side("PORTALUSDT", "LONG", None)
+    assert r.get("ok") is False, r
+    assert "zero_executed" in str(r.get("error") or "") or "partial_close" in str(r.get("error") or ""), r
+    print("OK close_by_position_side never invents fill / ok-with-residual")
+
+
+def test_mandatory_exits_force_through_backoff() -> None:
+    from momentum_scanner import MomentumScanner, CoinStrategy
+    import inspect
+
+    src = inspect.getsource(MomentumScanner._manage_positions)
+    assert 'self._close_all(coin, "INVALIDATION", force=True)' in src
+    assert 'self._close_all(coin, "RESCUE", force=True)' in src
+    assert 'self._close_all(coin, "SMART_EXIT", force=True)' in src
+    assert "arm_hedges" in src
+    print("OK INVALIDATION/RESCUE/SMART_EXIT force through close_backoff")
+
+
+def test_global_active_fail_closed_on_unavailable() -> None:
+    from binance_connector import PositionsUnavailable
+    from momentum_scanner import MomentumScanner
+
+    sc = MomentumScanner(SimpleNamespace(cfg=SimpleNamespace(paper=False, api_key="k")), lambda: True)
+    sc._last_known_active_symbol = "WUSDT"
+
+    def boom():
+        raise PositionsUnavailable("cool")
+
+    sc._exchange_positions = boom  # type: ignore
+    assert sc._global_active_symbol() == "WUSDT"
+    print("OK global_active fail-closed keeps last known symbol")
+
+
+def test_manual_clamp_residual_aware() -> None:
+    from momentum_scanner import MomentumScanner
+
+    conn = SimpleNamespace(
+        cfg=SimpleNamespace(paper=False, api_key="k"),
+        exchange_short_qty=lambda _s: 10.0,
+        exchange_long_qty=lambda _s: 0.0,
+        symbol_spec=lambda *_a, **_k: {"stepSize": 0.001, "minQty": 0.001},
+    )
+    sc = MomentumScanner(conn, lambda: True)
+    sc._partition_usd = 100.0
+    # max short qty at price 1 ≈ 50*5=250 notional → qty 250; live 10 → room 240
+    qty, rejected = sc.clamp_manual_open_qty("BTCUSDT", "SELL", 1.0, 1000.0)
+    assert rejected is True
+    assert qty < 1000.0
+    # Already at/over cap
+    conn.exchange_short_qty = lambda _s: 10_000.0
+    qty2, rej2 = sc.clamp_manual_open_qty("BTCUSDT", "SELL", 1.0, 1.0)
+    assert rej2 is True and qty2 == 0.0
+    print("OK manual clamp residual-aware (no stack past partition)")
+
+
+def test_exit_outcome_recorded_on_incomplete() -> None:
+    from momentum_scanner import MomentumScanner, CoinStrategy, STATUS_SHORT
+
+    conn = SimpleNamespace(cfg=SimpleNamespace(paper=True, api_key=""), _connected=False)
+    sc = MomentumScanner(conn, lambda: True)
+    coin = CoinStrategy(symbol="XUSDT")
+    coin.short = SimpleNamespace(entry=1.0, qty=1.0, side="SELL", leverage=5, magic=88001, tp_price=0)
+    coin.status = STATUS_SHORT
+
+    def fail_close(_sym, _magic, _qty):
+        return {"ok": False, "error": "simulated"}
+
+    conn.close_leg = fail_close
+    r = sc._close_all(coin, "INVALIDATION", force=True)
+    assert r.get("ok") is False
+    outs = sc.recent_exit_outcomes()
+    assert outs and outs[-1]["ok"] is False and outs[-1]["reason"] == "INVALIDATION"
+    assert coin.short is not None, "must not clear scanner state on failed exit"
+    print("OK failed exit records outcome and preserves state")
+
+
 if __name__ == "__main__":
     test_no_rule_kernel_safe_mode()
     test_naked_short_never_10x()
@@ -266,4 +406,9 @@ if __name__ == "__main__":
     test_exchange_positions_never_empty_on_unavailable()
     test_short_gone_defers_when_confirm_unavailable()
     test_confirmed_positions_trusts_last_good_during_cool()
+    test_close_by_side_never_ok_with_residual()
+    test_mandatory_exits_force_through_backoff()
+    test_global_active_fail_closed_on_unavailable()
+    test_manual_clamp_residual_aware()
+    test_exit_outcome_recorded_on_incomplete()
     print("test_permanent_leak_locks: ALL OK")

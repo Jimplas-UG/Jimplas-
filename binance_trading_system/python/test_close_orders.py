@@ -136,25 +136,60 @@ def test_pair_close_unique_client_ids() -> None:
     c = HedgeConnector()
     c.cfg = SimpleNamespace(paper=False, api_key="k", api_secret="s", symbol="BTCUSDT")
     seen: list[str] = []
+    closed_sides: set[str] = set()
 
     def fake_positions(symbol=None, force=False, bypass_rest_cool=False):
-        if len(seen) >= 2:
-            return []
-        return [
-            {"type": "BUY", "positionSide": "LONG", "volume": 1.0, "price_open": 100.0, "symbol": "BTCUSDT"},
-            {"type": "SELL", "positionSide": "SHORT", "volume": 2.0, "price_open": 100.0, "symbol": "BTCUSDT"},
-        ]
+        out = []
+        if "LONG" not in closed_sides:
+            out.append(
+                {
+                    "type": "BUY",
+                    "positionSide": "LONG",
+                    "volume": 1.0,
+                    "price_open": 100.0,
+                    "symbol": "BTCUSDT",
+                }
+            )
+        if "SHORT" not in closed_sides:
+            out.append(
+                {
+                    "type": "SELL",
+                    "positionSide": "SHORT",
+                    "volume": 2.0,
+                    "price_open": 100.0,
+                    "symbol": "BTCUSDT",
+                }
+            )
+        return out
 
     def fake_request(method, path, params=None, signed=False, timeout=10.0, **_kw):
-        cid = (params or {}).get("newClientOrderId")
+        params = params or {}
+        cid = params.get("newClientOrderId")
         assert cid, "missing client id"
         assert cid not in seen, f"duplicate client id {cid}"
         seen.append(cid)
-        return {"orderId": 1000 + len(seen), "avgPrice": "100"}
+        ps = str(params.get("positionSide") or "").upper()
+        if ps in ("LONG", "SHORT"):
+            closed_sides.add(ps)
+        qty = params.get("quantity")
+        return {
+            "orderId": 1000 + len(seen),
+            "avgPrice": "100",
+            "executedQty": str(qty if qty is not None else 0),
+            "status": "FILLED",
+        }
 
     c.positions = fake_positions  # type: ignore[method-assign]
     c.cancel_all_orders = lambda _s, **_k: None  # type: ignore[method-assign]
     c.exchange_info = lambda: {"stepSize": 0.001, "minQty": 0.001, "tickSize": 0.01}  # type: ignore[method-assign]
+    c.get_symbol_spec = lambda _s: {  # type: ignore[method-assign]
+        "marketStepSize": 0.001,
+        "stepSize": 0.001,
+        "marketMinQty": 0.001,
+        "minQty": 0.001,
+        "marketMaxQty": 1000.0,
+        "maxQty": 1000.0,
+    }
     c._request_keepalive = fake_request  # type: ignore[method-assign]
     c._request = fake_request  # type: ignore[method-assign]
     c.realized_pnl_for_order = lambda *_a, **_k: (0.0, 0.0)  # type: ignore[method-assign]
@@ -164,6 +199,7 @@ def test_pair_close_unique_client_ids() -> None:
     c._finalize_close_pnl = lambda *_a, **_k: 0.0  # type: ignore[method-assign]
     c.apply_symbol_positions_snapshot = lambda *_a, **_k: None  # type: ignore[method-assign]
     c.is_hedge_mode = lambda: True  # type: ignore[method-assign]
+    c.query_order_by_client_id = lambda *_a, **_k: None  # type: ignore[method-assign]
 
     r = c.close_position("BTCUSDT", None)
     assert r.get("ok"), r

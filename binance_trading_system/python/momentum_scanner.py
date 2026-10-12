@@ -266,6 +266,8 @@ class MomentumScanner:
         self._close_fail_count: dict[str, int] = {}
         self._short_syms_cache: tuple[float, set[str]] | None = None
         self._adopt_attempt_ms: dict[str, int] = {}
+        self._last_known_active_symbol: str | None = None
+        self._exit_outcomes: deque[dict[str, Any]] = deque(maxlen=128)
 
     @property
     def engine(self) -> ExecutionEngine:
@@ -1572,9 +1574,62 @@ class MomentumScanner:
                 return {"ok": False, "error": "close_by_position_side_unsupported"}
             r = self._connector.close_by_position_side(sym, ps, volume)
             if not r.get("ok"):
+                self._record_exit_outcome(
+                    symbol=sym,
+                    reason=f"MANUAL_{ps}",
+                    ok=False,
+                    status="rejected",
+                    detail=str(r.get("error") or "close_failed"),
+                    remaining=r.get("remaining_qty") or r.get("remaining"),
+                )
                 return r
             if coin and ps == "LONG":
-                # Closing recovery longs while the short remains is allowed.
+                # Clear scanner longs only when exchange LONG is actually flat.
+                still_long = False
+                if not getattr(self._connector.cfg, "paper", False):
+                    try:
+                        still_long = bool(self._exchange_has_long(sym))
+                        # Prefer force residual when available.
+                        qty_fn = getattr(self._connector, "exchange_long_qty", None)
+                        if callable(qty_fn):
+                            still_long = float(qty_fn(sym) or 0) > 1e-12
+                        left = self._connector.positions(sym, force=True, bypass_rest_cool=True)
+                        still_long = any(
+                            float(p.get("volume") or 0) > 1e-12
+                            and (
+                                str(p.get("positionSide") or "").upper() == "LONG"
+                                or str(p.get("type") or "").upper() == "BUY"
+                            )
+                            for p in (left or [])
+                        )
+                    except Exception as e:
+                        self._record_exit_outcome(
+                            symbol=sym,
+                            reason="MANUAL_LONG",
+                            ok=False,
+                            status="deferred",
+                            detail=str(e),
+                        )
+                        return {
+                            "ok": False,
+                            "error": "long_close_verify_unavailable",
+                            "detail": str(e),
+                            "broker": "binance",
+                        }
+                if still_long:
+                    self._record_exit_outcome(
+                        symbol=sym,
+                        reason="MANUAL_LONG",
+                        ok=False,
+                        status="pending",
+                        detail="long_residual_after_close",
+                    )
+                    return {
+                        "ok": False,
+                        "error": "partial_close_remaining_legs",
+                        "remaining_side": "LONG",
+                        "broker": "binance",
+                    }
                 coin.independent_legs_mode = False
                 coin.long1 = None
                 coin.long2 = None
@@ -1596,6 +1651,7 @@ class MomentumScanner:
                 latency_ms=latency_ms,
                 source="manual_leg",
             )
+            self._record_exit_outcome(symbol=sym, reason=f"MANUAL_{ps}", ok=True, status="executed")
             log.info("manual close leg %s %s latency_ms=%s", sym, ps, latency_ms)
             return r
         finally:
@@ -2072,24 +2128,74 @@ class MomentumScanner:
         self._trades_closed_today += 1
 
     def _global_active_symbol(self) -> str | None:
-        """Symbol with open scanner legs OR any live exchange position (blocks stacking)."""
+        """Symbol with open scanner legs OR any live exchange position (blocks stacking).
+
+        Fail closed on unconfirmed book: keep last known active so we never open a
+        second pair while exposure may still be live (Sep–Oct stacking class).
+        """
         from binance_connector import PositionsUnavailable
 
         for coin in self._coins.values():
             if coin.short or coin.long1 or coin.long2:
+                self._last_known_active_symbol = coin.symbol
                 return coin.symbol
             if coin.status in (STATUS_SHORT, STATUS_LONG1, STATUS_LONG2):
+                self._last_known_active_symbol = coin.symbol
                 return coin.symbol
         try:
             rows = self._exchange_positions()
         except PositionsUnavailable:
-            return None
+            return self._last_known_active_symbol
         for p in rows:
             sym = str(p.get("symbol") or "").upper()
             vol = float(p.get("volume") or 0)
             if sym and vol > 1e-12:
+                self._last_known_active_symbol = sym
                 return sym
+        self._last_known_active_symbol = None
         return None
+
+    def _record_exit_outcome(
+        self,
+        *,
+        symbol: str,
+        reason: str,
+        ok: bool,
+        status: str,
+        detail: str = "",
+        remaining: Any = None,
+    ) -> None:
+        """Immutable exit audit ring — never silently discard failed/deferred closes."""
+        row = {
+            "ts_ms": int(time.time() * 1000),
+            "symbol": str(symbol or "").upper(),
+            "reason": str(reason or ""),
+            "ok": bool(ok),
+            "status": str(status or ""),
+            "detail": str(detail or "")[:240],
+            "remaining": remaining,
+        }
+        self._exit_outcomes.append(row)
+        if not ok:
+            log.warning(
+                "EXIT_OUTCOME status=%s symbol=%s reason=%s detail=%s remaining=%s",
+                status,
+                row["symbol"],
+                reason,
+                row["detail"],
+                remaining,
+            )
+        else:
+            log.info(
+                "EXIT_OUTCOME status=%s symbol=%s reason=%s",
+                status,
+                row["symbol"],
+                reason,
+            )
+
+    def recent_exit_outcomes(self, limit: int = 32) -> list[dict[str, Any]]:
+        n = max(1, min(128, int(limit)))
+        return list(self._exit_outcomes)[-n:]
 
     def _has_open_strategy(self) -> bool:
         return self._global_active_symbol() is not None
@@ -2581,14 +2687,36 @@ class MomentumScanner:
         return 0.0
 
     def clamp_manual_open_qty(self, symbol: str, side: str, price: float, requested_qty: float) -> tuple[float, bool]:
-        """Return (qty, rejected). rejected=True when request exceeds locked partition max."""
+        """Return (qty, rejected). rejected=True when request exceeds locked partition max.
+
+        Residual-aware: existing exchange SHORT/LONG counts against the $100 partition
+        ceiling so repeated desk taps cannot stack past the lock.
+        """
         max_q = self.max_manual_open_qty(symbol, side, price)
         req = float(requested_qty or 0)
         if max_q <= 0 or req <= 0:
             return 0.0, True
-        if req > max_q * 1.02:
-            return max_q, True
-        return min(req, max_q), False
+        side_u = (side or "").upper()
+        sym = symbol.upper()
+        live = 0.0
+        try:
+            if side_u == "SELL":
+                fn = getattr(self._connector, "exchange_short_qty", None)
+                if callable(fn):
+                    live = float(fn(sym) or 0)
+            elif side_u == "BUY":
+                fn = getattr(self._connector, "exchange_long_qty", None)
+                if callable(fn):
+                    live = float(fn(sym) or 0)
+        except Exception as e:
+            log.warning("clamp_manual_open_qty residual %s: %s — reject", sym, e)
+            return 0.0, True
+        room = max(0.0, max_q - live)
+        if room <= 1e-12:
+            return 0.0, True
+        if req > room * 1.02:
+            return room, True
+        return min(req, room), False
 
     def _execute_pending_short(self, coin: CoinStrategy) -> None:
         """Fire the primary short once per entry signal — never re-send on every tick."""
@@ -2904,7 +3032,7 @@ class MomentumScanner:
         coin.unrealized_pnl = short_pnl + long1_pnl + long2_pnl
         cost_buf = self._exit_cost_buffer_usd()
 
-        if self._effective_smart_exit_pct() > 0 and self._partition_usd > 0 and not close_blocked:
+        if self._effective_smart_exit_pct() > 0 and self._partition_usd > 0:
             smart_target = (
                 self._partition_usd * self._effective_smart_exit_pct() / 100.0 + cost_buf
             )
@@ -2927,7 +3055,8 @@ class MomentumScanner:
                     hedges_open,
                     self._short_underwater(coin) if coin.short else False,
                 )
-                self._close_all(coin, "SMART_EXIT")
+                # Mandatory risk-reduce — never defer behind close_backoff.
+                self._close_all(coin, "SMART_EXIT", force=True)
                 return
 
         if coin.short:
@@ -2935,11 +3064,12 @@ class MomentumScanner:
             if adverse > coin.short_adverse_peak_pct:
                 coin.short_adverse_peak_pct = adverse
 
-        # Long 1 @ +2%; Long 2 @ +4% — independent checks so a gap to +4% can arm both.
-        if coin.short and coin.long1 is None and self._long1_entry_allowed(coin):
+        # During failed-close backoff / close_pending: block new risk-increasing hedges.
+        arm_hedges = not close_blocked and not pair_gate.is_close_pending(sym)
+        if coin.short and coin.long1 is None and arm_hedges and self._long1_entry_allowed(coin):
             self._try_open_long1(coin)
 
-        if coin.short and coin.long2 is None and self._long2_entry_allowed(coin):
+        if coin.short and coin.long2 is None and arm_hedges and self._long2_entry_allowed(coin):
             self._try_open_long2(coin)
 
         # Track hedge peaks always (for when short later goes into profit).
@@ -2950,25 +3080,27 @@ class MomentumScanner:
             if coin.long2_peak_price is None or price > coin.long2_peak_price:
                 coin.long2_peak_price = price
 
-        if close_blocked:
-            pass
-        elif coin.short and self._pair_invalidation_hit(coin):
+        # INVALIDATION / RESCUE always force through backoff — account protection first.
+        if coin.short and self._pair_invalidation_hit(coin):
             log.info(
                 "scanner %s INVALIDATION adverse=%.2f%% >= %.2f%%",
                 sym,
                 self._short_adverse_pct(coin),
                 PAIR_INVALIDATION_PCT,
             )
-            self._close_all(coin, "INVALIDATION")
+            self._close_all(coin, "INVALIDATION", force=True)
             return
-        elif coin.short and self._hedge_rescue_ready(coin, price):
+        if coin.short and self._hedge_rescue_ready(coin, price):
             log.info(
                 "scanner %s RESCUE long covers short+buffer pnl=%.4f",
                 sym,
                 coin.unrealized_pnl,
             )
-            self._close_all(coin, "RESCUE")
+            self._close_all(coin, "RESCUE", force=True)
             return
+
+        if close_blocked:
+            pass
         elif coin.short and (coin.long1 or coin.long2) and not self._solo_hedge_exit_allowed(coin):
             # Paired hold: underwater OR post-Long1 hedge episode — no solo hedge dump.
             pass
@@ -3138,23 +3270,83 @@ class MomentumScanner:
             if not r.get("ok"):
                 log.warning("scanner close leg failed %s %s: %s", sym, leg_name, r.get("error") or r)
                 self._note_close_failure(sym, f"{leg_name}:{r.get('error') or 'close_leg_failed'}")
+                self._record_exit_outcome(
+                    symbol=sym,
+                    reason=reason or leg_name,
+                    ok=False,
+                    status="rejected",
+                    detail=str(r.get("error") or "close_leg_failed"),
+                    remaining=r.get("remaining_qty") or r.get("remaining"),
+                )
                 return
-            # Live only: verify expected residual before clearing scanner state.
+            # Live only: force-verify residual before clearing scanner state.
             if not getattr(self._connector.cfg, "paper", False):
-                if leg.side == "SELL" and self._exchange_has_short(sym):
+                try:
+                    force_pos = getattr(self._connector, "positions", None)
+                    live_rows = force_pos(sym, force=True, bypass_rest_cool=True) if callable(force_pos) else []
+                except Exception as e:
+                    log.warning("scanner close leg %s %s verify unavailable: %s — keep state", sym, leg_name, e)
+                    self._note_close_failure(sym, f"{leg_name}:verify_unavailable")
+                    self._record_exit_outcome(
+                        symbol=sym,
+                        reason=reason or leg_name,
+                        ok=False,
+                        status="deferred",
+                        detail=str(e),
+                    )
+                    return
+
+                def _side_live(side_name: str) -> bool:
+                    for p in live_rows or []:
+                        vol = float(p.get("volume") or 0)
+                        if vol <= 1e-12:
+                            continue
+                        pos_side = str(p.get("positionSide") or "").upper()
+                        side = str(p.get("type") or p.get("side") or "").upper()
+                        if side_name == "SHORT" and (
+                            pos_side == "SHORT" or (side == "SELL" and pos_side != "LONG")
+                        ):
+                            return True
+                        if side_name == "LONG" and (pos_side == "LONG" or side == "BUY"):
+                            return True
+                    return False
+
+                if leg.side == "SELL" and _side_live("SHORT"):
                     log.warning("scanner close leg %s %s reported ok but SHORT still open — forcing", sym, leg_name)
                     try:
-                        if hasattr(self._connector, "close_by_position_side"):
+                        fr = (
                             self._connector.close_by_position_side(sym, "SHORT", None)
-                        elif hasattr(self._connector, "close_position"):
-                            self._connector.close_position(sym, None)
-                        else:
+                            if hasattr(self._connector, "close_by_position_side")
+                            else self._connector.close_position(sym, None)
+                        )
+                        if not fr.get("ok"):
+                            self._note_close_failure(sym, f"{leg_name}:force_short_failed")
+                            self._record_exit_outcome(
+                                symbol=sym,
+                                reason=reason or leg_name,
+                                ok=False,
+                                status="pending",
+                                detail=str(fr.get("error") or "force_short_failed"),
+                                remaining=fr.get("remaining"),
+                            )
+                            return
+                        live_rows = force_pos(sym, force=True, bypass_rest_cool=True) if callable(force_pos) else []
+                        if _side_live("SHORT"):
+                            self._note_close_failure(sym, f"{leg_name}:short_residual")
+                            self._record_exit_outcome(
+                                symbol=sym,
+                                reason=reason or leg_name,
+                                ok=False,
+                                status="pending",
+                                detail="short_residual_after_force",
+                            )
                             return
                     except Exception as e:
                         log.warning("scanner force flatten short %s: %s", sym, e)
+                        self._note_close_failure(sym, f"{leg_name}:force_short_exc")
                         return
                 elif leg.side == "BUY":
-                    still_long = self._exchange_has_long(sym)
+                    still_long = _side_live("LONG")
                     if sibling_long is None and still_long:
                         log.warning(
                             "scanner close leg %s %s reported ok but LONG still open — forcing long side",
@@ -3163,11 +3355,27 @@ class MomentumScanner:
                         )
                         try:
                             if hasattr(self._connector, "close_by_position_side"):
-                                self._connector.close_by_position_side(sym, "LONG", None)
+                                fr = self._connector.close_by_position_side(sym, "LONG", None)
                             else:
+                                self._note_close_failure(sym, f"{leg_name}:no_force_long")
+                                return
+                            if not fr.get("ok"):
+                                self._note_close_failure(sym, f"{leg_name}:force_long_failed")
+                                self._record_exit_outcome(
+                                    symbol=sym,
+                                    reason=reason or leg_name,
+                                    ok=False,
+                                    status="pending",
+                                    detail=str(fr.get("error") or "force_long_failed"),
+                                )
+                                return
+                            live_rows = force_pos(sym, force=True, bypass_rest_cool=True) if callable(force_pos) else []
+                            if _side_live("LONG"):
+                                self._note_close_failure(sym, f"{leg_name}:long_residual")
                                 return
                         except Exception as e:
                             log.warning("scanner force flatten long %s: %s", sym, e)
+                            self._note_close_failure(sym, f"{leg_name}:force_long_exc")
                             return
                     elif sibling_long is not None and not still_long:
                         # Partial close took the whole long — sibling was wiped, not exited.
@@ -3209,6 +3417,12 @@ class MomentumScanner:
                 coin.long2_was_closed = True
                 coin.last_long2_exit_reason = reason or coin.last_long2_exit_reason or "LONG2_CLOSE"
                 coin.status = STATUS_LONG1 if coin.long1 else (STATUS_SHORT if coin.short else STATUS_CLOSED)
+            self._record_exit_outcome(
+                symbol=sym,
+                reason=reason or leg_name,
+                ok=True,
+                status="executed",
+            )
             # Shared LONG went flat — drop any phantom recovery sibling.
             if leg.side == "BUY" and not getattr(self._connector.cfg, "paper", False):
                 if not self._exchange_has_long(sym):
@@ -3341,6 +3555,12 @@ class MomentumScanner:
                     latency_ms=close_result["latency_ms"],
                     source="scanner",
                 )
+                self._record_exit_outcome(
+                    symbol=sym,
+                    reason=reason or "CLOSE_ALL",
+                    ok=True,
+                    status="executed",
+                )
                 log.info("scanner closed %s reason=%s latency_ms=%s", sym, reason, close_result["latency_ms"])
                 self._bump_trades_closed()
                 if self._one_at_a_time:
@@ -3349,6 +3569,14 @@ class MomentumScanner:
                 # Keep scanner state — live legs still open (e.g. -4131 partial).
                 self._note_close_failure(sym, str(close_result.get("error") or reason))
                 self._last_exec_error = f"{sym}: {close_result.get('error') or 'close_incomplete'}"
+                self._record_exit_outcome(
+                    symbol=sym,
+                    reason=reason or "CLOSE_ALL",
+                    ok=False,
+                    status="pending" if close_result.get("remaining") else "rejected",
+                    detail=str(close_result.get("error") or "close_incomplete"),
+                    remaining=close_result.get("remaining"),
+                )
                 log.warning(
                     "scanner close incomplete %s reason=%s error=%s remaining=%s — state preserved",
                     sym,

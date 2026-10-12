@@ -1276,16 +1276,44 @@ def api_order(body: OrderBody):
     sym = body.symbol.upper()
     side_u = body.side.upper()
 
-    # Prefer cached positions (1.5s) — avoids positionRisk REST on every tap when warm.
+    # Fail closed on unconfirmed book — never treat sticky/[] as flat while another pair may live.
+    def _manual_gate_positions():
+        try:
+            return momentum_scanner._exchange_positions_for_gate()
+        except PositionsUnavailable as e:
+            raise HTTPException(
+                status_code=503,
+                detail={"ok": False, "error": "positions_unavailable", "detail": str(e), "retryable": True},
+            ) from e
+
     ok_iso, iso_reason = pair_gate.can_open(
         sym,
         momentum_scanner._global_active_symbol,
-        lambda: connector.positions(),
+        _manual_gate_positions,
     )
     if not ok_iso:
         raise HTTPException(status_code=400, detail={"ok": False, "error": iso_reason})
     if pair_gate.is_close_pending(sym):
         raise HTTPException(status_code=409, detail={"ok": False, "error": "close_pending"})
+    # Manual BUY is risk-increasing recovery — require a live SHORT (no orphan longs).
+    if side_u == "BUY":
+        try:
+            short_qty = float(getattr(connector, "exchange_short_qty", lambda _s: 0)(sym) or 0)
+        except PositionsUnavailable as e:
+            raise HTTPException(
+                status_code=503,
+                detail={"ok": False, "error": "positions_unavailable", "detail": str(e), "retryable": True},
+            ) from e
+        except Exception as e:
+            raise HTTPException(
+                status_code=503,
+                detail={"ok": False, "error": "short_qty_unavailable", "detail": str(e)[:160]},
+            ) from e
+        if short_qty <= 1e-12:
+            raise HTTPException(
+                status_code=400,
+                detail={"ok": False, "error": "manual_buy_requires_open_short"},
+            )
 
     # Reference price: client → WS tick → scanner last → REST bookTicker (slow path).
     ref = float(body.reference_price or 0)
@@ -1554,9 +1582,11 @@ def api_close(body: CloseBody):
             ]
             r["verified_flat"] = len(target_left) == 0
             if target_left and not r.get("reconciled_already_flat"):
-                # Partial leftover — still report ok if we closed something, but flag pending.
+                # Residual live — never advertise success / CLOSED.
+                r["ok"] = False
                 r["status"] = "CLOSE_PENDING_VERIFY"
                 r["close_pending"] = True
+                r["error"] = r.get("error") or "partial_close_remaining_legs"
                 log.warning(
                     "CLOSE_PENDING_VERIFY op=%s symbol=%s side=%s remaining=%s",
                     op_id,
@@ -1566,17 +1596,20 @@ def api_close(body: CloseBody):
                 )
             else:
                 r["status"] = "CLOSED"
+                r["verified_flat"] = True
         else:
+            # Unconfirmed book ≠ success.
+            r["ok"] = False
             r["status"] = "CLOSING"
             r["verify_error"] = "position_query_failed"
+            r["error"] = r.get("error") or "position_query_failed"
 
         connector.invalidate_positions_cache()
-        if r.get("ok"):
-            if r.get("closed"):
-                try:
-                    connector.remember_close_deals(list(r.get("closed") or []))
-                except Exception as e:
-                    log.warning("remember_close_deals: %s", e)
+        if r.get("ok") and r.get("closed"):
+            try:
+                connector.remember_close_deals(list(r.get("closed") or []))
+            except Exception as e:
+                log.warning("remember_close_deals: %s", e)
             # Echo sticky history head so the app can paint Trade history immediately.
             head = list(getattr(connector, "_last_good_deals", None) or [])[:30]
             if head:
@@ -1592,18 +1625,33 @@ def api_close(body: CloseBody):
             "verified_flat": r.get("verified_flat"),
         }
         order_id = (r.get("closed") or [{}])[0].get("order") if r.get("closed") else r.get("order")
-        log.info(
-            "CLOSE_OK op=%s symbol=%s side=%s close_pair=%s order=%s latency_ms=%s status=%s verified_flat=%s",
-            op_id,
-            sym,
-            body.position_side,
-            body.close_pair,
-            order_id,
-            r.get("latency_ms"),
-            r.get("status"),
-            r.get("verified_flat"),
-        )
-        _close_op_finish(op_id, ok=True, result=r)
+        verified = bool(r.get("verified_flat")) and bool(r.get("ok")) and r.get("status") == "CLOSED"
+        if verified:
+            log.info(
+                "CLOSE_OK op=%s symbol=%s side=%s close_pair=%s order=%s latency_ms=%s status=%s verified_flat=%s",
+                op_id,
+                sym,
+                body.position_side,
+                body.close_pair,
+                order_id,
+                r.get("latency_ms"),
+                r.get("status"),
+                r.get("verified_flat"),
+            )
+            _close_op_finish(op_id, ok=True, result=r)
+        else:
+            log.warning(
+                "CLOSE_INCOMPLETE op=%s symbol=%s side=%s status=%s verified_flat=%s error=%s remaining=%s",
+                op_id,
+                sym,
+                body.position_side,
+                r.get("status"),
+                r.get("verified_flat"),
+                r.get("error"),
+                r.get("remaining"),
+            )
+            _close_op_finish(op_id, ok=False, result=r)
+            raise HTTPException(status_code=409, detail=r)
     except HTTPException as he:
         detail = he.detail if isinstance(he.detail, dict) else {"ok": False, "error": str(he.detail)}
         detail = {**detail, "close_operation_id": op_id, "status": "CLOSE_FAILED"}

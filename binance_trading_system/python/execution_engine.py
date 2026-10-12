@@ -384,23 +384,22 @@ class ExecutionEngine:
                 self._emit(signal, "rest_cooling", error=result.error)
             return result
 
-        # Manual desk path already gated in /api/order — skip duplicate isolation/close REST.
-        if not manual:
-            if self._close_pending_check and self._close_pending_check(sym):
-                result.error = "close_pending"
-                result.stage = "blocked_close_pending"
-                self._log_failure(signal, reason=result.error, retry_decision="no_retry_close")
-                self._emit(signal, "blocked", error=result.error)
-                return result
+        # Every risk-increasing path (scanner + manual) must pass isolation / close_pending.
+        if self._close_pending_check and self._close_pending_check(sym):
+            result.error = "close_pending"
+            result.stage = "blocked_close_pending"
+            self._log_failure(signal, reason=result.error, retry_decision="no_retry_close")
+            self._emit(signal, "blocked", error=result.error)
+            return result
 
-            if self._isolation_check:
-                ok_iso, iso_reason = self._isolation_check(sym)
-                if not ok_iso:
-                    result.error = iso_reason
-                    result.stage = "blocked_isolation"
-                    self._log_failure(signal, reason=iso_reason, retry_decision="no_retry_isolation")
-                    self._emit(signal, "blocked", error=iso_reason)
-                    return result
+        if self._isolation_check:
+            ok_iso, iso_reason = self._isolation_check(sym)
+            if not ok_iso:
+                result.error = iso_reason
+                result.stage = "blocked_isolation"
+                self._log_failure(signal, reason=iso_reason, retry_decision="no_retry_isolation")
+                self._emit(signal, "blocked", error=iso_reason)
+                return result
 
         client_id = self._client_order_id(signal)
         result.client_order_id = client_id

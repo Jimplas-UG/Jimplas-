@@ -1072,20 +1072,6 @@ class BinanceConnector:
         except Exception as e:
             log.warning("warm_order_cache: %s", e)
 
-    def is_hedge_mode(self) -> bool:
-        """True when account uses dual-side (hedge) position mode."""
-        if self.cfg.paper:
-            return False
-        if self._hedge_mode is not None:
-            return self._hedge_mode
-        try:
-            data = self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
-            self._hedge_mode = bool(data.get("dualSidePosition"))
-        except RuntimeError as e:
-            log.warning("positionSide/dual: %s", e)
-            self._hedge_mode = False
-        return bool(self._hedge_mode)
-
     def ensure_hedge_mode(self) -> tuple[bool, str]:
         """Multi-leg scanner requires hedge mode — enable dual-side positions if needed."""
         if self.cfg.paper:
@@ -1988,6 +1974,94 @@ class BinanceConnector:
             log.warning("query_order_by_client_id %s %s: %s", symbol, client_order_id, e)
             return None
 
+    def _confirmed_executed_qty(
+        self,
+        resp: dict[str, Any] | None,
+        *,
+        symbol: str,
+        client_order_id: str,
+    ) -> float:
+        """Never invent a full-chunk fill when executedQty is missing (hidden residual)."""
+        if isinstance(resp, dict):
+            raw = resp.get("executedQty")
+            if raw is not None and str(raw) != "":
+                try:
+                    return max(0.0, float(raw))
+                except (TypeError, ValueError):
+                    pass
+        existing = self.query_order_by_client_id(symbol, client_order_id) if client_order_id else None
+        if isinstance(existing, dict):
+            try:
+                return max(0.0, float(existing.get("executedQty") or 0))
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
+
+    def _reconcile_close_timeout(
+        self,
+        *,
+        symbol: str,
+        client_order_id: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """After close transport timeout: adopt ACK if live; else refuse duplicate mint."""
+        existing = self.query_order_by_client_id(symbol, client_order_id)
+        if not existing:
+            return None, f"close_timeout_unconfirmed:{client_order_id}"
+        status = str(existing.get("status") or "").upper()
+        filled = 0.0
+        try:
+            filled = float(existing.get("executedQty") or 0)
+        except (TypeError, ValueError):
+            filled = 0.0
+        if filled > 1e-12 or status in ("FILLED", "PARTIALLY_FILLED"):
+            return existing, None
+        if status in ("NEW", "PENDING_NEW"):
+            return None, f"close_timeout_order_open:{client_order_id}"
+        # CANCELED / EXPIRED / REJECTED — caller may mint a new cid safely.
+        return None, None
+
+    def _position_side_qty(self, symbol: str, position_side: str) -> float:
+        """Live qty for one hedge side — force+bypass cool."""
+        sym = symbol.upper()
+        ps = position_side.upper()
+        total = 0.0
+        try:
+            rows = self.positions(sym, force=True, bypass_rest_cool=True)
+        except PositionsUnavailable:
+            raise
+        for p in rows:
+            pos_side = str(p.get("positionSide") or "").upper()
+            side = str(p.get("type") or p.get("side") or "").upper()
+            vol = float(p.get("volume") or 0)
+            if vol <= 1e-12:
+                continue
+            if ps == "LONG" and (pos_side == "LONG" or side == "BUY"):
+                total += vol
+            elif ps == "SHORT" and (
+                pos_side == "SHORT"
+                or (side == "SELL" and pos_side != "LONG")
+            ):
+                total += vol
+        return total
+
+    def is_hedge_mode(self) -> bool:
+        """True when account uses dual-side (hedge) position mode.
+
+        Never cache False on REST error — a false-negative omits positionSide and can
+        net against a live short (one-way semantics on a hedge account).
+        """
+        if self.cfg.paper:
+            return False
+        if self._hedge_mode is not None:
+            return self._hedge_mode
+        try:
+            data = self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
+            self._hedge_mode = bool(data.get("dualSidePosition"))
+            return bool(self._hedge_mode)
+        except RuntimeError as e:
+            log.warning("positionSide/dual: %s — hedge mode unset (fail closed)", e)
+            return False
+
     def _liquidation_safe(self, side: str, entry: float, sl: float | None) -> tuple[bool, str]:
         if sl is None:
             return True, ""
@@ -2285,7 +2359,23 @@ class BinanceConnector:
                 except Exception as e:
                     last_err = str(e)
                     log.warning("limit_ioc_close %s %s px=%s: %s", sym, hedge_side, px, e)
-                    if _is_price_bound_error(e):
+                    if "timeout" in last_err.lower() or "timed out" in last_err.lower():
+                        adopted, terr = self._reconcile_close_timeout(
+                            symbol=sym, client_order_id=cid
+                        )
+                        if adopted is not None:
+                            resp = adopted
+                        elif terr:
+                            return {
+                                "ok": False,
+                                "error": terr,
+                                "close_method": "limit_ioc",
+                                "retryable": True,
+                            }
+                        else:
+                            _time.sleep(LIMIT_IOC_ATTEMPT_SLEEP_S)
+                            continue
+                    elif _is_price_bound_error(e):
                         safe = self._band_retry_price(
                             side,
                             px,
@@ -2304,12 +2394,19 @@ class BinanceConnector:
                         if safe > 0 and safe not in tried:
                             attempts.insert(0, safe)
                         i = 0
-                    _time.sleep(LIMIT_IOC_ATTEMPT_SLEEP_S)
-                    continue
-                filled = float(resp.get("executedQty") or 0)
+                        _time.sleep(LIMIT_IOC_ATTEMPT_SLEEP_S)
+                        continue
+                    else:
+                        _time.sleep(LIMIT_IOC_ATTEMPT_SLEEP_S)
+                        continue
+                filled = self._confirmed_executed_qty(resp, symbol=sym, client_order_id=cid)
                 status = str(resp.get("status") or "").upper()
                 if filled <= 0 and status not in ("FILLED", "PARTIALLY_FILLED"):
                     last_err = f"ioc_unfilled status={status}"
+                    _time.sleep(LIMIT_IOC_ATTEMPT_SLEEP_S)
+                    continue
+                if filled <= 0:
+                    last_err = "ioc_zero_executed_qty"
                     _time.sleep(LIMIT_IOC_ATTEMPT_SLEEP_S)
                     continue
                 fill = float(resp.get("avgPrice") or px)
@@ -2317,7 +2414,7 @@ class BinanceConnector:
                 rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
                 if abs(rpnl) < 1e-12 and entry_price > 0:
                     pos_side = "BUY" if hedge_side == "LONG" else "SELL"
-                    rpnl = self._estimate_close_pnl(pos_side, entry_price, fill, filled or qty)
+                    rpnl = self._estimate_close_pnl(pos_side, entry_price, fill, filled)
                 self.invalidate_positions_cache()
                 return {
                     "ok": True,
@@ -2325,7 +2422,7 @@ class BinanceConnector:
                     "side": "BUY" if hedge_side == "LONG" else "SELL",
                     "exit_side": side,
                     "position_side": hedge_side,
-                    "volume": filled or qty,
+                    "volume": filled,
                     "fill_price": fill,
                     "entry_price": entry_price,
                     "profit": rpnl,
@@ -2476,13 +2573,35 @@ class BinanceConnector:
                         entry_price=entry,
                     )
                     if lim.get("ok"):
+                        filled_lim = float(lim.get("volume") or 0)
+                        if filled_lim <= 0:
+                            return {
+                                "ok": False,
+                                "error": lim.get("error") or "ioc_zero_fill",
+                                "close_method": "limit_ioc",
+                                "closed": closed_chunks,
+                            }
                         closed_chunks.append(lim)
-                        remaining = round_to_step(max(0.0, remaining - float(lim.get("volume") or chunk)), step)
+                        remaining = round_to_step(max(0.0, remaining - filled_lim), step)
                         chunk_i += 1
                         continue
                     return {"ok": False, "error": lim.get("error") or str(e), "close_method": "limit_ioc", "closed": closed_chunks}
                 msg = str(e)
-                if ("-4005" in msg or "max quantity" in msg.lower()) and chunk > min_q * 2:
+                if "timeout" in msg.lower() or "timed out" in msg.lower():
+                    adopted, terr = self._reconcile_close_timeout(symbol=sym, client_order_id=cid)
+                    if adopted is not None:
+                        resp = adopted
+                    elif terr:
+                        return {
+                            "ok": False,
+                            "error": terr,
+                            "closed": closed_chunks,
+                            "retryable": True,
+                        }
+                    else:
+                        # Confirmed absent/canceled — safe to mint a new cid.
+                        continue
+                elif ("-4005" in msg or "max quantity" in msg.lower()) and chunk > min_q * 2:
                     shrunk = round_to_step(chunk * 0.5, step)
                     if shrunk >= min_q:
                         log.warning(
@@ -2494,20 +2613,38 @@ class BinanceConnector:
                         )
                         max_cell[0] = shrunk
                         continue
-                if "-2022" in msg or "reduceonly" in msg.lower():
+                    return {"ok": False, "error": msg, "closed": closed_chunks}
+                elif "-2022" in msg or "reduceonly" in msg.lower():
+                    left_now = self._position_side_qty(sym, ps)
                     log.info(
-                        "close_by_position_side %s %s -2022 reduce-only — already flat for chunk",
+                        "close_by_position_side %s %s -2022 — live residual=%.8f",
                         sym,
                         ps,
+                        left_now,
                     )
-                    remaining = 0.0
-                    break
-                return {"ok": False, "error": msg, "closed": closed_chunks}
+                    if left_now <= 1e-12:
+                        remaining = 0.0
+                        break
+                    return {
+                        "ok": False,
+                        "error": "reduceonly_rejected_residual",
+                        "remaining_qty": left_now,
+                        "closed": closed_chunks,
+                    }
+                else:
+                    return {"ok": False, "error": msg, "closed": closed_chunks}
             order_id = resp.get("orderId")
             fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
             if fill <= 0:
                 fill = entry
-            filled_qty = float(resp.get("executedQty") or chunk)
+            filled_qty = self._confirmed_executed_qty(resp, symbol=sym, client_order_id=cid)
+            if filled_qty <= 0:
+                return {
+                    "ok": False,
+                    "error": "close_zero_executed_qty",
+                    "closed": closed_chunks,
+                    "client_order_id": cid,
+                }
             rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
             quote_qty = fill * filled_qty
             if abs(rpnl) < 1e-12:
@@ -2541,18 +2678,7 @@ class BinanceConnector:
         }
         # One dust retry only — never recurse forever on unsellable residuals.
         if volume is None and not _dust_retry:
-            leftover = [
-                x
-                for x in self.positions(sym, force=True, bypass_rest_cool=True)
-                if str(x.get("positionSide") or "").upper() == ps
-                or (ps == "LONG" and str(x.get("type", "")).upper() == "BUY")
-                or (
-                    ps == "SHORT"
-                    and str(x.get("type", "")).upper() == "SELL"
-                    and str(x.get("positionSide") or "SHORT").upper() != "LONG"
-                )
-            ]
-            left_vol = float(leftover[0].get("volume") or 0) if leftover else 0.0
+            left_vol = self._position_side_qty(sym, ps)
             if left_vol > 1e-12:
                 log.warning("close_by_position_side %s %s leftover %.8f — retry once", sym, ps, left_vol)
                 retry = self.close_by_position_side(sym, ps, None, _dust_retry=True)
@@ -2561,16 +2687,44 @@ class BinanceConnector:
                     latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
                     out = {"ok": True, "closed": closed, **leg_row, "latency_ms": latency_ms, "broker": "binance"}
                     self.remember_close_deals(closed)
+                    self.apply_symbol_positions_snapshot(sym, self.positions(sym, force=True, bypass_rest_cool=True) or [])
                     return out
                 if not retry.get("ok") and retry.get("error") != f"no_{ps.lower()}_leg":
                     return {
                         "ok": False,
-                        "error": retry.get("error") or "leftover_dust",
+                        "error": retry.get("error") or "partial_close_remaining_legs",
                         "closed": closed_chunks,
+                        "remaining_qty": left_vol,
                     }
+        # Authoritative residual gate — never report ok while side still live.
+        if volume is None:
+            left_final = self._position_side_qty(sym, ps)
+            latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
+            if left_final > 1e-12:
+                out = {
+                    "ok": False,
+                    "error": "partial_close_remaining_legs",
+                    "closed": closed_chunks or [leg_row],
+                    "remaining_qty": left_final,
+                    "latency_ms": latency_ms,
+                    "broker": "binance",
+                    **leg_row,
+                }
+                try:
+                    self.apply_symbol_positions_snapshot(
+                        sym, self.positions(sym, force=True, bypass_rest_cool=True) or []
+                    )
+                except Exception:
+                    pass
+                return out
         latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
         out = {"ok": True, "closed": closed_chunks or [leg_row], **leg_row, "latency_ms": latency_ms, "broker": "binance"}
         self.remember_close_deals(out.get("closed"))
+        try:
+            snap = self.positions(sym, force=True, bypass_rest_cool=True) or []
+            self.apply_symbol_positions_snapshot(sym, snap)
+        except Exception as e:
+            log.warning("close_by_position_side sticky sync %s: %s", sym, e)
         return out
 
     def trade_pnl_calendar(self, days: int = 400) -> dict[str, Any]:
@@ -2792,14 +2946,28 @@ class BinanceConnector:
                             entry_price=float(p.get("price_open") or 0),
                         )
                         if lim.get("ok"):
+                            filled_lim = float(lim.get("volume") or 0)
+                            if filled_lim <= 0:
+                                errors.append({"position_side": side_tag, "error": "ioc_zero_fill"})
+                                return
                             closed.append(lim)
-                            remaining = round_to_step(max(0.0, remaining - float(lim.get("volume") or chunk)), step)
+                            remaining = round_to_step(max(0.0, remaining - filled_lim), step)
                             chunk_i += 1
                             continue
                         errors.append({"position_side": side_tag, "error": lim.get("error") or str(e)})
                         return
                     msg = str(e)
-                    if ("-4005" in msg or "max quantity" in msg.lower()) and chunk > min_q * 2:
+                    if "timeout" in msg.lower() or "timed out" in msg.lower():
+                        adopted, terr = self._reconcile_close_timeout(symbol=sym, client_order_id=cid)
+                        if adopted is not None:
+                            resp = adopted
+                        elif terr:
+                            errors.append({"position_side": side_tag, "error": terr})
+                            log.warning("close_position %s %s timeout reconcile: %s", sym, side_tag, terr)
+                            return
+                        else:
+                            continue
+                    elif ("-4005" in msg or "max quantity" in msg.lower()) and chunk > min_q * 2:
                         shrunk = round_to_step(chunk * 0.5, step)
                         if shrunk >= min_q:
                             log.warning(
@@ -2811,24 +2979,43 @@ class BinanceConnector:
                             )
                             max_cell[0] = shrunk
                             continue
-                    # -2022 ReduceOnly rejected: leg already flat — stop storm, do not retry.
-                    if "-2022" in msg or "reduceonly" in msg.lower():
+                        errors.append({"position_side": side_tag, "error": msg})
+                        log.warning("close_position %s %s failed: %s", sym, side_tag, e)
+                        return
+                    elif "-2022" in msg or "reduceonly" in msg.lower():
+                        ps_check = hedge_side if hedge_side in ("LONG", "SHORT") else (
+                            "LONG" if pos_side == "BUY" else "SHORT"
+                        )
+                        left_now = self._position_side_qty(sym, ps_check)
                         log.info(
-                            "close_position %s %s -2022 reduce-only — treating chunk as already flat",
+                            "close_position %s %s -2022 — live residual=%.8f",
                             sym,
                             side_tag,
+                            left_now,
                         )
-                        remaining = 0.0
+                        if left_now <= 1e-12:
+                            remaining = 0.0
+                            return
+                        errors.append(
+                            {
+                                "position_side": side_tag,
+                                "error": "reduceonly_rejected_residual",
+                            }
+                        )
                         return
-                    errors.append({"position_side": side_tag, "error": msg})
-                    log.warning("close_position %s %s failed: %s", sym, side_tag, e)
-                    return
+                    else:
+                        errors.append({"position_side": side_tag, "error": msg})
+                        log.warning("close_position %s %s failed: %s", sym, side_tag, e)
+                        return
                 order_id = resp.get("orderId")
                 entry = float(p.get("price_open") or 0)
                 fill = self._sanitize_fill_price(sym, exit_side, float(resp.get("avgPrice") or 0), entry)
                 if fill <= 0:
                     fill = float(p.get("price_open") or 0)
-                filled_qty = float(resp.get("executedQty") or chunk)
+                filled_qty = self._confirmed_executed_qty(resp, symbol=sym, client_order_id=cid)
+                if filled_qty <= 0:
+                    errors.append({"position_side": side_tag, "error": "close_zero_executed_qty"})
+                    return
                 rpnl, commission = self.realized_pnl_for_order(sym, int(order_id) if order_id else None)
                 quote_qty = fill * filled_qty
                 if abs(rpnl) < 1e-12:
