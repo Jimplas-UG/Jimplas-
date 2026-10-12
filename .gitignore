@@ -100,3 +100,6 @@ backend/validation/data/forward-demo-journal.json
 backend/scripts/backtest-*-output.txt
 backend/scripts/*-backtest-output.txt
 backend/scripts/ic-12mo-*.txt
+
+binance_trading_system/python/.bt_cache/
+binance_trading_system/python/research-*.log

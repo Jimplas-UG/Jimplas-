@@ -14,6 +14,7 @@ import math
 import os
 import re
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -52,6 +53,21 @@ def _float_or_none(v: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return f if f > 0 else None
+
+
+def _retry_after_seconds(v: Any) -> float | None:
+    return _float_or_none(v)
+
+
+REST_WEIGHT_SOFT_LIMIT = 1900.0
+REST_WEIGHT_HARD_LIMIT = 2250.0
+# Full-book positionRisk costs ~230 weight on testnet (measured), so ≤6/min is the budget.
+# Our orders and user-stream ORDER/ACCOUNT events invalidate the shared book immediately.
+POSITIONS_SHARE_S = 10.0
+
+
+def _is_order_mutation(method: str, path: str) -> bool:
+    return str(method).upper() != "GET" and "order" in str(path).lower()
 
 
 @dataclass
@@ -217,6 +233,12 @@ class BinanceConnector:
         # (that froze /health + WS accept under threadpool saturation).
         self._rest_cool_until = 0.0
         self._rest_cool_reason = ""
+        # Binance 418 = IP ban. Any request during the ban extends it, so this is never
+        # bypassed (not even by closes) and never cleared by login/close-cool paths.
+        self._rest_ban_until = 0.0
+        self._rest_ban_host = self._http_host_name()
+        self._rest_ban_strikes = 0
+        self._load_persisted_ban()
         if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper:
             self._connected = True
             self.sync_server_time(force=True)
@@ -284,19 +306,146 @@ class BinanceConnector:
         self._http_host = ""
 
     def rest_cooling_left(self) -> float:
-        return max(0.0, self._rest_cool_until - time.monotonic())
+        return max(0.0, self._rest_cool_until - time.monotonic(), self.rest_ban_left())
+
+    def rest_ban_left(self) -> float:
+        """418 ban is wall-clock and per host (testnet ban never blocks mainnet)."""
+        left = getattr(self, "_rest_ban_until", 0.0) - time.time()
+        if left <= 0:
+            return 0.0
+        if getattr(self, "_rest_ban_host", self._http_host_name()) != self._http_host_name():
+            return 0.0
+        return left
+
+    def _load_persisted_ban(self) -> None:
+        path = (os.environ.get("REST_BAN_FILE") or "").strip()
+        if not path:
+            return
+        try:
+            data = json.loads(open(path, encoding="utf-8").read())
+            until = float(data.get("until_epoch") or 0.0)
+            if until > time.time():
+                self._rest_ban_until = until
+                self._rest_ban_host = str(data.get("host") or "")
+                self._rest_cool_reason = "418"
+                log.error(
+                    "Binance 418 ban restored from disk host=%s %.0fs left",
+                    self._rest_ban_host,
+                    until - time.time(),
+                )
+        except FileNotFoundError:
+            return
+        except Exception as e:  # noqa: BLE001
+            log.warning("rest ban file %s: %s", path, e)
+
+    def _persist_ban(self) -> None:
+        path = (os.environ.get("REST_BAN_FILE") or "").strip()
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"until_epoch": self._rest_ban_until, "host": self._rest_ban_host}, fh)
+        except Exception as e:  # noqa: BLE001
+            log.warning("rest ban persist %s: %s", path, e)
 
     def clear_rest_cool(self) -> None:
-        """Allow an explicit login/retry to probe Binance again."""
+        """Allow an explicit login/retry to probe Binance again (429 cool only, never a 418 ban)."""
         self._rest_cool_until = 0.0
-        self._rest_cool_reason = ""
+        if self.rest_ban_left() <= 0:
+            self._rest_cool_reason = ""
 
     def _raise_if_rest_cooling(self) -> None:
+        ban = self.rest_ban_left()
+        if ban > 0:
+            raise RuntimeError(f"Binance REST cooling (418) {ban:.0f}s left")
         left = self.rest_cooling_left()
         if left > 0:
             raise RuntimeError(
                 f"Binance REST cooling ({self._rest_cool_reason or 'rate'}) {left:.0f}s left"
             )
+
+    def _raise_if_banned(self) -> None:
+        ban = self.rest_ban_left()
+        if ban > 0:
+            raise RuntimeError(f"Binance REST cooling (418) {ban:.0f}s left")
+
+    def _engage_rest_ban(self, retry_after_s: float | None) -> None:
+        """418 IP ban: honor Retry-After in full (retrying early extends it); else escalate 60s → 900s."""
+        self._rest_ban_strikes = getattr(self, "_rest_ban_strikes", 0) + 1
+        if retry_after_s and retry_after_s > 0:
+            seconds = float(retry_after_s)
+        else:
+            seconds = min(900.0, 60.0 * (2 ** (self._rest_ban_strikes - 1)))
+        seconds = max(30.0, min(seconds, 3 * 86400.0))
+        until = time.time() + seconds
+        host = self._http_host_name()
+        if getattr(self, "_rest_ban_host", host) != host or until > getattr(self, "_rest_ban_until", 0.0):
+            self._rest_ban_until = until
+            self._rest_ban_host = host
+            self._rest_cool_reason = "418"
+            self._persist_ban()
+            log.error(
+                "Binance 418 IP ban — all REST paused %.0fs (strike %s, retry_after=%s)",
+                seconds,
+                self._rest_ban_strikes,
+                retry_after_s,
+            )
+
+    def _rest_ban_result(self, symbol: str) -> dict[str, Any]:
+        left = self.rest_ban_left()
+        log.error("close %s deferred: Binance 418 IP ban %.0fs left (sending would extend it)", symbol or "ALL", left)
+        return {
+            "ok": False,
+            "error": "rest_ip_ban",
+            "detail": f"Binance 418 IP ban — {left:.0f}s left; close retries after ban",
+            "retry_in_s": round(left, 1),
+            "symbol": symbol,
+        }
+
+    def _note_rest_success(self, used_weight: Any = None, *, signed: bool = False) -> None:
+        if getattr(self, "_rest_ban_strikes", 0) and self.rest_ban_left() <= 0:
+            self._rest_ban_strikes = 0
+        w = _float_or_none(used_weight)
+        if w is None:
+            return
+        self._used_weight_1m = w
+        # Binance futures IP limit is 2400/min. Pause discretionary traffic before 429 → 418.
+        if w >= REST_WEIGHT_SOFT_LIMIT:
+            secs = max(1.0, 60.0 - (time.time() % 60.0))
+            until = time.monotonic() + secs
+            if until > getattr(self, "_weight_cool_until", 0.0):
+                self._weight_cool_until = until
+                log.warning(
+                    "Binance used weight %.0f/2400 — market-data REST paused %.0fs top=%s",
+                    w,
+                    secs,
+                    self._top_paths(),
+                )
+            if w >= REST_WEIGHT_HARD_LIMIT:
+                # Signed non-close traffic waits too; closes (bypass_rest_cool) still go.
+                self._engage_rest_cool("weight", secs)
+
+    def _count_path(self, path: str) -> None:
+        minute = int(time.time() // 60)
+        if getattr(self, "_path_minute", None) != minute:
+            self._path_minute = minute
+            self._path_counts = {}
+        counts = self._path_counts
+        counts[path] = counts.get(path, 0) + 1
+
+    def _top_paths(self) -> list[tuple[str, int]]:
+        counts = getattr(self, "_path_counts", None) or {}
+        return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:6]
+
+    def _raise_if_weight_cooling(self, signed: bool) -> None:
+        if signed:
+            return
+        left = getattr(self, "_weight_cool_until", 0.0) - time.monotonic()
+        if left > 0:
+            raise RuntimeError(f"Binance REST cooling (weight) {left:.0f}s left")
+
+    def used_weight_1m(self) -> float:
+        return float(getattr(self, "_used_weight_1m", 0.0) or 0.0)
 
     def _wait_or_clear_cool_for_close(self, *, max_wait_s: float = 12.0) -> float:
         """Frozen close cool path (Sep 23–25 normal): wait briefly, then clear residual and try.
@@ -312,6 +461,9 @@ class BinanceConnector:
         if max_wait_s <= 0:
             log.warning("close: ignoring max_wait_s=%s — forced to 12s (Sep23-25 lock)", max_wait_s)
             max_wait_s = 12.0
+        if self.rest_ban_left() > 0:
+            # Sending during a 418 ban extends it — never clear it; callers return rest_ip_ban.
+            return 0.0
         left = self.rest_cooling_left()
         if left <= 0:
             return 0.0
@@ -393,9 +545,15 @@ class BinanceConnector:
             req_path = f"{path}" + (f"?{qs}" if qs else "")
 
         headers = self._headers(signed)
+        mutating = _is_order_mutation(method, path)
         try:
+            self._raise_if_banned()
+            self._raise_if_weight_cooling(signed)
             if not bypass_rest_cool:
                 self._raise_if_rest_cooling()
+            if mutating:
+                self._invalidate_fresh_book()
+            self._count_path(path)
             self._http_conn.request(method, req_path, headers=headers)
             resp = self._http_conn.getresponse()
             body = resp.read().decode("utf-8", errors="replace")
@@ -406,16 +564,20 @@ class BinanceConnector:
                     detail = {"msg": body}
                 msg = detail.get("msg") or detail.get("detail") or body
                 code = detail.get("code")
+                retry_after = _retry_after_seconds(resp.getheader("Retry-After"))
                 if resp.status == 418:
-                    # Close path: shorter cool so next emergency retry is not stuck 45s.
-                    self._engage_rest_cool("418", 12.0 if bypass_rest_cool else 45.0)
+                    self._engage_rest_ban(retry_after)
                 elif resp.status == 429:
-                    self._engage_rest_cool("429", 10.0)
+                    self._engage_rest_cool("429", min(max(retry_after or 10.0, 1.0), 60.0))
                 raise RuntimeError(f"{msg} (code={code}, http={resp.status})")
+            self._note_rest_success(resp.getheader("X-MBX-USED-WEIGHT-1M"), signed=signed)
             return json.loads(body) if body else {}
         except Exception:
             self._close_http()
             raise
+        finally:
+            if mutating:
+                self._invalidate_fresh_book()
 
     def _request(
         self,
@@ -428,8 +590,31 @@ class BinanceConnector:
         *,
         bypass_rest_cool: bool = False,
     ) -> Any:
+        self._raise_if_banned()
+        self._raise_if_weight_cooling(signed)
         if not bypass_rest_cool:
             self._raise_if_rest_cooling()
+        if _is_order_mutation(method, path):
+            self._invalidate_fresh_book()
+            try:
+                return self._request_once(
+                    method, path, params, signed, timeout, base_url, bypass_rest_cool=bypass_rest_cool
+                )
+            finally:
+                self._invalidate_fresh_book()
+        return self._request_once(method, path, params, signed, timeout, base_url, bypass_rest_cool=bypass_rest_cool)
+
+    def _request_once(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None,
+        signed: bool,
+        timeout: float,
+        base_url: str | None,
+        *,
+        bypass_rest_cool: bool,
+    ) -> Any:
         params = dict(params or {})
         root = (base_url or self.base_url).rstrip("/")
         last_err: Exception | None = None
@@ -449,9 +634,12 @@ class BinanceConnector:
                 url = f"{root}{path}" + (f"?{qs}" if qs else "")
 
             req = urllib.request.Request(url, method=method, headers=self._headers(signed))
+            self._count_path(path)
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                    out = json.loads(resp.read().decode("utf-8"))
+                    self._note_rest_success(resp.headers.get("X-MBX-USED-WEIGHT-1M"), signed=signed)
+                    return out
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", errors="replace")
                 try:
@@ -463,19 +651,13 @@ class BinanceConnector:
                     self.sync_server_time(force=True)
                     last_err = RuntimeError(msg)
                     continue
+                retry_after = _retry_after_seconds(e.headers.get("Retry-After") if e.headers else None)
                 if e.code == 429:
-                    retry_after = 1.0
-                    try:
-                        retry_after = float(e.headers.get("Retry-After", "1"))
-                    except (TypeError, ValueError):
-                        pass
-                    wait = min(max(retry_after, 0.5), 20.0)
-                    self._engage_rest_cool("429", wait)
+                    self._engage_rest_cool("429", min(max(retry_after or 1.0, 0.5), 60.0))
                     raise RuntimeError(detail.get("msg") or detail.get("detail") or body) from e
                 if e.code == 418:
                     # Do NOT sleep here — sleeping blocked the whole bridge for minutes.
-                    wait = min(8.0 * (attempt + 1), 20.0) if bypass_rest_cool else min(12.0 * (attempt + 1), 25.0)
-                    self._engage_rest_cool("418", wait)
+                    self._engage_rest_ban(retry_after)
                     raise RuntimeError("IP banned by Binance (418) — reduce request rate") from e
                 raise RuntimeError(detail.get("msg") or detail.get("detail") or body) from e
             except urllib.error.URLError as e:
@@ -1844,6 +2026,21 @@ class BinanceConnector:
             self._positions_cache = None
             self._positions_cache_ts = 0.0
 
+    def _fresh_book(self, symbol: str | None) -> list[dict[str, Any]] | None:
+        """Full-book positionRisk < POSITIONS_SHARE_S old with no order sent since — safe to share."""
+        ts = getattr(self, "_book_fresh_ts", 0.0)
+        if ts <= 0 or time.monotonic() - ts > POSITIONS_SHARE_S:
+            return None
+        book = list(getattr(self, "_book_fresh", None) or [])
+        if symbol is None:
+            return book
+        sym_u = symbol.upper()
+        return [p for p in book if str(p.get("symbol") or "").upper() == sym_u]
+
+    def _invalidate_fresh_book(self) -> None:
+        self._order_epoch = getattr(self, "_order_epoch", 0) + 1
+        self._book_fresh_ts = 0.0
+
     def positions(self, symbol: str | None = None, *, force: bool = False, bypass_rest_cool: bool = False) -> list[dict[str, Any]]:
         if self.cfg.paper:
             from paper_simulator import paper_store
@@ -1851,6 +2048,25 @@ class BinanceConnector:
             return paper_store.positions(symbol)
         if not self.cfg.api_key or not self.cfg.api_secret:
             return []
+        fresh = self._fresh_book(symbol)
+        if fresh is not None:
+            return fresh
+        lock = getattr(self, "_positions_flight", None)
+        if lock is None:
+            lock = self._positions_flight = threading.Lock()
+        # Single-flight: concurrent callers (scanner, reconcile, snapshot, gates) share one read
+        # instead of each firing positionRisk the instant a cool expires (418 herd).
+        got = lock.acquire(timeout=12.0)
+        try:
+            fresh = self._fresh_book(symbol)
+            if fresh is not None:
+                return fresh
+            return self._positions_live(symbol, force=force, bypass_rest_cool=bypass_rest_cool)
+        finally:
+            if got:
+                lock.release()
+
+    def _positions_live(self, symbol: str | None, *, force: bool, bypass_rest_cool: bool) -> list[dict[str, Any]]:
         now = time.time()
         if (
             not force
@@ -1869,6 +2085,7 @@ class BinanceConnector:
             params: dict[str, Any] = {}
             if symbol:
                 params["symbol"] = symbol.upper()
+            self._book_epoch_at_send = getattr(self, "_order_epoch", 0)
             data = self._request(
                 "GET",
                 "/fapi/v2/positionRisk",
@@ -1933,6 +2150,9 @@ class BinanceConnector:
             self._positions_cache_ts = now
             self._last_good_positions = list(out)
             self._last_good_positions_ts = now
+            if getattr(self, "_book_epoch_at_send", -1) == getattr(self, "_order_epoch", 0):
+                self._book_fresh = list(out)
+                self._book_fresh_ts = time.monotonic()
         else:
             # Force/per-symbol fetches must update sticky last-good or closed legs resurrect.
             self.apply_symbol_positions_snapshot(symbol, out)
@@ -2460,6 +2680,8 @@ class BinanceConnector:
         if not self.cfg.api_key:
             return {"ok": False, "error": "api_key_missing"}
 
+        if self.rest_ban_left() > 0:
+            return self._rest_ban_result(sym)
         self._wait_or_clear_cool_for_close()
 
         # PORTAL lock: never close SHORT while a LONG residual is live on the same symbol.
@@ -2853,6 +3075,8 @@ class BinanceConnector:
             return paper_store.close_position(symbol, volume)
 
         sym = (symbol or self.cfg.symbol).upper()
+        if self.rest_ban_left() > 0:
+            return self._rest_ban_result(sym)
         self._wait_or_clear_cool_for_close()
         try:
             positions = self.positions(sym, force=True, bypass_rest_cool=True)
@@ -3144,6 +3368,8 @@ class BinanceConnector:
         errors: list[dict[str, str]] = []
         total_latency = 0.0
         symbols: list[str] = []
+        if self.rest_ban_left() > 0:
+            return self._rest_ban_result("")
         self._wait_or_clear_cool_for_close()
         # Multi-pass: MARKET(+IOC) per symbol, then retry leftovers after brief settle.
         for attempt in range(3):

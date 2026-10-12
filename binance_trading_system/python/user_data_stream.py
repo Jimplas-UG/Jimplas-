@@ -129,6 +129,8 @@ class BinanceUserDataStream:
             sym = str(o.get("s") or "").upper()
             if sym and hasattr(self._connector, "invalidate_positions_cache"):
                 self._connector.invalidate_positions_cache()
+            if hasattr(self._connector, "_invalidate_fresh_book"):
+                self._connector._invalidate_fresh_book()
             log.info(
                 "USER_WS order %s %s %s status=%s",
                 sym,
@@ -139,6 +141,8 @@ class BinanceUserDataStream:
         elif et == "ACCOUNT_UPDATE":
             if hasattr(self._connector, "invalidate_positions_cache"):
                 self._connector.invalidate_positions_cache()
+            if hasattr(self._connector, "_invalidate_fresh_book"):
+                self._connector._invalidate_fresh_book()
             self._last_sync_ms = int(time.time() * 1000)
         if self._on_event:
             try:

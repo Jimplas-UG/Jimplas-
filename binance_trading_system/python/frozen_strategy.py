@@ -240,7 +240,13 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "-2022" in side_src or "reduceonly" in side_src.lower()
     close_src = inspect.getsource(bc.BinanceConnector.close_position)
     assert "-2022" in close_src or "reduceonly" in close_src.lower()
-    pos_src = inspect.getsource(bc.BinanceConnector.positions)
+    pos_src = inspect.getsource(bc.BinanceConnector._positions_live)
+    assert "_positions_live" in inspect.getsource(bc.BinanceConnector.positions)
+    # 418 = IP ban: honored by every path (closes too), never cleared, Retry-After respected.
+    assert "_raise_if_banned()" in inspect.getsource(bc.BinanceConnector._request)
+    assert "_raise_if_banned()" in inspect.getsource(bc.BinanceConnector._request_keepalive)
+    assert "_engage_rest_ban(retry_after)" in inspect.getsource(bc.BinanceConnector._request_once)
+    assert "rest_ban_left" in inspect.getsource(bc.BinanceConnector.clear_rest_cool)
     assert "unavailable — not empty" in pos_src
     assert "PositionsUnavailable" in pos_src
     assert hasattr(bc, "PositionsUnavailable")

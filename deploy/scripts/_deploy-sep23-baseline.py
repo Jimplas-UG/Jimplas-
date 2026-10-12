@@ -75,7 +75,9 @@ assert hasattr(MomentumScanner, '_solo_hedge_exit_allowed')
 assert hasattr(MomentumScanner, '_hedged_short_exit_net_ok')
 assert '_hedged_short_exit_net_ok' in inspect.getsource(MomentumScanner._manage_positions)
 from binance_connector import PositionsUnavailable
-pos_src = inspect.getsource(BinanceConnector.positions)
+pos_src = inspect.getsource(BinanceConnector._positions_live)
+assert '_positions_live' in inspect.getsource(BinanceConnector.positions)
+assert '_raise_if_banned()' in inspect.getsource(BinanceConnector._request)
 assert 'unavailable — not empty' in pos_src
 assert 'raise PositionsUnavailable' in pos_src
 assert 'coherence deferred' in inspect.getsource(MomentumScanner._ensure_pair_coherence)

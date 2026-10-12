@@ -53,6 +53,10 @@ SHORT_TRAIL_MFE = 1.5
 PAIR_INVALIDATION_PCT = 6.5
 HEDGE_RESCUE_BUFFER_PCT = 1.0
 MAX_HOLD_BARS_1M = 24 * 60  # ~24h on 1m
+# Research knobs (None = live frozen behavior). Hedged pair is net long ($800 vs $250),
+# so a fade after L1/L2 has no exit without one of these.
+HEDGED_PAIR_STOP_USD: float | None = None
+HEDGED_MAX_HOLD_MIN: int | None = None
 DEFAULT_INTERVAL = "1m"
 
 
@@ -61,7 +65,7 @@ def _cooldown_ms_for_reason(reason: str) -> int:
     r = (reason or "").upper()
     if "INVALIDATION" in r:
         return max(ENTRY_COOLDOWN_MS, INVALIDATION_COOLDOWN_MS)
-    if any(x in r for x in ("ORPHAN", "SHORT_GONE", "RESCUE", "PAIR_FLATTEN")):
+    if any(x in r for x in ("ORPHAN", "SHORT_GONE", "RESCUE", "PAIR_FLATTEN", "PAIR_STOP", "PAIR_TIME")):
         return max(ENTRY_COOLDOWN_MS, EPISODE_COOLDOWN_MS)
     return max(0, ENTRY_COOLDOWN_MS)
 
@@ -285,7 +289,9 @@ def simulate_symbol(
                 long2.peak = hi_b
 
             if adverse_hi >= PAIR_INVALIDATION_PCT:
-                exit_px, exit_i, exit_reason, stopped = px, j, "INVALIDATION", True
+                # Live exits on the tick that crosses the level, not on the 1m close.
+                inv_px = entry_px * (1 + PAIR_INVALIDATION_PCT / 100.0)
+                exit_px, exit_i, exit_reason, stopped = inv_px, j, "INVALIDATION", True
                 break
 
             upnl, short_pnl, long_pnl, underwater = _book(px)
@@ -299,6 +305,14 @@ def simulate_symbol(
             rescue_buf = partition * HEDGE_RESCUE_BUFFER_PCT / 100.0
             if (long1 or long2) and short_pnl < 0 and long_pnl >= (-short_pnl) + rescue_buf:
                 exit_px, exit_i, exit_reason, stopped = px, j, "RESCUE", True
+                break
+
+            if (long1 or long2) and HEDGED_PAIR_STOP_USD is not None:
+                if upnl + realized <= -float(HEDGED_PAIR_STOP_USD):
+                    exit_px, exit_i, exit_reason, stopped = px, j, "PAIR_STOP", True
+                    break
+            if hedge_episode and HEDGED_MAX_HOLD_MIN is not None and (j - entry_i) >= int(HEDGED_MAX_HOLD_MIN):
+                exit_px, exit_i, exit_reason, stopped = px, j, "PAIR_TIME", True
                 break
 
             hedges_open = bool(long1 or long2)

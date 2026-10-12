@@ -388,7 +388,110 @@ def test_exit_outcome_recorded_on_incomplete() -> None:
     print("OK failed exit records outcome and preserves state")
 
 
+def test_418_ban_honored_everywhere() -> None:
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._engage_rest_ban(None)
+    first = c.rest_ban_left()
+    assert 55 <= first <= 61, first
+    c._rest_ban_until = 0.0
+    c._engage_rest_ban(None)
+    assert c.rest_ban_left() > 110, "no Retry-After → escalate"
+    c._rest_ban_until = 0.0
+    c._engage_rest_ban(300.0)
+    assert 295 <= c.rest_ban_left() <= 301, "Retry-After honored"
+    c.clear_rest_cool()
+    assert c.rest_ban_left() > 290, "login/close clear must not lift a 418 ban"
+    c._wait_or_clear_cool_for_close()
+    assert c.rest_ban_left() > 290
+    raised = False
+    try:
+        c._request("GET", "/fapi/v2/positionRisk", signed=True, bypass_rest_cool=True)
+    except RuntimeError as e:
+        raised = "418" in str(e)
+    assert raised, "bypass_rest_cool must not send during a 418 ban"
+    r = c.close_by_position_side("BTCUSDT", "SHORT")
+    assert r.get("ok") is False and r.get("error") == "rest_ip_ban"
+    r = c.close_position("BTCUSDT")
+    assert r.get("ok") is False and r.get("error") == "rest_ip_ban"
+    print("OK 418 ban: Retry-After/escalation, never bypassed or cleared, closes defer")
+
+
+def test_418_ban_survives_restart_and_is_host_scoped() -> None:
+    import os
+    import tempfile
+
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    fd, path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    os.remove(path)
+    os.environ["REST_BAN_FILE"] = path
+    try:
+        c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="", api_secret=""))
+        c._engage_rest_ban(9355.0)
+        assert c.rest_ban_left() > 9000, "long Retry-After honored in full"
+        c2 = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="", api_secret=""))
+        assert c2.rest_ban_left() > 9000, "restart must not forget an active ban"
+        c3 = BinanceConnector(BinanceConfig(paper=False, testnet=False, api_key="", api_secret=""))
+        assert c3.rest_ban_left() == 0.0, "testnet ban must not block mainnet"
+    finally:
+        os.environ.pop("REST_BAN_FILE", None)
+        if os.path.exists(path):
+            os.remove(path)
+    print("OK 418 ban persisted across restart, honored in full, scoped to host")
+
+
+def test_weight_soft_limit_pauses_market_data_only() -> None:
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._note_rest_success("2000", signed=False)
+    raised = False
+    try:
+        c._raise_if_weight_cooling(False)
+    except RuntimeError:
+        raised = True
+    assert raised, "unsigned market data paused near 2400/min"
+    c._raise_if_weight_cooling(True)
+    assert c.rest_cooling_left() == 0.0, "soft limit must not cool signed calls"
+    c._note_rest_success("2300", signed=True)
+    assert c.rest_cooling_left() > 0, "hard limit cools signed non-close traffic"
+    assert c.rest_ban_left() == 0.0
+    print("OK used-weight soft limit pauses market data; hard limit cools signed (closes bypass)")
+
+
+def test_positions_single_flight_and_order_invalidation() -> None:
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    calls = {"n": 0}
+    row = {"symbol": "BTCUSDT", "positionAmt": "-1", "positionSide": "SHORT", "entryPrice": "1",
+           "unRealizedProfit": "0", "liquidationPrice": "0", "leverage": "5", "marginType": "isolated"}
+
+    def fake_once(method, path, params, signed, timeout, base_url, *, bypass_rest_cool):
+        if "positionRisk" in path:
+            calls["n"] += 1
+            return [row]
+        return {"orderId": 1, "status": "FILLED"}
+
+    c._request_once = fake_once  # type: ignore[assignment]
+    c.positions(force=True)
+    c.positions(force=True)
+    c.positions("BTCUSDT", force=True)
+    assert calls["n"] == 1, f"concurrent force reads must share one positionRisk, got {calls['n']}"
+    c._request("POST", "/fapi/v1/order", {"symbol": "BTCUSDT"}, signed=True)
+    c.positions(force=True)
+    assert calls["n"] == 2, "any order must invalidate the shared book"
+    print("OK positions single-flight; order POST invalidates shared book")
+
+
 if __name__ == "__main__":
+    test_418_ban_honored_everywhere()
+    test_418_ban_survives_restart_and_is_host_scoped()
+    test_weight_soft_limit_pauses_market_data_only()
+    test_positions_single_flight_and_order_invalidation()
     test_no_rule_kernel_safe_mode()
     test_naked_short_never_10x()
     test_hedged_short_tp_net_red_gate()
