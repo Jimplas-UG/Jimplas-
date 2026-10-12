@@ -23,7 +23,7 @@ print("solo_gate", hasattr(ms.MomentumScanner, "_solo_hedge_exit_allowed"))
 print("manual_clamp", hasattr(ms.MomentumScanner, "clamp_manual_open_qty"))
 print("side_close_chunks", "too_many_close_chunks" in ssrc)
 print("short_abort_if_long_left", "long_residual_abort_short" in csrc)
-print("positions_fail_closed", "fail-closed empty" in psrc)
+print("positions_unavailable_not_flat", "unavailable — not empty" in psrc and "PositionsUnavailable" in psrc)
 print("no_rule_kernel", not Path("rule_kernel.py").exists())
 PY
 """

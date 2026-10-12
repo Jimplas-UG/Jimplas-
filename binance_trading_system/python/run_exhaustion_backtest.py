@@ -58,18 +58,18 @@ DATA = "https://fapi.binance.com"
 CTX = ssl.create_default_context()
 
 
-def _get(url: str, params: dict[str, Any] | None = None, retries: int = 4) -> Any:
+def _get(url: str, params: dict[str, Any] | None = None, retries: int = 8) -> Any:
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     last: Exception | None = None
     for i in range(retries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "bilshenz-exhaustion-bt/1.0"})
-            with urllib.request.urlopen(req, context=CTX, timeout=30) as resp:
+            with urllib.request.urlopen(req, context=CTX, timeout=45) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as e:  # noqa: BLE001
             last = e
-            time.sleep(0.4 * (i + 1))
+            time.sleep(min(12.0, 0.8 * (2**i)))
     raise RuntimeError(f"GET failed {url}: {last}")
 
 
@@ -102,14 +102,24 @@ def fetch_klines_days(symbol: str, interval: str, days: int) -> list[dict]:
     out: list[dict] = []
     end: int | None = None
     while len(out) < need:
-        chunk = fetch_klines(symbol, interval, limit=1500, end_ms=end)
+        chunk = None
+        last_err: Exception | None = None
+        for attempt in range(6):
+            try:
+                chunk = fetch_klines(symbol, interval, limit=1500, end_ms=end)
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                time.sleep(min(15.0, 1.5 * (attempt + 1)))
         if not chunk:
+            if last_err:
+                raise RuntimeError(f"klines page failed {symbol}: {last_err}") from last_err
             break
         out = chunk + out
         end = chunk[0]["t"] - 1
         if len(chunk) < 1500:
             break
-        time.sleep(0.12)
+        time.sleep(0.25)
     # dedupe
     dedup = {b["t"]: b for b in out}
     bars = sorted(dedup.values(), key=lambda b: b["t"])
