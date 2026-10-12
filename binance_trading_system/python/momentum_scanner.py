@@ -39,7 +39,7 @@ from strategy_guards import (
 log = logging.getLogger("momentum_scanner")
 
 GAIN_THRESHOLD_PCT = float(os.environ.get("SCANNER_GAIN_PCT", "5.0"))
-RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_RETRACE_PCT", "0.7"))
+RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_RETRACE_PCT", "5.0"))
 # Live 15m must still be hot at entry — blocks stale latched pumps (e.g. 15m already -16%).
 MIN_LIVE_ENTRY_PCT = float(os.environ.get("SCANNER_MIN_LIVE_ENTRY_PCT", "2.0"))
 # Reject end-of-pump entries: live 15m must keep at least this fraction of latched peak gain.
@@ -68,6 +68,8 @@ LONG_HEDGE_PULLBACK_PCT = max(0.05, float(os.environ.get("SCANNER_LONG_PULLBACK_
 LONG_BOTH_PULLBACK_PCT = LONG_HEDGE_PULLBACK_PCT
 # Paired rescue: close all when hedge profit covers short loss + this % of partition.
 HEDGE_RESCUE_BUFFER_PCT = max(0.0, float(os.environ.get("SCANNER_RESCUE_BUFFER_PCT", "1.0")))
+# Hedged pair is net long ($800 vs $250): a fade after L1/L2 has no other exit.
+HEDGED_MAX_HOLD_MS = int(os.environ.get("SCANNER_HEDGED_MAX_HOLD_MS", str(24 * 3_600_000)))
 # Hard pair invalidation from short entry (circuit breaker after failed fade).
 PAIR_INVALIDATION_PCT = max(3.0, float(os.environ.get("SCANNER_INVALIDATION_PCT", "6.5")))
 # Primary short trail — bounce off the trough, only after a profitable MFE.
@@ -564,6 +566,13 @@ class MomentumScanner:
         if coin.long1_was_closed or coin.long2_was_closed:
             return True
         return float(coin.short_adverse_peak_pct or 0.0) + 1e-12 >= LONG1_ADVERSE_PCT
+
+    def _hedged_hold_expired(self, coin: CoinStrategy) -> bool:
+        if HEDGED_MAX_HOLD_MS <= 0 or not coin.short or not coin.short_opened_ms:
+            return False
+        if not self._hedge_episode_active(coin):
+            return False
+        return int(time.time() * 1000) - int(coin.short_opened_ms) >= HEDGED_MAX_HOLD_MS
 
     def _solo_hedge_exit_allowed(self, coin: CoinStrategy) -> bool:
         """Solo Long1/Long2 TP/pullback only before a hedge episode while short is green.
@@ -1279,6 +1288,7 @@ class MomentumScanner:
                 "SHORT_GONE",
                 "RESCUE",
                 "PAIR_FLATTEN",
+                "PAIR_TIME",
                 "ORPHAN_RECOVERY",
             )
         ):
@@ -3097,6 +3107,16 @@ class MomentumScanner:
                 coin.unrealized_pnl,
             )
             self._close_all(coin, "RESCUE", force=True)
+            return
+        if coin.short and self._hedged_hold_expired(coin):
+            log.info(
+                "scanner %s PAIR_TIME hedge episode open %.1fh >= %.1fh pnl=%.4f",
+                sym,
+                (int(time.time() * 1000) - coin.short_opened_ms) / 3_600_000.0,
+                HEDGED_MAX_HOLD_MS / 3_600_000.0,
+                coin.unrealized_pnl,
+            )
+            self._close_all(coin, "PAIR_TIME", force=True)
             return
 
         if close_blocked:

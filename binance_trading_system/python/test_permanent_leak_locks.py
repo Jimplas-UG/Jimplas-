@@ -388,6 +388,30 @@ def test_exit_outcome_recorded_on_incomplete() -> None:
     print("OK failed exit records outcome and preserves state")
 
 
+def test_pair_time_flattens_stale_hedge_episode() -> None:
+    import time as _t
+
+    import momentum_scanner as ms
+
+    class Conn:
+        cfg = SimpleNamespace(paper=True, api_key="")
+
+    sc = MomentumScanner(Conn(), lambda: True)  # type: ignore[arg-type]
+    coin = CoinStrategy(symbol="AKEUSDT")
+    coin.short = SimpleNamespace(qty=1.0, entry=1.0, side="SELL")
+    now = int(_t.time() * 1000)
+    coin.short_opened_ms = now - ms.HEDGED_MAX_HOLD_MS - 1000
+    coin.short_adverse_peak_pct = 0.5
+    assert not sc._hedged_hold_expired(coin), "naked short (no episode) is never time-stopped"
+    coin.short_adverse_peak_pct = 2.5
+    assert sc._hedged_hold_expired(coin), "hedge episode past 24h must flatten"
+    coin.short_opened_ms = now - 3_600_000
+    assert not sc._hedged_hold_expired(coin)
+    assert sc._cooldown_ms_for_reason("PAIR_TIME") >= ms.EPISODE_COOLDOWN_MS
+    assert ms.RETRACE_ENTRY_PCT == 5.0
+    print("OK PAIR_TIME: 24h hedge episode flatten; naked short untouched; retrace 5%")
+
+
 def test_418_ban_honored_everywhere() -> None:
     from binance_connector import BinanceConnector, BinanceConfig
 
@@ -488,6 +512,7 @@ def test_positions_single_flight_and_order_invalidation() -> None:
 
 
 if __name__ == "__main__":
+    test_pair_time_flattens_stale_hedge_episode()
     test_418_ban_honored_everywhere()
     test_418_ban_survives_restart_and_is_host_scoped()
     test_weight_soft_limit_pauses_market_data_only()
