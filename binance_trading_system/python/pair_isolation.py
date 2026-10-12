@@ -47,7 +47,12 @@ class PairIsolationGate:
         sym = scanner_fn()
         if sym:
             return sym.upper()
-        for p in exchange_fn() or []:
+        try:
+            rows = exchange_fn() or []
+        except Exception as e:
+            log.warning("active_symbol exchange_fn: %s", e)
+            return None
+        for p in rows:
             s = str(p.get("symbol") or "").upper()
             vol = float(p.get("volume") or 0)
             if s and vol > 1e-12:

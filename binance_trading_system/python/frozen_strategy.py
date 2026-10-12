@@ -250,6 +250,12 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "positions_unavailable" in recon_src or "PositionsUnavailable" in recon_src
     coh_src = inspect.getsource(ms.MomentumScanner._ensure_pair_coherence)
     assert "coherence deferred" in coh_src
+    assert "SHORT_GONE deferred" in coh_src, "false SHORT_GONE must double-confirm / defer"
+    ex_pos_src = inspect.getsource(ms.MomentumScanner._exchange_positions)
+    assert "raise PositionsUnavailable" in ex_pos_src
+    assert hasattr(ms.MomentumScanner, "_exchange_positions_for_gate")
+    conf_src = inspect.getsource(bc.BinanceConnector.confirmed_positions)
+    assert "30.0" in conf_src
 
     # Permanent anti-cascade / anti-drift locks (Oct forensic — never reintroduce).
     from pathlib import Path as _Path

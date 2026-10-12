@@ -252,7 +252,7 @@ class MomentumScanner:
         )
         self._engine.set_isolation_hooks(
             can_open=lambda sym: pair_gate.can_open(
-                sym, self._global_active_symbol, self._exchange_positions
+                sym, self._global_active_symbol, self._exchange_positions_for_gate
             ),
             close_pending=pair_gate.is_close_pending,
         )
@@ -272,13 +272,59 @@ class MomentumScanner:
         return self._engine
 
     def _exchange_positions(self) -> list[dict[str, Any]]:
-        fn = getattr(self._connector, "positions", None)
+        """Live/cached book. Must NEVER swallow PositionsUnavailable as [] (false SHORT_GONE)."""
+        from binance_connector import PositionsUnavailable
+
+        fn = getattr(self._connector, "confirmed_positions", None) or getattr(
+            self._connector, "positions", None
+        )
         if not callable(fn):
             return []
         try:
             return fn() or []
-        except Exception:
-            return []
+        except PositionsUnavailable:
+            raise
+        except Exception as e:
+            # Network/cool errors that look like unavailable — fail closed, not empty.
+            msg = str(e).lower()
+            if "cooling" in msg or "429" in msg or "unconfirmed" in msg or "unavailable" in msg:
+                raise PositionsUnavailable(str(e)) from e
+            log.warning("exchange_positions: %s", e)
+            raise PositionsUnavailable(str(e)) from e
+
+    def _exchange_positions_for_gate(self) -> list[dict[str, Any]]:
+        """Pair-gate view: on unavailable book, expose scanner-known opens (fail closed)."""
+        from binance_connector import PositionsUnavailable
+
+        try:
+            return self._exchange_positions()
+        except PositionsUnavailable:
+            out: list[dict[str, Any]] = []
+            for coin in self._coins.values():
+                if coin.short:
+                    out.append(
+                        {
+                            "symbol": coin.symbol,
+                            "volume": float(coin.short.qty or 0),
+                            "positionSide": "SHORT",
+                            "type": "SELL",
+                        }
+                    )
+                long_qty = 0.0
+                if coin.long1:
+                    long_qty += float(coin.long1.qty or 0)
+                if coin.long2:
+                    long_qty += float(coin.long2.qty or 0)
+                if long_qty > 1e-12:
+                    out.append(
+                        {
+                            "symbol": coin.symbol,
+                            "volume": long_qty,
+                            "positionSide": "LONG",
+                            "type": "BUY",
+                        }
+                    )
+            return out
 
     def _cached_short_symbols(self) -> set[str]:
         """Symbols with a live short from the cached positions snapshot.
@@ -286,12 +332,21 @@ class MomentumScanner:
         Deliberately avoids `exchange_short_qty`, which forces a signed REST call —
         this runs on every tick, so it must never touch the network per symbol.
         """
+        from binance_connector import PositionsUnavailable
+
         now = time.time()
         cached = self._short_syms_cache
         if cached and now - cached[0] < 1.0:
             return cached[1]
         syms: set[str] = set()
-        for p in self._exchange_positions():
+        try:
+            rows = self._exchange_positions()
+        except PositionsUnavailable:
+            # Keep prior snapshot through cool — empty set would false-clear shorts.
+            if cached:
+                return cached[1]
+            return set()
+        for p in rows:
             sym = str(p.get("symbol") or "").upper()
             if not sym:
                 continue
@@ -1548,8 +1603,14 @@ class MomentumScanner:
 
     def reset_symbol_if_flat(self, symbol: str) -> None:
         """Clear scanner legs when exchange position is gone."""
+        from binance_connector import PositionsUnavailable
+
         sym = symbol.upper()
-        open_syms = {str(p.get("symbol") or "").upper() for p in self._exchange_positions()}
+        try:
+            open_syms = {str(p.get("symbol") or "").upper() for p in self._exchange_positions()}
+        except PositionsUnavailable as e:
+            log.warning("reset_symbol_if_flat %s deferred — positions unavailable: %s", sym, e)
+            return
         if sym in open_syms:
             return
         coin = self._coins.get(sym)
@@ -1604,12 +1665,54 @@ class MomentumScanner:
                 raise
 
         if coin.short and not has_short:
+            # Double-confirm empty short — a single stale/cool empty read must not SHORT_GONE.
+            # Execution forensic: false SHORT_GONE → orphan chase / capital lock thrash.
+            try:
+                confirm_fn = getattr(self._connector, "confirmed_positions", None)
+                if callable(confirm_fn):
+                    # Force a second sample (bypass cool only if we already saw empty qty).
+                    rows = confirm_fn(sym, max_age_s=0.0)
+                    still_short = False
+                    for p in rows:
+                        pos_side = str(p.get("positionSide") or "").upper()
+                        side = str(p.get("type") or p.get("side") or "").upper()
+                        if pos_side == "LONG":
+                            continue
+                        if (side == "SELL" or pos_side == "SHORT") and float(p.get("volume") or 0) > 1e-12:
+                            still_short = True
+                            break
+                    if still_short:
+                        log.warning(
+                            "scanner %s SHORT_GONE deferred — second sample still shows short",
+                            sym,
+                        )
+                        return True
+            except Exception as e:
+                from binance_connector import PositionsUnavailable
+
+                if isinstance(e, PositionsUnavailable) or "REST cooling" in str(e) or "unconfirmed" in str(e).lower():
+                    log.warning("scanner %s SHORT_GONE deferred — confirm unavailable: %s", sym, e)
+                    return True
+                log.warning("scanner %s SHORT_GONE confirm error: %s — defer", sym, e)
+                return True
             log.info("scanner %s short closed on exchange — flattening full pair", sym)
             self._close_all(coin, "SHORT_GONE_EXCHANGE")
             return False
 
         # Never leave orphan longs without the primary short — even in independent_legs_mode.
         if not has_short and (coin.long1 or coin.long2 or has_long):
+            # Same unavailable/empty caution — do not orphan-chase on uncertain book.
+            try:
+                cool_left = float(getattr(self._connector, "rest_cooling_left", lambda: 0.0)() or 0.0)
+            except Exception:
+                cool_left = 0.0
+            if cool_left > 0.05:
+                log.warning(
+                    "scanner %s ORPHAN_RECOVERY deferred — REST cool %.0fs",
+                    sym,
+                    cool_left,
+                )
+                return bool(coin.short or coin.long1 or coin.long2 or has_long)
             log.warning("scanner %s recovery/orphan long without short — flattening full pair", sym)
             self._close_all(coin, "ORPHAN_RECOVERY")
             return False
@@ -1682,9 +1785,14 @@ class MomentumScanner:
 
     def validate_open_pair_logic(self, symbol: str | None = None) -> list[dict[str, Any]]:
         """Audit open exchange positions against short-first rules."""
+        from binance_connector import PositionsUnavailable
+
         issues: list[dict[str, Any]] = []
         with self._lock:
-            positions = self._exchange_positions()
+            try:
+                positions = self._exchange_positions()
+            except PositionsUnavailable as e:
+                return [{"issue": "positions_unavailable", "severity": "warn", "detail": str(e)}]
             by_sym: dict[str, list[dict[str, Any]]] = {}
             for p in positions:
                 sym = str(p.get("symbol") or "").upper()
@@ -1965,12 +2073,18 @@ class MomentumScanner:
 
     def _global_active_symbol(self) -> str | None:
         """Symbol with open scanner legs OR any live exchange position (blocks stacking)."""
+        from binance_connector import PositionsUnavailable
+
         for coin in self._coins.values():
             if coin.short or coin.long1 or coin.long2:
                 return coin.symbol
             if coin.status in (STATUS_SHORT, STATUS_LONG1, STATUS_LONG2):
                 return coin.symbol
-        for p in self._exchange_positions():
+        try:
+            rows = self._exchange_positions()
+        except PositionsUnavailable:
+            return None
+        for p in rows:
             sym = str(p.get("symbol") or "").upper()
             vol = float(p.get("volume") or 0)
             if sym and vol > 1e-12:
@@ -2536,7 +2650,7 @@ class MomentumScanner:
             except Exception as e:
                 log.warning("scanner SHORT adopt %s: %s", sym, e)
             return
-        ok_iso, _ = pair_gate.can_open(sym, self._global_active_symbol, self._exchange_positions)
+        ok_iso, _ = pair_gate.can_open(sym, self._global_active_symbol, self._exchange_positions_for_gate)
         if not ok_iso:
             return
         if not getattr(self._connector.cfg, "paper", False):

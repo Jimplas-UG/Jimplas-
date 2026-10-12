@@ -1121,15 +1121,27 @@ class BinanceConnector:
 
         Never invents flat from sticky on error (raises PositionsUnavailable).
         Cuts per-tick force spam that caused live 429 → false SHORT_GONE.
+
+        While REST-cool is engaged, trust last_good up to 30s instead of force-spam
+        (force would only raise unavailable and inflate 429 storms).
         """
         sym = (symbol or "").upper() or None
         now = time.time()
         age = now - float(self._last_good_positions_ts or 0.0)
-        if self._last_good_positions_ts > 0 and age <= max(0.05, float(max_age_s)):
+        cool_left = 0.0 if bypass_rest_cool else self.rest_cooling_left()
+        age_limit = max(0.05, float(max_age_s))
+        if cool_left > 0.05:
+            age_limit = max(age_limit, 30.0)
+        if self._last_good_positions_ts > 0 and age <= age_limit:
             rows = list(self._last_good_positions)
             if sym:
                 rows = [p for p in rows if str(p.get("symbol") or "").upper() == sym]
             return rows
+        if cool_left > 0.05 and not bypass_rest_cool:
+            raise PositionsUnavailable(
+                f"REST cooling ({self._rest_cool_reason or 'rate'}) "
+                f"{cool_left:.0f}s — positions unconfirmed"
+            )
         return self.positions(sym, force=True, bypass_rest_cool=bypass_rest_cool)
 
     def exchange_short_qty(self, symbol: str | None = None, *, max_age_s: float = 1.5) -> float:

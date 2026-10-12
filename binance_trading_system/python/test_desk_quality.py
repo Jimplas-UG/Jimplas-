@@ -95,16 +95,21 @@ def test_confirmed_positions_stale_force_unavailable() -> None:
     c._last_good_positions = [
         {"symbol": "ETHUSDT", "volume": 2.0, "positionSide": "SHORT", "type": "SELL"}
     ]
-    c._last_good_positions_ts = time.time() - 30.0
+    # Within cool sticky window (30s): serve last_good — do not force-spam 429.
+    c._last_good_positions_ts = time.time() - 5.0
     c._rest_cool_until = time.monotonic() + 20.0
     c._rest_cool_reason = "429"
+    rows = c.confirmed_positions("ETHUSDT", max_age_s=1.5)
+    assert len(rows) == 1 and rows[0]["symbol"] == "ETHUSDT"
+    # Past cool sticky window: unavailable (never invent flat).
+    c._last_good_positions_ts = time.time() - 31.0
     raised = False
     try:
         c.confirmed_positions("ETHUSDT", max_age_s=1.5)
     except PositionsUnavailable:
         raised = True
     assert raised
-    print("OK stale book + cool -> PositionsUnavailable (not flat)")
+    print("OK cool sticky <=30s; stale+cool -> PositionsUnavailable (not flat)")
 
 
 if __name__ == "__main__":

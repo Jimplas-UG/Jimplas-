@@ -165,6 +165,89 @@ def test_frozen_contract_includes_permanent_locks() -> None:
     print("OK frozen contract includes permanent leak locks")
 
 
+def test_exchange_positions_never_empty_on_unavailable() -> None:
+    from binance_connector import PositionsUnavailable
+
+    class Conn:
+        cfg = SimpleNamespace(paper=False, api_key="k")
+
+        def confirmed_positions(self, *a, **k):
+            raise PositionsUnavailable("REST cooling (429) 5s — positions unconfirmed")
+
+        def positions(self, *a, **k):
+            raise PositionsUnavailable("REST cooling (429) 5s — positions unconfirmed")
+
+    sc = MomentumScanner(Conn(), lambda: True)  # type: ignore[arg-type]
+    raised = False
+    try:
+        sc._exchange_positions()
+    except PositionsUnavailable:
+        raised = True
+    assert raised, "unavailable must raise — never return []"
+    # Gate path fails closed using scanner state, not empty book.
+    coin = CoinStrategy(symbol="USUSDT")
+    coin.short = SimpleNamespace(qty=1.0, entry=1.0, side="SELL")
+    sc._coins["USUSDT"] = coin
+    rows = sc._exchange_positions_for_gate()
+    assert any(str(r.get("symbol")) == "USUSDT" for r in rows)
+    print("OK exchange_positions raises; gate uses scanner opens")
+
+
+def test_short_gone_defers_when_confirm_unavailable() -> None:
+    from binance_connector import PositionsUnavailable
+    from momentum_scanner import LegPosition, STATUS_SHORT
+
+    class Conn:
+        cfg = SimpleNamespace(paper=False, api_key="k")
+        _rest_cool_reason = "429"
+
+        def rest_cooling_left(self):
+            return 5.0
+
+        def exchange_short_qty(self, symbol, max_age_s=1.5):
+            return 0.0  # first sample looks flat
+
+        def exchange_long_qty(self, symbol, max_age_s=1.5):
+            return 0.0
+
+        def confirmed_positions(self, *a, **k):
+            raise PositionsUnavailable("REST cooling (429) — positions unconfirmed")
+
+    sc = MomentumScanner(Conn(), lambda: True)  # type: ignore[arg-type]
+    coin = CoinStrategy(symbol="RLCUSDT")
+    coin.short = LegPosition("SELL", 1.0, 10.0, 5, 88001, 0.97)
+    coin.status = STATUS_SHORT
+    sc._coins["RLCUSDT"] = coin
+    kept = sc._ensure_pair_coherence(coin)
+    assert kept is True
+    assert coin.short is not None, "must not SHORT_GONE on unavailable confirm"
+    print("OK SHORT_GONE defers when confirm unavailable")
+
+
+def test_confirmed_positions_trusts_last_good_during_cool() -> None:
+    from binance_connector import BinanceConnector, BinanceConfig, PositionsUnavailable
+    import time as _t
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._last_good_positions = [
+        {"symbol": "BTCUSDT", "volume": 1.0, "positionSide": "SHORT", "type": "SELL"}
+    ]
+    c._last_good_positions_ts = _t.time() - 5.0  # older than 1.5s default
+    c._rest_cool_until = _t.monotonic() + 20.0
+    c._rest_cool_reason = "429"
+    rows = c.confirmed_positions("BTCUSDT", max_age_s=1.5)
+    assert len(rows) == 1 and rows[0]["symbol"] == "BTCUSDT"
+    # No last_good and cool → unavailable (not force spam)
+    c._last_good_positions_ts = 0.0
+    raised = False
+    try:
+        c.confirmed_positions("BTCUSDT", max_age_s=1.5)
+    except PositionsUnavailable:
+        raised = True
+    assert raised
+    print("OK confirmed_positions trusts last_good up to 30s during cool")
+
+
 if __name__ == "__main__":
     test_no_rule_kernel_safe_mode()
     test_naked_short_never_10x()
@@ -180,4 +263,7 @@ if __name__ == "__main__":
     test_ui_manual_close_requires_confirm()
     test_ghost_floating_same_symbol_only()
     test_frozen_contract_includes_permanent_locks()
+    test_exchange_positions_never_empty_on_unavailable()
+    test_short_gone_defers_when_confirm_unavailable()
+    test_confirmed_positions_trusts_last_good_during_cool()
     print("test_permanent_leak_locks: ALL OK")
