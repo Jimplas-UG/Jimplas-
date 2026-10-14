@@ -287,30 +287,39 @@ async def lifespan(app: FastAPI):
     _app_loop = asyncio.get_running_loop()
     await tick_stream.start()
 
+    async def _seed_scanner_history() -> None:
+        await asyncio.sleep(2.0)
+        try:
+            n = await asyncio.to_thread(momentum_scanner.seed_history_from_klines)
+            log.info("scanner history seed complete (%s)", n)
+            _flush_scanner_snapshot()
+        except Exception as se:
+            log.warning("scanner history seed failed: %s", se)
+
     async def load_scanner_symbols() -> None:
-        for attempt in range(4):
+        """Load full USDT perpetual universe. Never stick on the 3-coin fallback after a 418/cool boot."""
+        attempt = 0
+        while True:
+            attempt += 1
             try:
+                if connector.rest_cooling_left() > 0.5:
+                    await asyncio.sleep(min(30.0, connector.rest_cooling_left() + 1.0))
+                    continue
                 syms = await asyncio.to_thread(connector.list_usdt_perpetual_symbols)
-                if syms:
+                if len(syms) >= 50:
                     momentum_scanner.load_symbols(syms)
                     log.info("scanner loaded %s USDT perpetual symbols", len(syms))
-                    # Seed rolling % from 1m klines so ready-signal logic works without 15m wait.
-                    async def _seed() -> None:
-                        await asyncio.sleep(2.0)
-                        try:
-                            n = await asyncio.to_thread(momentum_scanner.seed_history_from_klines)
-                            log.info("scanner history seed complete (%s)", n)
-                            _flush_scanner_snapshot()
-                        except Exception as se:
-                            log.warning("scanner history seed failed: %s", se)
-
-                    asyncio.create_task(_seed())
+                    asyncio.create_task(_seed_scanner_history())
                     return
+                log.warning("scanner symbol load attempt %s: only %s symbols (want >=50)", attempt, len(syms))
             except Exception as e:
-                log.warning("scanner symbol load attempt %s: %s", attempt + 1, e)
-            await asyncio.sleep(2.0 * (attempt + 1))
-        momentum_scanner.load_symbols(["BTCUSDT", "ETHUSDT", "BNBUSDT"])
-        log.warning("scanner using fallback symbol list (3)")
+                log.warning("scanner symbol load attempt %s: %s", attempt, e)
+            if attempt == 4 and len(getattr(momentum_scanner, "_coins", {}) or {}) < 50:
+                # Temporary UI so the desk is not empty during a ban — keep retrying.
+                momentum_scanner.load_symbols(["BTCUSDT", "ETHUSDT", "BNBUSDT"])
+                log.warning("scanner using temporary fallback symbol list (3) — will retry full universe")
+                _flush_scanner_snapshot()
+            await asyncio.sleep(min(60.0, 2.0 * attempt))
 
     async def refresh_24h_loop() -> None:
         # Immediate fill so market overview has live 24h % right after boot.
@@ -329,6 +338,16 @@ async def lifespan(app: FastAPI):
         while True:
             try:
                 await asyncio.sleep(45.0)
+                tracked = int((momentum_scanner.status() or {}).get("symbols_tracked") or 0)
+                if tracked < 50 and connector.rest_cooling_left() <= 0.5:
+                    try:
+                        syms = await asyncio.to_thread(connector.list_usdt_perpetual_symbols)
+                        if len(syms) >= 50:
+                            momentum_scanner.load_symbols(syms)
+                            log.info("scanner recovered full universe (%s was %s)", len(syms), tracked)
+                            asyncio.create_task(_seed_scanner_history())
+                    except Exception as re:
+                        log.warning("scanner universe recovery: %s", re)
                 pct_map = await asyncio.to_thread(connector.ticker_24h_map)
                 vol_map = await asyncio.to_thread(connector.ticker_24h_volume_map)
                 fund_map = await asyncio.to_thread(connector.funding_rate_map)
@@ -672,6 +691,14 @@ def health():
         pass
     latency_ms = None
     # Never ping Binance on /health — used for fast URL discovery; latency lives in /api/diagnostics.
+    # Never raise from stream/scanner status during 418 — UI labeled that as "WebSocket Unreachable".
+    def _safe(label: str, fn):
+        try:
+            return fn()
+        except Exception as e:
+            log.warning("health %s: %s", label, e)
+            return {"ok": False, "error": str(e)[:160]}
+
     return {
         "ok": True,
         "service": "bilshenz-binance-bridge",
@@ -683,15 +710,18 @@ def health():
         "binance_latency_ms": latency_ms,
         "disk_free_gb": round(disk.free / 1024**3, 2),
         "memory": mem,
-        "tick_stream": tick_stream.status(),
-        "scanner_stream": scanner_stream.status(),
-        "user_data_stream": user_data_stream.status(),
-        "scanner": momentum_scanner.status(),
+        "tick_stream": _safe("tick_stream", tick_stream.status),
+        "scanner_stream": _safe("scanner_stream", scanner_stream.status),
+        "user_data_stream": _safe("user_data_stream", user_data_stream.status),
+        "scanner": _safe("scanner", momentum_scanner.status),
         # Never call connector.positions() here — a Binance 418 used to sleep 60–300s
         # inside /health and stall the whole bridge (WS reconnect felt frozen).
-        "pair_isolation": pair_gate.status(
-            momentum_scanner._global_active_symbol,
-            connector.cached_positions,
+        "pair_isolation": _safe(
+            "pair_isolation",
+            lambda: pair_gate.status(
+                momentum_scanner._global_active_symbol,
+                connector.cached_positions,
+            ),
         ),
         "rest_cool_s": round(connector.rest_cooling_left(), 1),
     }
@@ -741,6 +771,15 @@ def api_diagnostics():
     except Exception:
         pass
     disk = shutil.disk_usage("/")
+
+    def _safe(label: str, fn):
+        try:
+            return fn()
+        except Exception as e:
+            log.warning("diagnostics %s: %s", label, e)
+            return {"ok": False, "error": str(e)[:160]}
+
+    sc = _safe("scanner", momentum_scanner.status)
     return {
         "ok": True,
         "ts": int(time.time() * 1000),
@@ -748,20 +787,25 @@ def api_diagnostics():
         "cpu_pct": cpu_pct,
         "memory": mem,
         "disk_free_gb": round(disk.free / 1024**3, 2),
-        "tick_stream": tick_stream.status(),
-        "scanner_stream": scanner_stream.status(),
-        "user_data_stream": user_data_stream.status(),
-        "pair_isolation": pair_gate.status(
-            momentum_scanner._global_active_symbol,
-            lambda: connector.positions(),
+        "tick_stream": _safe("tick_stream", tick_stream.status),
+        "scanner_stream": _safe("scanner_stream", scanner_stream.status),
+        "user_data_stream": _safe("user_data_stream", user_data_stream.status),
+        # Cached book only — live positions() raises PositionsUnavailable during 418.
+        "pair_isolation": _safe(
+            "pair_isolation",
+            lambda: pair_gate.status(
+                momentum_scanner._global_active_symbol,
+                connector.cached_positions,
+            ),
         ),
         "execution": {
-            "last_latency_ms": momentum_scanner.status().get("last_exec_latency_ms"),
+            "last_latency_ms": sc.get("last_exec_latency_ms") if isinstance(sc, dict) else None,
             "recent_latencies": momentum_scanner.engine.latency_stats()[:8],
             "events": momentum_scanner.engine.events()[:8],
         },
-        "scanner": momentum_scanner.status(),
+        "scanner": sc,
         "connected": bool(getattr(connector, "_connected", False) and connector.cfg.api_key),
+        "rest_cool_s": round(connector.rest_cooling_left(), 1),
     }
 
 

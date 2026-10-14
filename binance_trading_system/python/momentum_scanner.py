@@ -397,10 +397,16 @@ class MomentumScanner:
         if getattr(self._connector.cfg, "paper", False):
             coin = self._coins.get(symbol.upper())
             return bool(coin and coin.short)
-        fn = getattr(self._connector, "exchange_short_qty", None)
-        if callable(fn):
-            return float(fn(symbol) or 0) > 1e-12
-        return self._exchange_short_leg(symbol) is not None
+        from binance_connector import PositionsUnavailable
+
+        try:
+            fn = getattr(self._connector, "exchange_short_qty", None)
+            if callable(fn):
+                return float(fn(symbol) or 0) > 1e-12
+            return self._exchange_short_leg(symbol) is not None
+        except PositionsUnavailable:
+            # Cool/418: book unconfirmed — do not demote sticky Pending (and never blow /health).
+            return True
 
     def _exchange_long_leg(self, symbol: str) -> dict[str, Any] | None:
         """Live Binance long leg for symbol — shared by recovery Long 1 / Long 2."""
@@ -2285,10 +2291,21 @@ class MomentumScanner:
                 return
 
     def status(self) -> dict[str, Any]:
-        active_sym = self._global_active_symbol()
-        pending = self._pending_candidates()
+        from binance_connector import PositionsUnavailable
+
+        try:
+            active_sym = self._global_active_symbol()
+        except PositionsUnavailable:
+            active_sym = self._last_known_active_symbol
+        try:
+            pending = self._pending_candidates()
+        except PositionsUnavailable:
+            pending = []
         active = sum(1 for c in self._coins.values() if c.active() or c.short or c.long1 or c.long2)
-        can_exec, block_reason = self._order_session_ok()
+        try:
+            can_exec, block_reason = self._order_session_ok()
+        except PositionsUnavailable:
+            can_exec, block_reason = False, "positions_unavailable"
         env_blocked, _ = _exec_env_blocked()
         return {
             "enabled": self._enabled,

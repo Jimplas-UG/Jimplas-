@@ -23,6 +23,7 @@ if str(_HERE) not in sys.path:
 
 from frozen_strategy import (
     GAIN_THRESHOLD_PCT,
+    HEDGED_MAX_HOLD_MS,
     LONG1_ADVERSE_PCT,
     LONG2_ADVERSE_PCT,
     LONG_HEDGE_PULLBACK_PCT,
@@ -53,10 +54,10 @@ SHORT_TRAIL_MFE = 1.5
 PAIR_INVALIDATION_PCT = 6.5
 HEDGE_RESCUE_BUFFER_PCT = 1.0
 MAX_HOLD_BARS_1M = 24 * 60  # ~24h on 1m
-# Research knobs (None = live frozen behavior). Hedged pair is net long ($800 vs $250),
-# so a fade after L1/L2 has no exit without one of these.
+# Research override for a USD pair stop (None = off). Live uses PAIR_TIME instead.
 HEDGED_PAIR_STOP_USD: float | None = None
-HEDGED_MAX_HOLD_MIN: int | None = None
+# Live frozen: PAIR_TIME after hedge episode (ms → 1m bars). Override to None to disable.
+HEDGED_MAX_HOLD_MIN: int | None = max(1, int(HEDGED_MAX_HOLD_MS // 60_000))
 DEFAULT_INTERVAL = "1m"
 
 
