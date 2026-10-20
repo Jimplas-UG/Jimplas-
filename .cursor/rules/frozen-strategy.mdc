@@ -9,11 +9,12 @@ The live Binance bot strategy is the **real deal**. Do not change it unless the 
 
 ## Locked strategy
 
-- ID: `short_first_v1`, variant `r5_pairtime24h` (operator-ordered testnet trial, Oct 12)
+- ID: `short_first_v1`, variant `sep_retrace07` (operator-ordered Oct 16: restore Sep 23–25 entry economics)
 - Name: Short → Long 1 → Long 2
 - Contract: `binance_trading_system/python/frozen_strategy.py`
-- Entry retrace **5%** from pump peak (was 0.7%); **PAIR_TIME**: hedge episode open 24h → flatten all
-- Evidence + tooling: `strategy_variant_research.py`, `strategy_edge_per_entry.py` (edge is not proven — trial)
+- Entry: 15m ≥**5%** gain + ≥**0.7%** retrace from pump peak
+- **PAIR_TIME disabled** (`HEDGED_MAX_HOLD_MS=0`) — Oct 12 r5/5%+24h trial ended
+- Capital / exit locks unchanged: $100 partition, 5×/10×, 50–40–40, SMART_EXIT 6%, paired hold, 6.5% invalidation
 
 ## Never modify (unless user explicitly requests a strategy change)
 

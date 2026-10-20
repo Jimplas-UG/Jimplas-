@@ -63,7 +63,11 @@ REST_WEIGHT_SOFT_LIMIT = 1900.0
 REST_WEIGHT_HARD_LIMIT = 2250.0
 # Full-book positionRisk costs ~230 weight on testnet (measured), so ≤6/min is the budget.
 # Our orders and user-stream ORDER/ACCOUNT events invalidate the shared book immediately.
-POSITIONS_SHARE_S = 10.0
+# Idle flat book can share longer — 10s share + 12s force-reconcile was enough to 418 alone.
+POSITIONS_SHARE_S = 20.0
+POSITIONS_SHARE_FLAT_S = 45.0
+RECENT_DEALS_TTL_S = 45.0
+RECENT_DEALS_MAX_SYMBOLS = 5
 
 
 def _is_order_mutation(method: str, path: str) -> bool:
@@ -228,11 +232,15 @@ class BinanceConnector:
         self._history_cache_hydrated = False
         # Symbols recently traded/closed — survives flatten so /api/logs still queries them.
         self._deal_symbol_history: set[str] = set()
+        self._recent_deals_cache: dict[str, Any] | None = None
         self._hydrate_history_cache_from_disk()
         # Fail-fast cool-down after 418/429 — never time.sleep(60+) on the request path
         # (that froze /health + WS accept under threadpool saturation).
         self._rest_cool_until = 0.0
         self._rest_cool_reason = ""
+        self._weight_cool_until = 0.0
+        self._weight_hot_minute = -1
+        self._used_weight_1m = 0.0
         # Binance 418 = IP ban. Any request during the ban extends it, so this is never
         # bypassed (not even by closes) and never cleared by login/close-cool paths.
         self._rest_ban_until = 0.0
@@ -409,8 +417,10 @@ class BinanceConnector:
         if w is None:
             return
         self._used_weight_1m = w
+        minute = int(time.time() // 60)
         # Binance futures IP limit is 2400/min. Pause discretionary traffic before 429 → 418.
         if w >= REST_WEIGHT_SOFT_LIMIT:
+            self._weight_hot_minute = minute
             secs = max(1.0, 60.0 - (time.time() % 60.0))
             until = time.monotonic() + secs
             if until > getattr(self, "_weight_cool_until", 0.0):
@@ -422,8 +432,26 @@ class BinanceConnector:
                     self._top_paths(),
                 )
             if w >= REST_WEIGHT_HARD_LIMIT:
-                # Signed non-close traffic waits too; closes (bypass_rest_cool) still go.
-                self._engage_rest_cool("weight", secs)
+                # Do NOT engage full REST cool here — that blocked signed reads, then stampeded
+                # force positionRisk/userTrades the instant cool ended (idle → 418 loop).
+                # Soft/hard both use _weight_cool_until; signed GETs pause, mutations/closes pass.
+                log.warning(
+                    "Binance used weight %.0f/2400 HARD — signed GETs paused %.0fs (no rest-cool stampede)",
+                    w,
+                    secs,
+                )
+
+    def _weight_pause_left(self) -> float:
+        """Seconds left in weight pause — cool timer OR remainder of the hot UTC minute."""
+        left = getattr(self, "_weight_cool_until", 0.0) - time.monotonic()
+        minute = int(time.time() // 60)
+        if (
+            float(getattr(self, "_used_weight_1m", 0.0) or 0.0) >= REST_WEIGHT_SOFT_LIMIT
+            and int(getattr(self, "_weight_hot_minute", -1)) == minute
+        ):
+            # Cool timer can expire a hair early; keep pausing until the Binance minute rolls.
+            left = max(left, max(0.2, 60.0 - (time.time() % 60.0)))
+        return max(0.0, left)
 
     def _count_path(self, path: str) -> None:
         minute = int(time.time() // 60)
@@ -437,12 +465,26 @@ class BinanceConnector:
         counts = getattr(self, "_path_counts", None) or {}
         return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:6]
 
-    def _raise_if_weight_cooling(self, signed: bool) -> None:
-        if signed:
+    def _raise_if_weight_cooling(
+        self,
+        signed: bool,
+        *,
+        method: str = "GET",
+        path: str = "",
+        bypass_rest_cool: bool = False,
+    ) -> None:
+        left = self._weight_pause_left()
+        if left <= 0:
             return
-        left = getattr(self, "_weight_cool_until", 0.0) - time.monotonic()
-        if left > 0:
+        if bypass_rest_cool:
+            return
+        if not signed:
             raise RuntimeError(f"Binance REST cooling (weight) {left:.0f}s left")
+        # Signed order place/cancel still allowed (flatten / enter). Discretionary signed GETs
+        # (positionRisk, userTrades, income, …) pause — idle fan-out was the 418 source.
+        if str(method).upper() != "GET":
+            return
+        raise RuntimeError(f"Binance REST cooling (weight) {left:.0f}s left")
 
     def used_weight_1m(self) -> float:
         return float(getattr(self, "_used_weight_1m", 0.0) or 0.0)
@@ -548,7 +590,9 @@ class BinanceConnector:
         mutating = _is_order_mutation(method, path)
         try:
             self._raise_if_banned()
-            self._raise_if_weight_cooling(signed)
+            self._raise_if_weight_cooling(
+                signed, method=method, path=path, bypass_rest_cool=bypass_rest_cool
+            )
             if not bypass_rest_cool:
                 self._raise_if_rest_cooling()
             if mutating:
@@ -591,7 +635,9 @@ class BinanceConnector:
         bypass_rest_cool: bool = False,
     ) -> Any:
         self._raise_if_banned()
-        self._raise_if_weight_cooling(signed)
+        self._raise_if_weight_cooling(
+            signed, method=method, path=path, bypass_rest_cool=bypass_rest_cool
+        )
         if not bypass_rest_cool:
             self._raise_if_rest_cooling()
         if _is_order_mutation(method, path):
@@ -729,11 +775,15 @@ class BinanceConnector:
     def load_all_symbol_specs(self, force: bool = False) -> dict[str, dict[str, Any]]:
         if self._all_specs_cache and not force and time.time() - self._all_specs_loaded_at < 3600:
             return self._all_specs_cache
-        # Never refresh exchangeInfo during cool — serve cache or fail as rest_cooling.
-        if self.rest_cooling_left() > 0.25:
+        # Never refresh exchangeInfo during cool/weight pause — serve cache or fail.
+        if self.rest_cooling_left() > 0.25 or self._weight_pause_left() > 0.05:
             if self._all_specs_cache:
                 return self._all_specs_cache
-            self._raise_if_rest_cooling()
+            if self.rest_cooling_left() > 0.25:
+                self._raise_if_rest_cooling()
+            raise RuntimeError(
+                f"Binance REST cooling (weight) {self._weight_pause_left():.0f}s left"
+            )
         data = self._request("GET", "/fapi/v1/exchangeInfo", timeout=45.0)
         cache: dict[str, dict[str, Any]] = {}
         for s in data.get("symbols", []):
@@ -909,33 +959,45 @@ class BinanceConnector:
         if sym_u:
             self._note_deal_symbols([sym_u])
             return [sym_u]
-        symbols: set[str] = set(self._deal_symbol_history)
-        # Always include symbols already in sticky history (survives flatten).
-        for d in self._last_good_deals[:80]:
-            s = str(d.get("symbol") or "").upper()
-            if s:
-                symbols.add(s)
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def _add(s: str) -> None:
+            u = str(s or "").upper()
+            if u and u not in seen:
+                seen.add(u)
+                ordered.append(u)
+
+        # Open legs first (live context), then sticky fills, then history set.
         try:
-            for p in self.cached_positions() or self.positions(force=False):
-                s = str(p.get("symbol") or "").upper()
-                if s:
-                    symbols.add(s)
+            for p in self.cached_positions() or []:
+                if float(p.get("volume") or 0) > 1e-12:
+                    _add(str(p.get("symbol") or ""))
         except Exception:
             pass
-        # Avoid income hammer while cooling — history set is enough.
-        if self.rest_cooling_left() <= 0.25 and len(symbols) < 3:
+        for d in self._last_good_deals[:80]:
+            _add(str(d.get("symbol") or ""))
+        for u in sorted(self._deal_symbol_history):
+            _add(u)
+        # Avoid income hammer while cooling / weight pause / already have symbols.
+        weight_paused = self._weight_pause_left() > 0.05
+        if (
+            not weight_paused
+            and self.rest_cooling_left() <= 0.25
+            and len(ordered) < 2
+        ):
             try:
                 income = self._request("GET", "/fapi/v1/income", {"limit": 100}, signed=True)
                 for row in income or []:
-                    s = str(row.get("symbol") or "").upper()
-                    if s:
-                        symbols.add(s)
+                    _add(str(row.get("symbol") or ""))
             except Exception as e:
                 log.debug("income symbols: %s", e)
-        if not symbols and self.cfg.symbol:
-            symbols.add(self.cfg.symbol.upper())
-        self._note_deal_symbols(symbols)
-        return sorted(symbols)
+        if not ordered and self.cfg.symbol:
+            _add(self.cfg.symbol)
+        # Hard cap — each symbol is a signed userTrades call (idle /api/logs spam → 418).
+        capped = ordered[:RECENT_DEALS_MAX_SYMBOLS]
+        self._note_deal_symbols(capped)
+        return capped
 
     def recent_deals(self, limit: int = 50, symbol: str | None = None) -> list[dict[str, Any]]:
         """User trades across active/recent symbols — not only cfg.symbol."""
@@ -947,9 +1009,20 @@ class BinanceConnector:
         if not self.cfg.api_key:
             return list(self._last_good_deals[: max(1, min(200, int(limit)))])
         lim = max(1, min(200, int(limit)))
-        # Skip hammering userTrades while REST is cooling — keep last history visible.
+        cache_key = f"{(symbol or '').upper()}|{lim}"
+        cached = getattr(self, "_recent_deals_cache", None) or {}
+        if (
+            cached.get("key") == cache_key
+            and time.time() - float(cached.get("ts") or 0) < RECENT_DEALS_TTL_S
+            and cached.get("deals") is not None
+        ):
+            return list(cached["deals"][:lim])
+        # Skip hammering userTrades while REST/weight cooling — keep last history visible.
         cool_left = self.rest_cooling_left()
-        if cool_left > 0.25 and self._last_good_deals:
+        weight_left = self._weight_pause_left()
+        if (cool_left > 0.25 or weight_left > 0.05) and self._last_good_deals:
+            return list(self._last_good_deals[:lim])
+        if float(getattr(self, "_used_weight_1m", 0.0) or 0.0) >= 1500.0 and self._last_good_deals:
             return list(self._last_good_deals[:lim])
         # After restart during cool, sticky is empty — allow one bypass so history list repopulates.
         bypass_cool = cool_left > 0.25 and not self._last_good_deals
@@ -1011,10 +1084,14 @@ class BinanceConnector:
             self._note_deal_symbols({str(d.get("symbol") or "").upper() for d in deals_for_sticky})
             self._last_good_deals = list(deals_for_sticky)
             self._last_good_deals_ts = time.time()
+            self._recent_deals_cache = {"key": cache_key, "ts": time.time(), "deals": list(deals)}
             self._persist_history_cache()
             return deals
         # Never clear previous history — empty fetch keeps sticky forever.
-        return list(self._last_good_deals[:lim])
+        sticky = list(self._last_good_deals[:lim])
+        if sticky:
+            self._recent_deals_cache = {"key": cache_key, "ts": time.time(), "deals": sticky}
+        return sticky
 
     def is_symbol_prepared(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
         """True when symbol/leverage was prepared recently (skip redundant REST)."""
@@ -1056,11 +1133,18 @@ class BinanceConnector:
         code_m = re.search(r"code=(-?\d+)", msg)
         http_code = int(http_m.group(1)) if http_m else None
         binance_code = int(code_m.group(1)) if code_m else None
+        low = msg.lower()
         retryable = (
             http_code in (408, 429, 500, 502, 503, 504)
             or binance_code in (-1001, -1003, -1021)
-            or "timeout" in msg.lower()
-            or "timed out" in msg.lower()
+            or "timeout" in low
+            or "timed out" in low
+            # Connection drops mid-order were marked no_retry → failed LONG1 / missed hedges.
+            or "remote end closed" in low
+            or "connection reset" in low
+            or "connection aborted" in low
+            or "broken pipe" in low
+            or "temporarily unavailable" in low
         )
         return {
             "error": msg,
@@ -1300,11 +1384,27 @@ class BinanceConnector:
         age_limit = max(0.05, float(max_age_s))
         if cool_left > 0.05:
             age_limit = max(age_limit, 30.0)
+        # Flat book: trust empty snapshot longer — idle force spam was burning weight alone.
+        if self._last_good_positions_ts > 0 and not self._last_good_positions:
+            age_limit = max(age_limit, POSITIONS_SHARE_FLAT_S)
+        weight_left = self._weight_pause_left()
+        if weight_left > 0.05:
+            age_limit = max(age_limit, POSITIONS_SHARE_FLAT_S)
         if self._last_good_positions_ts > 0 and age <= age_limit:
             rows = list(self._last_good_positions)
             if sym:
                 rows = [p for p in rows if str(p.get("symbol") or "").upper() == sym]
             return rows
+        # Weight pause: never force-spam positionRisk (would only raise / log every tick).
+        if weight_left > 0.05 and not bypass_rest_cool:
+            if self._last_good_positions_ts > 0:
+                rows = list(self._last_good_positions)
+                if sym:
+                    rows = [p for p in rows if str(p.get("symbol") or "").upper() == sym]
+                return rows
+            raise PositionsUnavailable(
+                f"REST cooling (weight) {weight_left:.0f}s — positions unconfirmed"
+            )
         if cool_left > 0.05 and not bypass_rest_cool:
             raise PositionsUnavailable(
                 f"REST cooling ({self._rest_cool_reason or 'rate'}) "
@@ -1558,15 +1658,18 @@ class BinanceConnector:
             }
         if not self.cfg.api_key or not self.cfg.api_secret:
             return {"connected": False, "mode": "unconfigured", "testnet": self.cfg.testnet}
-        # Already cooling — never wipe floating/balance; skip REST hammering.
+        # Already cooling / weight-paused — never wipe floating/balance; skip REST hammering.
         cool_left = self.rest_cooling_left()
-        if cool_left > 0.25 and self._last_good_account:
+        weight_left = self._weight_pause_left()
+        if (cool_left > 0.25 or weight_left > 0.05) and self._last_good_account:
+            reason = self._rest_cool_reason or ("weight" if weight_left > 0.05 else "REST cooling")
+            left = cool_left if cool_left > weight_left else weight_left
             return {
                 "connected": True,
                 "mode": "testnet" if self.cfg.testnet else "live",
                 "testnet": self.cfg.testnet,
-                "account": self._sticky_account(warning=self._rest_cool_reason or "REST cooling"),
-                "warning": self._rest_cool_reason or f"REST cooling ({cool_left:.0f}s)",
+                "account": self._sticky_account(warning=reason),
+                "warning": f"{reason} ({left:.0f}s)",
                 "stale": True,
                 "rest_cool_s": cool_left,
             }
@@ -2027,11 +2130,14 @@ class BinanceConnector:
             self._positions_cache_ts = 0.0
 
     def _fresh_book(self, symbol: str | None) -> list[dict[str, Any]] | None:
-        """Full-book positionRisk < POSITIONS_SHARE_S old with no order sent since — safe to share."""
+        """Full-book positionRisk < share window old with no order sent since — safe to share."""
         ts = getattr(self, "_book_fresh_ts", 0.0)
-        if ts <= 0 or time.monotonic() - ts > POSITIONS_SHARE_S:
+        if ts <= 0:
             return None
         book = list(getattr(self, "_book_fresh", None) or [])
+        share = POSITIONS_SHARE_FLAT_S if not book else POSITIONS_SHARE_S
+        if time.monotonic() - ts > share:
+            return None
         if symbol is None:
             return book
         sym_u = symbol.upper()
@@ -2075,11 +2181,16 @@ class BinanceConnector:
             and now - self._positions_cache_ts < self._positions_cache_ttl
         ):
             return list(self._positions_cache)
-        # force=True during REST cool: uncertain book — never pretend flat.
+        # force=True during REST/weight cool: uncertain book — never pretend flat.
         if force and not bypass_rest_cool and self.rest_cooling_left() > 0.05:
             raise PositionsUnavailable(
                 f"REST cooling ({self._rest_cool_reason or 'rate'}) "
                 f"{self.rest_cooling_left():.0f}s — positions unconfirmed"
+            )
+        weight_left = self._weight_pause_left()
+        if force and not bypass_rest_cool and weight_left > 0.05:
+            raise PositionsUnavailable(
+                f"REST cooling (weight) {weight_left:.0f}s — positions unconfirmed"
             )
         try:
             params: dict[str, Any] = {}
@@ -2098,10 +2209,17 @@ class BinanceConnector:
         except Exception as e:
             # force=True must never invent open legs from sticky (ghost → 10x cascade),
             # AND must never invent flat from 429/cool (false SHORT_GONE / orphan chase).
+            msg = str(e)
+            now_m = time.monotonic()
+            last_w = float(getattr(self, "_positions_warn_mono", 0.0) or 0.0)
+            if now_m - last_w >= 10.0:
+                self._positions_warn_mono = now_m
+                if force:
+                    log.warning("positions: %s (unavailable — not empty)", msg)
+                else:
+                    log.warning("positions: %s (serving UI sticky)", msg)
             if force:
-                log.warning("positions: %s (unavailable — not empty)", e)
-                raise PositionsUnavailable(str(e)) from e
-            log.warning("positions: %s (serving UI sticky)", e)
+                raise PositionsUnavailable(msg) from e
             if symbol is None:
                 if self._positions_cache is not None:
                     return list(self._positions_cache)
@@ -3410,48 +3528,44 @@ class BinanceConnector:
             "broker": "binance",
         }
 
+    def _ticker_24h_bundle(self) -> tuple[dict[str, float], dict[str, float]]:
+        """One /ticker/24hr → pct + quote volume (avoid double REST every refresh)."""
+        cached = getattr(self, "_ticker_24h_cache", None) or {}
+        if cached and time.time() - float(cached.get("ts") or 0) < 40.0:
+            return dict(cached.get("pct") or {}), dict(cached.get("vol") or {})
+        try:
+            data = self._request("GET", "/fapi/v1/ticker/24hr", timeout=25.0)
+        except Exception as e:
+            log.warning("ticker_24h_bundle: %s", e)
+            return dict(cached.get("pct") or {}), dict(cached.get("vol") or {})
+        pct: dict[str, float] = {}
+        vol: dict[str, float] = {}
+        if isinstance(data, list):
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                sym = str(row.get("symbol") or "").upper()
+                if not sym.endswith("USDT"):
+                    continue
+                try:
+                    pct[sym] = float(row.get("priceChangePercent") or 0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    vol[sym] = float(row.get("quoteVolume") or row.get("volume") or 0)
+                except (TypeError, ValueError):
+                    pass
+        self._ticker_24h_cache = {"ts": time.time(), "pct": pct, "vol": vol}
+        return pct, vol
+
     def ticker_24h_map(self) -> dict[str, float]:
         """USDT-M 24h percent map — fills market view when miniTicker omits P (testnet)."""
-        try:
-            data = self._request("GET", "/fapi/v1/ticker/24hr", timeout=25.0)
-        except Exception as e:
-            log.warning("ticker_24h_map: %s", e)
-            return {}
-        out: dict[str, float] = {}
-        if not isinstance(data, list):
-            return out
-        for row in data:
-            if not isinstance(row, dict):
-                continue
-            sym = str(row.get("symbol") or "").upper()
-            if not sym.endswith("USDT"):
-                continue
-            try:
-                out[sym] = float(row.get("priceChangePercent") or 0)
-            except (TypeError, ValueError):
-                continue
-        return out
+        pct, _ = self._ticker_24h_bundle()
+        return pct
 
     def ticker_24h_volume_map(self) -> dict[str, float]:
-        try:
-            data = self._request("GET", "/fapi/v1/ticker/24hr", timeout=25.0)
-        except Exception as e:
-            log.warning("ticker_24h_volume_map: %s", e)
-            return {}
-        out: dict[str, float] = {}
-        if not isinstance(data, list):
-            return out
-        for row in data:
-            if not isinstance(row, dict):
-                continue
-            sym = str(row.get("symbol") or "").upper()
-            if not sym.endswith("USDT"):
-                continue
-            try:
-                out[sym] = float(row.get("quoteVolume") or row.get("volume") or 0)
-            except (TypeError, ValueError):
-                continue
-        return out
+        _, vol = self._ticker_24h_bundle()
+        return vol
 
     def funding_rate_map(self) -> dict[str, float]:
         try:
@@ -3474,6 +3588,19 @@ class BinanceConnector:
         return out
 
     def list_usdt_perpetual_symbols(self) -> list[str]:
+        # Prefer cached specs — raw exchangeInfo every status/recovery pass burned weight.
+        try:
+            cache = self.load_all_symbol_specs(force=False)
+            if cache:
+                out = sorted(
+                    sym
+                    for sym, spec in cache.items()
+                    if str(sym).endswith("USDT") and str(spec.get("contractType") or "") == "PERPETUAL"
+                )
+                if len(out) >= 50:
+                    return out
+        except Exception as e:
+            log.debug("list_usdt from specs cache: %s", e)
         data = self._request("GET", "/fapi/v1/exchangeInfo", timeout=45.0)
         out: list[str] = []
         for s in data.get("symbols", []):

@@ -56,8 +56,10 @@ HEDGE_RESCUE_BUFFER_PCT = 1.0
 MAX_HOLD_BARS_1M = 24 * 60  # ~24h on 1m
 # Research override for a USD pair stop (None = off). Live uses PAIR_TIME instead.
 HEDGED_PAIR_STOP_USD: float | None = None
-# Live frozen: PAIR_TIME after hedge episode (ms → 1m bars). Override to None to disable.
-HEDGED_MAX_HOLD_MIN: int | None = max(1, int(HEDGED_MAX_HOLD_MS // 60_000))
+# Live frozen: PAIR_TIME after hedge episode (ms → 1m bars). 0 / None = disabled (Sep desk).
+HEDGED_MAX_HOLD_MIN: int | None = (
+    None if int(HEDGED_MAX_HOLD_MS) <= 0 else max(1, int(HEDGED_MAX_HOLD_MS // 60_000))
+)
 DEFAULT_INTERVAL = "1m"
 
 
@@ -718,11 +720,23 @@ def main() -> int:
             block["summary"].pop("equity_curve", None)
         result = {
             "strategy": contract["strategy_id"],
+            "strategy_variant": contract.get("strategy_variant"),
+            "knobs": {
+                "gain_pct": GAIN_THRESHOLD_PCT,
+                "retrace_pct": RETRACE_ENTRY_PCT,
+                "hedged_max_hold_min": HEDGED_MAX_HOLD_MIN,
+                "partition_usd": float(args.partition),
+                "equity_usd": float(args.equity),
+            },
             "data": f"binance USD-M public {DEFAULT_INTERVAL} klines (no synthetic fills, no random)",
             "method": {
-                "entry": "rolling 15m% = close vs close 15x1m ago (live _rolling_pcts); latch on high-print >=5%; enter on close retrace 0.7-12 with live hot",
+                "entry": (
+                    f"rolling 15m% = close vs close 15x1m ago (live _rolling_pcts); "
+                    f"latch on high-print >={GAIN_THRESHOLD_PCT}%; "
+                    f"enter on close retrace {RETRACE_ENTRY_PCT}-{MAX_RETRACE} with live hot"
+                ),
                 "manage": "1m close mark; H/L prove touch; same-bar conflict = adverse-first",
-                "universe": "fixed liquid set + live $10M floor (no today-top look-ahead ranking)",
+                "universe": "top-N liquid by 24h quote vol + live $10M floor" if args.top > 0 else "fixed liquid set + live $10M floor",
                 "costs": "taker fee + slip on each leg",
                 "not": "no invented wick path, no random fills, no refit on forward window",
             },

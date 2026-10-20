@@ -4,15 +4,14 @@ Frozen short-first strategy contract — do not change without an explicit produ
 This module is a regression lock. It does NOT alter trading behavior; it verifies that
 the live modules still match the working contract:
 
-  Entry: 15m ≥5% gain + ≥5% retrace from the pump peak → SHORT (50% partition, 5x)
-    (Oct 12 operator-ordered testnet trial; was 0.7% — see strategy_variant_research.py)
+  Entry: 15m ≥5% gain + ≥0.7% retrace from the pump peak → SHORT (50% partition, 5x)
+    (operator-ordered Oct 16: restore Sep 23–25 entry economics; Oct 12 r5/5%+24h PAIR_TIME trial ended)
   +2% adverse from short → Long 1 BUY (40%, 10x)
   +4% adverse from short → Long 2 BUY (40%, 10x)
   While short underwater: hedges stay paired (no solo TP / 0.5% trail)
   Rescue: long PnL ≥ short loss + buffer → flatten all
   Invalidation: ≥6.5% adverse from short entry → flatten all
-  PAIR_TIME: hedge episode still open 24h after short entry → flatten all
-    (net-long hedged pair has no downside exit; without this it sits open for weeks)
+  PAIR_TIME: disabled (HEDGED_MAX_HOLD_MS=0) — Sep desk had no 24h hedge flatten
   Short TP −2.5%; never leave orphan longs without the primary short
   Hedged SHORT_TP / SHORT_PULLBACK flatten only when episode net clears exit costs
   (defer net-red hedged hard-TP — wait RESCUE / INVALIDATION / SMART_EXIT)
@@ -34,7 +33,7 @@ from typing import Any
 
 STRATEGY_ID = "short_first_v1"
 STRATEGY_NAME = "Short → Long 1 → Long 2"
-STRATEGY_VARIANT = "r5_pairtime24h"
+STRATEGY_VARIANT = "sep_retrace07"
 
 # Canonical knobs — must match module defaults (env may raise floors, not invert direction).
 PRIMARY_LEG = "SHORT"
@@ -52,7 +51,7 @@ RECOVERY_PARTITION_PCT = 40.0
 RECOVERY_LEVERAGE = 10
 
 GAIN_THRESHOLD_PCT = 5.0
-RETRACE_ENTRY_PCT = 5.0
+RETRACE_ENTRY_PCT = 0.7
 LONG1_ADVERSE_PCT = 2.0
 LONG2_ADVERSE_PCT = 4.0
 SHORT_TP_PCT = 2.5
@@ -61,7 +60,8 @@ LONG_HEDGE_PULLBACK_PCT = 0.5
 SHORT_TRAIL_PULLBACK_FLOOR_PCT = 1.5
 PAIR_INVALIDATION_PCT = 6.5
 HEDGE_RESCUE_BUFFER_PCT = 1.0
-HEDGED_MAX_HOLD_MS = 24 * 3_600_000
+# 0 = disabled (Sep desk). Code path retained; _hedged_hold_expired returns False when ≤0.
+HEDGED_MAX_HOLD_MS = 0
 
 # Locked exit/ops discipline (profitable Sep 23–25 baseline) — do not weaken.
 SMART_EXIT_NET_PCT = 6.0

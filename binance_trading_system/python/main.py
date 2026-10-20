@@ -288,8 +288,17 @@ async def lifespan(app: FastAPI):
     await tick_stream.start()
 
     async def _seed_scanner_history() -> None:
-        await asyncio.sleep(2.0)
+        # Wait for weight from exchangeInfo/account boot to settle before kline fan-out.
+        await asyncio.sleep(8.0)
         try:
+            if connector.rest_cooling_left() > 0.5:
+                log.warning("scanner history seed deferred — REST cool")
+                return
+            pause = getattr(connector, "_weight_pause_left", None)
+            weight_left = float(pause() or 0.0) if callable(pause) else 0.0
+            if weight_left > 0.05:
+                log.warning("scanner history seed deferred — weight cool %.0fs", weight_left)
+                return
             n = await asyncio.to_thread(momentum_scanner.seed_history_from_klines)
             log.info("scanner history seed complete (%s)", n)
             _flush_scanner_snapshot()
@@ -337,9 +346,16 @@ async def lifespan(app: FastAPI):
             log.warning("initial 24h refresh: %s", e)
         while True:
             try:
-                await asyncio.sleep(45.0)
+                # Idle market-stats refresh: 45s × 2×ticker/24hr + premiumIndex burned weight.
+                await asyncio.sleep(120.0)
+                if connector.rest_cooling_left() > 0.5:
+                    continue
+                pause = getattr(connector, "_weight_pause_left", None)
+                weight_left = float(pause() or 0.0) if callable(pause) else 0.0
+                if weight_left > 0.05 or float(getattr(connector, "used_weight_1m", lambda: 0.0)() or 0.0) >= 1700.0:
+                    continue
                 tracked = int((momentum_scanner.status() or {}).get("symbols_tracked") or 0)
-                if tracked < 50 and connector.rest_cooling_left() <= 0.5:
+                if tracked < 50:
                     try:
                         syms = await asyncio.to_thread(connector.list_usdt_perpetual_symbols)
                         if len(syms) >= 50:

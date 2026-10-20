@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -205,13 +206,16 @@ def test_short_gone_defers_when_confirm_unavailable() -> None:
             return 5.0
 
         def exchange_short_qty(self, symbol, max_age_s=1.5):
-            return 0.0  # first sample looks flat
+            return 0.0  # sticky empty — must NOT alone cause SHORT_GONE
 
         def exchange_long_qty(self, symbol, max_age_s=1.5):
             return 0.0
 
         def confirmed_positions(self, *a, **k):
             raise PositionsUnavailable("REST cooling (429) — positions unconfirmed")
+
+        def positions(self, symbol=None, force=False, bypass_rest_cool=False):
+            raise PositionsUnavailable("REST cooling (weight) — positions unconfirmed")
 
     sc = MomentumScanner(Conn(), lambda: True)  # type: ignore[arg-type]
     coin = CoinStrategy(symbol="RLCUSDT")
@@ -222,6 +226,62 @@ def test_short_gone_defers_when_confirm_unavailable() -> None:
     assert kept is True
     assert coin.short is not None, "must not SHORT_GONE on unavailable confirm"
     print("OK SHORT_GONE defers when confirm unavailable")
+
+
+def test_sticky_empty_force_confirm_keeps_short() -> None:
+    """Fill-then-empty-sticky must not SHORT_GONE when bypass confirm still sees short."""
+    from binance_connector import PositionsUnavailable
+    from momentum_scanner import LegPosition, STATUS_SHORT
+
+    class Conn:
+        cfg = SimpleNamespace(paper=False, api_key="k")
+        snaps: list = []
+
+        def rest_cooling_left(self):
+            return 0.0
+
+        def exchange_short_qty(self, symbol, max_age_s=1.5):
+            return 0.0
+
+        def exchange_long_qty(self, symbol, max_age_s=1.5):
+            return 0.0
+
+        def positions(self, symbol=None, force=False, bypass_rest_cool=False):
+            assert force and bypass_rest_cool, "SHORT_GONE confirm must bypass cool"
+            return [
+                {
+                    "symbol": "PHAUSDT",
+                    "volume": 3914.0,
+                    "positionSide": "SHORT",
+                    "type": "SELL",
+                    "price_open": 0.06,
+                }
+            ]
+
+        def apply_symbol_positions_snapshot(self, symbol, legs):
+            self.snaps.append((symbol, list(legs or [])))
+
+    sc = MomentumScanner(Conn(), lambda: True)  # type: ignore[arg-type]
+    coin = CoinStrategy(symbol="PHAUSDT")
+    coin.short = LegPosition("SELL", 0.06, 3914.0, 5, 88001, 0.058)
+    coin.status = STATUS_SHORT
+    sc._coins["PHAUSDT"] = coin
+    kept = sc._ensure_pair_coherence(coin)
+    assert kept is True
+    assert coin.short is not None
+    assert sc._connector.snaps, "must refresh sticky after force confirm"
+    print("OK sticky-empty SHORT_GONE deferred when bypass confirm still short")
+
+
+def test_remote_closed_is_retryable() -> None:
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    parsed = c._parse_order_error(RuntimeError("Remote end closed connection without response"))
+    assert parsed["retryable"] is True, parsed
+    parsed2 = c._parse_order_error(RuntimeError("Connection reset by peer"))
+    assert parsed2["retryable"] is True, parsed2
+    print("OK connection drops are retryable")
 
 
 def test_confirmed_positions_trusts_last_good_during_cool() -> None:
@@ -400,16 +460,18 @@ def test_pair_time_flattens_stale_hedge_episode() -> None:
     coin = CoinStrategy(symbol="AKEUSDT")
     coin.short = SimpleNamespace(qty=1.0, entry=1.0, side="SELL")
     now = int(_t.time() * 1000)
-    coin.short_opened_ms = now - ms.HEDGED_MAX_HOLD_MS - 1000
+    # Sep restore: PAIR_TIME disabled (HEDGED_MAX_HOLD_MS=0) — never time-stops.
+    assert ms.HEDGED_MAX_HOLD_MS == 0
+    coin.short_opened_ms = now - 48 * 3_600_000
     coin.short_adverse_peak_pct = 0.5
-    assert not sc._hedged_hold_expired(coin), "naked short (no episode) is never time-stopped"
+    assert not sc._hedged_hold_expired(coin), "naked short is never time-stopped"
     coin.short_adverse_peak_pct = 2.5
-    assert sc._hedged_hold_expired(coin), "hedge episode past 24h must flatten"
-    coin.short_opened_ms = now - 3_600_000
-    assert not sc._hedged_hold_expired(coin)
+    assert not sc._hedged_hold_expired(coin), "Sep desk: PAIR_TIME off even for hedge episodes"
     assert sc._cooldown_ms_for_reason("PAIR_TIME") >= ms.EPISODE_COOLDOWN_MS
-    assert ms.RETRACE_ENTRY_PCT == 5.0
-    print("OK PAIR_TIME: 24h hedge episode flatten; naked short untouched; retrace 5%")
+    assert abs(ms.RETRACE_ENTRY_PCT - 0.7) < 1e-9
+    # Code path retained for optional trials (env SCANNER_HEDGED_MAX_HOLD_MS>0).
+    assert '_close_all(coin, "PAIR_TIME", force=True)' in inspect.getsource(MomentumScanner._manage_positions)
+    print("OK Sep entry: retrace 0.7%; PAIR_TIME disabled; code path retained")
 
 
 def test_418_ban_honored_everywhere() -> None:
@@ -478,12 +540,20 @@ def test_weight_soft_limit_pauses_market_data_only() -> None:
     except RuntimeError:
         raised = True
     assert raised, "unsigned market data paused near 2400/min"
-    c._raise_if_weight_cooling(True)
-    assert c.rest_cooling_left() == 0.0, "soft limit must not cool signed calls"
+    # Soft: signed GETs pause (idle positionRisk/userTrades), order mutations still allowed.
+    raised_signed_get = False
+    try:
+        c._raise_if_weight_cooling(True, method="GET", path="/fapi/v2/positionRisk")
+    except RuntimeError:
+        raised_signed_get = True
+    assert raised_signed_get, "soft weight must pause discretionary signed GETs"
+    c._raise_if_weight_cooling(True, method="POST", path="/fapi/v1/order")
+    assert c.rest_cooling_left() == 0.0, "soft limit must not engage full REST cool"
     c._note_rest_success("2300", signed=True)
-    assert c.rest_cooling_left() > 0, "hard limit cools signed non-close traffic"
+    assert c.rest_cooling_left() == 0.0, "hard weight must not engage rest-cool stampede"
+    assert c._weight_pause_left() > 0.0, "hard weight still pauses via weight cool/hot minute"
     assert c.rest_ban_left() == 0.0
-    print("OK used-weight soft limit pauses market data; hard limit cools signed (closes bypass)")
+    print("OK used-weight soft/hard pause signed GETs; no rest-cool stampede")
 
 
 def test_positions_single_flight_and_order_invalidation() -> None:
@@ -533,6 +603,8 @@ if __name__ == "__main__":
     test_frozen_contract_includes_permanent_locks()
     test_exchange_positions_never_empty_on_unavailable()
     test_short_gone_defers_when_confirm_unavailable()
+    test_sticky_empty_force_confirm_keeps_short()
+    test_remote_closed_is_retryable()
     test_confirmed_positions_trusts_last_good_during_cool()
     test_close_by_side_never_ok_with_residual()
     test_mandatory_exits_force_through_backoff()

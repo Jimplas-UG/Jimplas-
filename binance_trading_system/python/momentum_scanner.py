@@ -39,7 +39,7 @@ from strategy_guards import (
 log = logging.getLogger("momentum_scanner")
 
 GAIN_THRESHOLD_PCT = float(os.environ.get("SCANNER_GAIN_PCT", "5.0"))
-RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_RETRACE_PCT", "5.0"))
+RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_RETRACE_PCT", "0.7"))
 # Live 15m must still be hot at entry — blocks stale latched pumps (e.g. 15m already -16%).
 MIN_LIVE_ENTRY_PCT = float(os.environ.get("SCANNER_MIN_LIVE_ENTRY_PCT", "2.0"))
 # Reject end-of-pump entries: live 15m must keep at least this fraction of latched peak gain.
@@ -54,6 +54,8 @@ EPISODE_COOLDOWN_MS = max(600_000, int(os.environ.get("SCANNER_EPISODE_COOLDOWN_
 MIN_QUOTE_VOL_24H = max(10_000_000.0, float(os.environ.get("SCANNER_MIN_QUOTE_VOL_24H", "10000000")))
 # Reconcile less often — 5s force REST was a live 429 source.
 RECONCILE_INTERVAL_MS = max(12_000, int(os.environ.get("SCANNER_RECONCILE_MS", "12000")))
+# Flat/idle: force positionRisk every 12s burned ~230 weight × 5/min → soft limit → 418.
+RECONCILE_IDLE_MS = max(60_000, int(os.environ.get("SCANNER_RECONCILE_IDLE_MS", "90000")))
 # Do not short after the move is largely over (chasing a dump from peak).
 MAX_RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_MAX_RETRACE_ENTRY_PCT", "12.0"))
 SHORT_TP_PCT = float(os.environ.get("SCANNER_SHORT_TP_PCT", "2.5"))
@@ -69,7 +71,8 @@ LONG_BOTH_PULLBACK_PCT = LONG_HEDGE_PULLBACK_PCT
 # Paired rescue: close all when hedge profit covers short loss + this % of partition.
 HEDGE_RESCUE_BUFFER_PCT = max(0.0, float(os.environ.get("SCANNER_RESCUE_BUFFER_PCT", "1.0")))
 # Hedged pair is net long ($800 vs $250): a fade after L1/L2 has no other exit.
-HEDGED_MAX_HOLD_MS = int(os.environ.get("SCANNER_HEDGED_MAX_HOLD_MS", str(24 * 3_600_000)))
+# Default 0 = Sep desk (no 24h PAIR_TIME). Set env >0 only for explicit trials.
+HEDGED_MAX_HOLD_MS = int(os.environ.get("SCANNER_HEDGED_MAX_HOLD_MS", "0"))
 # Hard pair invalidation from short entry (circuit breaker after failed fade).
 PAIR_INVALIDATION_PCT = max(3.0, float(os.environ.get("SCANNER_INVALIDATION_PCT", "6.5")))
 # Primary short trail — bounce off the trough, only after a profitable MFE.
@@ -330,6 +333,20 @@ class MomentumScanner:
                     )
             return out
 
+    def _is_flat_for_reconcile(self) -> bool:
+        """True when scanner and sticky book show no open legs — slow idle REST."""
+        for coin in self._coins.values():
+            if getattr(coin, "short", None) or getattr(coin, "long1", None) or getattr(coin, "long2", None):
+                return False
+        try:
+            rows = getattr(self._connector, "cached_positions", lambda: [])() or []
+            for p in rows:
+                if float(p.get("volume") or 0) > 1e-12:
+                    return False
+        except Exception:
+            pass
+        return True
+
     def _cached_short_symbols(self) -> set[str]:
         """Symbols with a live short from the cached positions snapshot.
 
@@ -392,6 +409,89 @@ class MomentumScanner:
                 if vol > 1e-12:
                     return p
         return None
+
+    def _force_confirm_short_open(self, symbol: str) -> tuple[bool, bool]:
+        """Bypass cool/weight and force a signed book read for SHORT_GONE decisions.
+
+        Returns (still_has_short, confirmed). confirmed=False means book unreadable — defer.
+        """
+        from binance_connector import PositionsUnavailable
+
+        sym = symbol.upper()
+        if getattr(self._connector.cfg, "paper", False):
+            coin = self._coins.get(sym)
+            return bool(coin and coin.short), True
+        try:
+            rows = self._connector.positions(sym, force=True, bypass_rest_cool=True) or []
+        except PositionsUnavailable:
+            return False, False
+        except Exception as e:
+            msg = str(e).lower()
+            if "cooling" in msg or "unconfirmed" in msg or "unavailable" in msg or "418" in msg or "429" in msg:
+                return False, False
+            log.warning("force confirm short %s: %s", sym, e)
+            return False, False
+        still = False
+        for p in rows:
+            pos_side = str(p.get("positionSide") or "").upper()
+            side = str(p.get("type") or p.get("side") or "").upper()
+            if pos_side == "LONG":
+                continue
+            if (side == "SELL" or pos_side == "SHORT") and float(p.get("volume") or 0) > 1e-12:
+                still = True
+                break
+        # Refresh sticky so the next tick does not re-enter false SHORT_GONE on empty cache.
+        try:
+            apply = getattr(self._connector, "apply_symbol_positions_snapshot", None)
+            if callable(apply):
+                apply(sym, list(rows))
+        except Exception:
+            pass
+        return still, True
+
+    def _snapshot_symbol_legs_to_sticky(self, coin: CoinStrategy) -> None:
+        """After fills: write scanner legs into sticky book — prevents weight-cool empty → SHORT_GONE."""
+        apply = getattr(self._connector, "apply_symbol_positions_snapshot", None)
+        if not callable(apply):
+            return
+        sym = coin.symbol.upper()
+        legs: list[dict[str, Any]] = []
+        if coin.short:
+            legs.append(
+                {
+                    "symbol": sym,
+                    "volume": float(coin.short.qty or 0),
+                    "positionSide": "SHORT",
+                    "type": "SELL",
+                    "leg": "SHORT",
+                    "price_open": float(coin.short.entry or 0),
+                    "leverage": int(coin.short.leverage or SHORT_LEVERAGE),
+                    "exchange_leverage": int(coin.short.leverage or SHORT_LEVERAGE),
+                    "profit": 0.0,
+                    "magic": int(coin.short.magic or MAGIC_SHORT),
+                }
+            )
+        for leg, label in ((coin.long1, "LONG1"), (coin.long2, "LONG2")):
+            if not leg:
+                continue
+            legs.append(
+                {
+                    "symbol": sym,
+                    "volume": float(leg.qty or 0),
+                    "positionSide": "LONG",
+                    "type": "BUY",
+                    "leg": label,
+                    "price_open": float(leg.entry or 0),
+                    "leverage": int(leg.leverage or LONG1_LEVERAGE),
+                    "exchange_leverage": int(leg.leverage or LONG1_LEVERAGE),
+                    "profit": 0.0,
+                    "magic": int(leg.magic or 0),
+                }
+            )
+        try:
+            apply(sym, legs)
+        except Exception as e:
+            log.debug("sticky snapshot %s: %s", sym, e)
 
     def _exchange_has_short(self, symbol: str) -> bool:
         if getattr(self._connector.cfg, "paper", False):
@@ -1292,6 +1392,7 @@ class MomentumScanner:
             for x in (
                 "ORPHAN",
                 "SHORT_GONE",
+                "NAKED_LEVERAGE_LOCK",
                 "RESCUE",
                 "PAIR_FLATTEN",
                 "PAIR_TIME",
@@ -1737,38 +1838,17 @@ class MomentumScanner:
                 raise
 
         if coin.short and not has_short:
-            # Double-confirm empty short — a single stale/cool empty read must not SHORT_GONE.
-            # Execution forensic: false SHORT_GONE → orphan chase / capital lock thrash.
-            try:
-                confirm_fn = getattr(self._connector, "confirmed_positions", None)
-                if callable(confirm_fn):
-                    # Force a second sample (bypass cool only if we already saw empty qty).
-                    rows = confirm_fn(sym, max_age_s=0.0)
-                    still_short = False
-                    for p in rows:
-                        pos_side = str(p.get("positionSide") or "").upper()
-                        side = str(p.get("type") or p.get("side") or "").upper()
-                        if pos_side == "LONG":
-                            continue
-                        if (side == "SELL" or pos_side == "SHORT") and float(p.get("volume") or 0) > 1e-12:
-                            still_short = True
-                            break
-                    if still_short:
-                        log.warning(
-                            "scanner %s SHORT_GONE deferred — second sample still shows short",
-                            sym,
-                        )
-                        return True
-            except Exception as e:
-                from binance_connector import PositionsUnavailable
-
-                if isinstance(e, PositionsUnavailable) or "REST cooling" in str(e) or "unconfirmed" in str(e).lower():
-                    log.warning("scanner %s SHORT_GONE deferred — confirm unavailable: %s", sym, e)
-                    return True
-                log.warning("scanner %s SHORT_GONE confirm error: %s — defer", sym, e)
+            # Permanent lock: sticky-empty / weight-pause is NOT proof the short is gone.
+            # Oct20 PHA/AIN: fill OK → empty last_good → false SHORT_GONE → close storm.
+            still_short, confirmed = self._force_confirm_short_open(sym)
+            if not confirmed:
+                log.warning("scanner %s SHORT_GONE deferred — force confirm unavailable", sym)
+                return True
+            if still_short:
+                log.warning("scanner %s SHORT_GONE deferred — bypass confirm still shows short", sym)
                 return True
             log.info("scanner %s short closed on exchange — flattening full pair", sym)
-            self._close_all(coin, "SHORT_GONE_EXCHANGE")
+            self._close_all(coin, "SHORT_GONE_EXCHANGE", force=True)
             return False
 
         # Never leave orphan longs without the primary short — even in independent_legs_mode.
@@ -1778,15 +1858,27 @@ class MomentumScanner:
                 cool_left = float(getattr(self._connector, "rest_cooling_left", lambda: 0.0)() or 0.0)
             except Exception:
                 cool_left = 0.0
-            if cool_left > 0.05:
+            weight_left = 0.0
+            try:
+                pause = getattr(self._connector, "_weight_pause_left", None)
+                weight_left = float(pause() or 0.0) if callable(pause) else 0.0
+            except Exception:
+                weight_left = 0.0
+            if cool_left > 0.05 or weight_left > 0.05:
                 log.warning(
-                    "scanner %s ORPHAN_RECOVERY deferred — REST cool %.0fs",
+                    "scanner %s ORPHAN_RECOVERY deferred — cool/weight pause",
                     sym,
-                    cool_left,
                 )
                 return bool(coin.short or coin.long1 or coin.long2 or has_long)
+            # Force-confirm short absence before orphan chase.
+            still_short, confirmed = self._force_confirm_short_open(sym)
+            if not confirmed:
+                log.warning("scanner %s ORPHAN_RECOVERY deferred — confirm unavailable", sym)
+                return bool(coin.short or coin.long1 or coin.long2 or has_long)
+            if still_short:
+                return True
             log.warning("scanner %s recovery/orphan long without short — flattening full pair", sym)
-            self._close_all(coin, "ORPHAN_RECOVERY")
+            self._close_all(coin, "ORPHAN_RECOVERY", force=True)
             return False
 
         # Phantom Long 1 / Long 2 in memory after the shared LONG side was flattened.
@@ -2346,6 +2438,7 @@ class MomentumScanner:
             "invalidation_cooldown_s": INVALIDATION_COOLDOWN_MS // 1000,
             "episode_cooldown_s": EPISODE_COOLDOWN_MS // 1000,
             "reconcile_interval_ms": RECONCILE_INTERVAL_MS,
+            "reconcile_idle_ms": RECONCILE_IDLE_MS,
         }
 
     def load_symbols(self, symbols: list[str]) -> None:
@@ -2385,13 +2478,29 @@ class MomentumScanner:
         now_ms = int(ts_ms or time.time() * 1000)
         # Periodic exchange sync — catches orphan shorts outside scanner state.
         # Skip while REST-cool: force reads are unavailable and were inventing orphans.
+        # Idle flat books use a much slower interval — 12s force spam caused IP bans alone.
         if not getattr(self._connector.cfg, "paper", False):
             cool_left = 0.0
             try:
                 cool_left = float(getattr(self._connector, "rest_cooling_left", lambda: 0.0)() or 0.0)
             except Exception:
                 cool_left = 0.0
-            if cool_left <= 0.25 and now_ms - self._last_reconcile_ms >= max(3000, RECONCILE_INTERVAL_MS):
+            weight_left = 0.0
+            try:
+                pause = getattr(self._connector, "_weight_pause_left", None)
+                if callable(pause):
+                    weight_left = float(pause() or 0.0)
+                else:
+                    until = float(getattr(self._connector, "_weight_cool_until", 0.0) or 0.0)
+                    weight_left = max(0.0, until - time.monotonic())
+            except Exception:
+                weight_left = 0.0
+            interval_ms = RECONCILE_IDLE_MS if self._is_flat_for_reconcile() else RECONCILE_INTERVAL_MS
+            if (
+                cool_left <= 0.25
+                and weight_left <= 0.05
+                and now_ms - self._last_reconcile_ms >= max(3000, interval_ms)
+            ):
                 self._last_reconcile_ms = now_ms
                 try:
                     self.reconcile_from_exchange()
@@ -2585,9 +2694,30 @@ class MomentumScanner:
                 score += 0.1
             scored.append((score, sym))
         scored.sort(reverse=True)
-        pick = [s for _, s in scored[: min(60, len(scored))]]
+        # Hard cap — 60×klines on boot alone pushed used-weight past 5000 → 418.
+        pick = [s for _, s in scored[: min(12, len(scored))]]
         seeded = 0
         for sym in pick:
+            weight_left = 0.0
+            try:
+                pause = getattr(self._connector, "_weight_pause_left", None)
+                if callable(pause):
+                    weight_left = float(pause() or 0.0)
+            except Exception:
+                weight_left = 0.0
+            used = 0.0
+            try:
+                used = float(getattr(self._connector, "used_weight_1m", lambda: 0.0)() or 0.0)
+            except Exception:
+                used = 0.0
+            if weight_left > 0.05 or used >= 1700.0:
+                log.warning(
+                    "scanner history seed aborted after %s (weight_left=%.0f used=%.0f)",
+                    seeded,
+                    weight_left,
+                    used,
+                )
+                break
             coin = self._coins.get(sym)
             if not coin:
                 continue
@@ -2598,6 +2728,7 @@ class MomentumScanner:
             except Exception as e:
                 log.debug("seed klines %s: %s", sym, e)
                 continue
+            time.sleep(0.12)
             if not bars:
                 continue
             now_ms = int(time.time() * 1000)
@@ -2825,6 +2956,13 @@ class MomentumScanner:
                 return
             coin.submitted_entry_signal_id = signal_id
             coin.entry_submit_ms = int(time.time() * 1000)
+            # Permanent: naked short must be 5x BEFORE the order. Binance cannot reduce later.
+            if hasattr(self._connector, "ensure_exchange_leverage"):
+                if not self._connector.ensure_exchange_leverage(sym, SHORT_LEVERAGE):
+                    self._last_exec_error = f"{sym}: leverage_5x_prepare_failed"
+                    log.warning("scanner SHORT aborted %s — could not prepare exchange 5x", sym)
+                    coin.status = STATUS_PENDING
+                    return
             signal = ExecutionSignal(
                 symbol=sym,
                 side="SELL",
@@ -2863,8 +3001,7 @@ class MomentumScanner:
                 coin.long1_peak_price = None
                 coin.long2_peak_price = None
                 self._mark_short_opened(coin, sym)
-                if hasattr(self._connector, "ensure_exchange_leverage"):
-                    self._connector.ensure_exchange_leverage(sym, SHORT_LEVERAGE)
+                self._snapshot_symbol_legs_to_sticky(coin)
                 self._last_exec_error = None
                 self._emit_signal(coin, "entered")
                 log.info("scanner SHORT %s qty=%s @ %s order=%s latency_ms=%s", sym, fill_qty, fill, r.order_id, r.latency_ms)
@@ -2905,6 +3042,9 @@ class MomentumScanner:
                 return
             coin.submitted_long1_signal_id = signal_id
             coin.long1_submit_ms = int(time.time() * 1000)
+            # Raise to 10x only immediately before LONG1 (increase OK with open short).
+            if hasattr(self._connector, "ensure_exchange_leverage"):
+                self._connector.ensure_exchange_leverage(sym, LONG1_LEVERAGE)
             signal = ExecutionSignal(
                 symbol=sym,
                 side="BUY",
@@ -2930,8 +3070,7 @@ class MomentumScanner:
                 coin.status = STATUS_LONG1
                 coin.long1_peak_price = fill
                 self._mark_long1_opened(coin, sym)
-                if hasattr(self._connector, "ensure_exchange_leverage"):
-                    self._connector.ensure_exchange_leverage(sym, LONG1_LEVERAGE)
+                self._snapshot_symbol_legs_to_sticky(coin)
                 self._last_exec_error = None
                 self._emit_signal(coin, "long1_entered")
                 log.info("scanner LONG1 %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
@@ -2968,6 +3107,8 @@ class MomentumScanner:
                 return
             coin.submitted_long2_signal_id = signal_id
             coin.long2_submit_ms = int(time.time() * 1000)
+            if hasattr(self._connector, "ensure_exchange_leverage"):
+                self._connector.ensure_exchange_leverage(sym, LONG2_LEVERAGE)
             signal = ExecutionSignal(
                 symbol=sym,
                 side="BUY",
@@ -2993,8 +3134,7 @@ class MomentumScanner:
                 coin.long2_peak_price = fill
                 coin.status = STATUS_LONG2
                 self._mark_long2_opened(coin)
-                if hasattr(self._connector, "ensure_exchange_leverage"):
-                    self._connector.ensure_exchange_leverage(sym, LONG2_LEVERAGE)
+                self._snapshot_symbol_legs_to_sticky(coin)
                 self._last_exec_error = None
                 self._emit_signal(coin, "long2_entered")
                 log.info("scanner LONG2 %s qty=%s @ %s order=%s latency_ms=%s", sym, qty, fill, r.order_id, r.latency_ms)
@@ -3047,6 +3187,18 @@ class MomentumScanner:
                 # never *request* 10x on a naked short.)
                 target = symbol_exchange_leverage(has_recovery_long=has_long)
                 self._connector.ensure_exchange_leverage(sym, target)
+                # Permanent: naked short stuck at 10x (Binance refuses reduce) → flatten.
+                # Detect via connector reduce_blocked cache set by ensure_exchange_leverage.
+                if coin.short and not has_long and not close_blocked and target <= SHORT_LEVERAGE:
+                    fail_cache = getattr(self._connector, "_leverage_fail_cache", None) or {}
+                    blocked_at = float(fail_cache.get((sym, "reduce_blocked")) or 0.0)
+                    if blocked_at > 0 and (time.time() - blocked_at) < 300.0:
+                        log.error(
+                            "scanner %s NAKED_LEVERAGE_LOCK — exchange refuses 5x with open naked short; flattening",
+                            sym,
+                        )
+                        self._close_all(coin, "NAKED_LEVERAGE_LOCK", force=True)
+                        return
 
         price = coin.price
         if not coin.short and not coin.long1 and not coin.long2:
@@ -3561,7 +3713,8 @@ class MomentumScanner:
                 close_result = {"ok": all_ok, "closed": closed_legs, "broker": "binance"}
             else:
                 try:
-                    live = self._connector.positions(sym, force=True)
+                    # Permanent: closes must bypass weight/rest cool — never invent flat or stall exits.
+                    live = self._connector.positions(sym, force=True, bypass_rest_cool=True)
                 except Exception as e:
                     # 429/cool must NOT become already_flat (resets state while legs live).
                     log.warning("scanner close %s deferred — positions unavailable: %s", sym, e)
