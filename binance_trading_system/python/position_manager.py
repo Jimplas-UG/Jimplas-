@@ -1,10 +1,15 @@
 """
-Post-fill position manager — breakeven + trailing (tick-based).
+Post-fill position manager — legacy pip BE + trailing.
+
+Sep premium desk: short_first_v1 owns exits (TP / pullback / rescue / invalidation /
+SMART_EXIT). The old 2s REST bookTicker loop was the #1 FRA weight burner and fed
+the Oct 418 → false SHORT_GONE storm. Default is idle unless explicitly enabled.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import TYPE_CHECKING
 
@@ -14,20 +19,33 @@ if TYPE_CHECKING:
 log = logging.getLogger("position_manager")
 
 
+def _env_enabled(name: str, default: str = "0") -> bool:
+    return str(os.environ.get(name, default) or default).strip().lower() in ("1", "true", "yes", "on")
+
+
 class PositionManager:
-    def __init__(self, connector: BinanceConnector, interval_sec: float = 2.0):
+    def __init__(self, connector: BinanceConnector, interval_sec: float = 15.0):
         self.connector = connector
-        self.interval_sec = interval_sec
+        # Was 2.0s — too hot for futures IP weight. Floor 15s even if enabled.
+        self.interval_sec = max(15.0, float(interval_sec))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._be_applied: set[str] = set()
+        self.enabled = _env_enabled("POSITION_MANAGER_ENABLED", "0")
 
     def start(self) -> None:
+        if not self.enabled:
+            log.info(
+                "position_manager idle — short_first owns exits "
+                "(set POSITION_MANAGER_ENABLED=1 only for legacy pip BE/trail)"
+            )
+            return
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+        log.warning("position_manager ENABLED interval=%.0fs — burns REST if WS missing", self.interval_sec)
 
     def stop(self) -> None:
         self._stop.set()
@@ -41,25 +59,37 @@ class PositionManager:
             self._stop.wait(self.interval_sec)
 
     def _tick(self) -> None:
+        if not self.enabled:
+            return
         if self.connector.cfg.paper:
             return
-        if getattr(self.connector, "rest_cooling_left", lambda: 0.0)() > 0:
+        # Never compete with scanner / cool for IP weight.
+        if getattr(self.connector, "rest_cooling_left", lambda: 0.0)() > 0.05:
             return
-        positions = self.connector.positions()
+        pause = getattr(self.connector, "_weight_pause_left", None)
+        if callable(pause) and float(pause() or 0.0) > 0.05:
+            return
+        # Cache-only book — never force REST.
+        positions = self.connector.positions(force=False)
         if not positions:
             self._be_applied.clear()
-            return
-        tick_data = self.connector.tick()
-        if not tick_data:
             return
         cfg = self.connector.cfg
         strategy_tick = cfg.pip_size
         for p in positions:
-            sym = str(p.get("symbol", ""))
+            sym = str(p.get("symbol", "") or "").upper()
+            if not sym:
+                continue
             side = p["type"]
             open_px = float(p["price_open"])
             vol = float(p["volume"])
-            price = tick_data["bid"] if side == "BUY" else tick_data["ask"]
+            # Prefer mark already on the position row / cached book — no fresh REST.
+            price = float(p.get("price_current") or p.get("markPrice") or 0)
+            if price <= 0:
+                tick_data = self.connector.tick(sym)
+                if not tick_data:
+                    continue
+                price = tick_data["bid"] if side == "BUY" else tick_data["ask"]
             profit_ticks = (
                 (price - open_px) / strategy_tick
                 if side == "BUY"

@@ -200,6 +200,8 @@ tick_stream = BinanceTickStream(
     get_testnet=lambda: connector.cfg.testnet,
     default_symbol=_DEFAULT_SYMBOL,
 )
+# Sep quiet-REST: book_ticker prefers WS cache — never 2s REST spam for mid.
+connector.set_tick_provider(lambda sym: tick_stream.get_tick(str(sym), max_age_sec=8.0))
 
 _scanner_payload: dict = {}
 _app_loop: asyncio.AbstractEventLoop | None = None
@@ -346,13 +348,13 @@ async def lifespan(app: FastAPI):
             log.warning("initial 24h refresh: %s", e)
         while True:
             try:
-                # Idle market-stats refresh: 45s × 2×ticker/24hr + premiumIndex burned weight.
-                await asyncio.sleep(120.0)
+                # Idle market-stats refresh: was 45s → weight storm. Sep premium: 180s + soft gate.
+                await asyncio.sleep(180.0)
                 if connector.rest_cooling_left() > 0.5:
                     continue
                 pause = getattr(connector, "_weight_pause_left", None)
                 weight_left = float(pause() or 0.0) if callable(pause) else 0.0
-                if weight_left > 0.05 or float(getattr(connector, "used_weight_1m", lambda: 0.0)() or 0.0) >= 1700.0:
+                if weight_left > 0.05 or float(getattr(connector, "used_weight_1m", lambda: 0.0)() or 0.0) >= 1400.0:
                     continue
                 tracked = int((momentum_scanner.status() or {}).get("symbols_tracked") or 0)
                 if tracked < 50:

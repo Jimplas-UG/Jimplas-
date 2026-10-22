@@ -581,12 +581,103 @@ def test_positions_single_flight_and_order_invalidation() -> None:
     print("OK positions single-flight; order POST invalidates shared book")
 
 
+def test_naked_10x_ensure_fails_closed() -> None:
+    """Stuck exchange 10x must not look like a successful 5x prepare (Oct 21 DOOD reopen)."""
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._exchange_leverage_or_none = lambda _s: 10  # type: ignore[method-assign]
+    c.positions = lambda *_a, **_k: [{"symbol": "DOODUSDT", "volume": 1.0}]  # type: ignore[method-assign]
+    assert c.ensure_exchange_leverage("DOODUSDT", 5) is False
+    c._prepared_cache[("DOODUSDT", 5, "ISOLATED")] = time.time()
+    assert c.ensure_exchange_leverage("DOODUSDT", 5) is False
+    assert (time.time() - float(c._leverage_fail_cache[("DOODUSDT", "reduce_blocked")])) < 5
+    print("OK naked 10x ensure fails closed (no false 5x success)")
+
+
+def test_local_weight_budget_stops_burst() -> None:
+    """Reserve full-book positionRisk cost before Binance answers, and stop at the soft cap."""
+    from binance_connector import REST_WEIGHT_SOFT_LIMIT, BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    raised_at = None
+    for i in range(1, 12):
+        try:
+            c._raise_if_weight_cooling(True, method="GET", path="/fapi/v2/positionRisk")
+        except RuntimeError:
+            raised_at = i
+            break
+    assert raised_at is not None, "budget never paused"
+    assert c._local_weight >= REST_WEIGHT_SOFT_LIMIT
+    assert c._weight_pause_left() > 0
+    c._raise_if_weight_cooling(True, method="POST", path="/fapi/v1/order")
+    print(f"OK local weight budget pauses on full-book read #{raised_at}")
+
+
+def test_sep_premium_quiet_rest_reins() -> None:
+    """Non-logic Sep edge: early weight pause, bookTicker WS/cache, pos_mgr idle, idle reconcile."""
+    import binance_connector as bc
+    from binance_connector import BinanceConnector, BinanceConfig
+    import momentum_scanner as ms
+    from position_manager import PositionManager
+
+    assert bc.REST_WEIGHT_SOFT_LIMIT <= 1600.0
+    assert bc.REST_WEIGHT_HARD_LIMIT <= 2100.0
+    assert bc.POSITIONS_SHARE_S >= 30.0
+    assert bc.POSITIONS_SHARE_FLAT_S >= 60.0
+    assert ms.RECONCILE_IDLE_MS >= 120_000
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    rest_calls = {"n": 0}
+
+    def fake_req(method, path, params=None, signed=False, timeout=8.0, base_url=None, *, bypass_rest_cool=False):
+        rest_calls["n"] += 1
+        if "bookTicker" in path:
+            return {"bidPrice": "1.0", "askPrice": "1.1"}
+        raise AssertionError(f"unexpected REST {path}")
+
+    c._request = fake_req  # type: ignore[assignment]
+    c.set_tick_provider(lambda _s: {"bid": 2.0, "ask": 2.1, "time": 1, "source": "ws"})
+    tick = c.book_ticker("BTCUSDT")
+    assert tick and tick["bid"] == 2.0 and tick.get("source") == "ws"
+    assert rest_calls["n"] == 0, "WS provider must skip REST bookTicker"
+
+    c.set_tick_provider(None)
+    c._book_ticker_cache.clear()
+    c._note_rest_success("1700", signed=False)
+    assert c._weight_pause_left() > 0
+    assert c.book_ticker("ETHUSDT") is None, "no cache + weight pause → no REST"
+    assert rest_calls["n"] == 0
+
+    # Seed cache, then pause — must serve stale without REST.
+    c._weight_cool_until = 0.0
+    c._used_weight_1m = 0.0
+    c._weight_hot_minute = -1
+    warmed = c.book_ticker("ETHUSDT")
+    assert warmed and rest_calls["n"] == 1
+    c._note_rest_success("1700", signed=False)
+    again = c.book_ticker("ETHUSDT")
+    assert again and again["bid"] == 1.0
+    assert rest_calls["n"] == 1, "weight pause must reuse cache"
+
+    pm = PositionManager(c)
+    assert pm.enabled is False
+    pm.start()  # must not spawn loop when disabled
+    assert pm._thread is None
+    main_src = Path(__file__).with_name("main.py").read_text(encoding="utf-8")
+    assert "set_tick_provider" in main_src
+    print("OK Sep premium quiet-REST reins (weight/bookTicker/pos_mgr/idle)")
+
+
 if __name__ == "__main__":
     test_pair_time_flattens_stale_hedge_episode()
     test_418_ban_honored_everywhere()
     test_418_ban_survives_restart_and_is_host_scoped()
     test_weight_soft_limit_pauses_market_data_only()
     test_positions_single_flight_and_order_invalidation()
+    test_naked_10x_ensure_fails_closed()
+    test_local_weight_budget_stops_burst()
+    test_sep_premium_quiet_rest_reins()
     test_no_rule_kernel_safe_mode()
     test_naked_short_never_10x()
     test_hedged_short_tp_net_red_gate()

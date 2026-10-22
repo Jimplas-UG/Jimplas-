@@ -55,7 +55,8 @@ MIN_QUOTE_VOL_24H = max(10_000_000.0, float(os.environ.get("SCANNER_MIN_QUOTE_VO
 # Reconcile less often — 5s force REST was a live 429 source.
 RECONCILE_INTERVAL_MS = max(12_000, int(os.environ.get("SCANNER_RECONCILE_MS", "12000")))
 # Flat/idle: force positionRisk every 12s burned ~230 weight × 5/min → soft limit → 418.
-RECONCILE_IDLE_MS = max(60_000, int(os.environ.get("SCANNER_RECONCILE_IDLE_MS", "90000")))
+# Sep premium: 120s idle share keeps IP under soft limit while flat.
+RECONCILE_IDLE_MS = max(60_000, int(os.environ.get("SCANNER_RECONCILE_IDLE_MS", "120000")))
 # Do not short after the move is largely over (chasing a dump from peak).
 MAX_RETRACE_ENTRY_PCT = float(os.environ.get("SCANNER_MAX_RETRACE_ENTRY_PCT", "12.0"))
 SHORT_TP_PCT = float(os.environ.get("SCANNER_SHORT_TP_PCT", "2.5"))
@@ -1838,6 +1839,13 @@ class MomentumScanner:
                 raise
 
         if coin.short and not has_short:
+            # Naked 10x lock: an empty read is not proof the short is gone.
+            # Oct 21 DOOD: failed 5x reduce → empty book → SHORT_GONE cleared state → reopen at 10x.
+            fail_cache = getattr(self._connector, "_leverage_fail_cache", None) or {}
+            blocked_at = float(fail_cache.get((sym, "reduce_blocked")) or 0.0)
+            if blocked_at > 0 and (time.time() - blocked_at) < 300.0:
+                log.warning("scanner %s SHORT_GONE deferred — naked 10x reduce still blocked", sym)
+                return True
             # Permanent lock: sticky-empty / weight-pause is NOT proof the short is gone.
             # Oct20 PHA/AIN: fill OK → empty last_good → false SHORT_GONE → close storm.
             still_short, confirmed = self._force_confirm_short_open(sym)
@@ -3730,7 +3738,24 @@ class MomentumScanner:
                 elif live:
                     close_result = self._connector.close_position(sym, None)
                 else:
-                    close_result = {"ok": True, "closed": [], "broker": "binance", "note": "already_flat"}
+                    fail_cache = getattr(self._connector, "_leverage_fail_cache", None) or {}
+                    blocked_at = float(fail_cache.get((sym, "reduce_blocked")) or 0.0)
+                    if blocked_at > 0 and (time.time() - blocked_at) < 300.0 and reason in (
+                        "SHORT_GONE_EXCHANGE",
+                        "NAKED_LEVERAGE_LOCK",
+                    ):
+                        log.warning(
+                            "scanner %s refuse already_flat during naked 10x lock reason=%s",
+                            sym,
+                            reason,
+                        )
+                        close_result = {
+                            "ok": False,
+                            "error": "naked_10x_unconfirmed_flat",
+                            "broker": "binance",
+                        }
+                    else:
+                        close_result = {"ok": True, "closed": [], "broker": "binance", "note": "already_flat"}
             if self._close_succeeded(close_result, sym):
                 self._clear_close_backoff(sym)
                 self._reset_coin_state(coin)

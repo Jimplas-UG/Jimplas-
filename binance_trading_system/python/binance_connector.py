@@ -59,13 +59,18 @@ def _retry_after_seconds(v: Any) -> float | None:
     return _float_or_none(v)
 
 
-REST_WEIGHT_SOFT_LIMIT = 1900.0
-REST_WEIGHT_HARD_LIMIT = 2250.0
+# Sep quiet-REST edge: pause discretionary traffic early — 1900 still let bookTicker
+# stampede to 3k+/min before the pause engaged (Oct 12–20 418/SHORT_GONE storm).
+REST_WEIGHT_SOFT_LIMIT = 1600.0
+REST_WEIGHT_HARD_LIMIT = 2100.0
 # Full-book positionRisk costs ~230 weight on testnet (measured), so ≤6/min is the budget.
 # Our orders and user-stream ORDER/ACCOUNT events invalidate the shared book immediately.
 # Idle flat book can share longer — 10s share + 12s force-reconcile was enough to 418 alone.
-POSITIONS_SHARE_S = 20.0
-POSITIONS_SHARE_FLAT_S = 45.0
+POSITIONS_SHARE_S = 30.0
+POSITIONS_SHARE_FLAT_S = 60.0
+# Prefer WS / sticky mid — REST bookTicker every 2s was the #1 weight burner on FRA.
+BOOK_TICKER_CACHE_TTL_S = 5.0
+MARK_PRICE_CACHE_TTL_S = 8.0
 RECENT_DEALS_TTL_S = 45.0
 RECENT_DEALS_MAX_SYMBOLS = 5
 
@@ -241,15 +246,29 @@ class BinanceConnector:
         self._weight_cool_until = 0.0
         self._weight_hot_minute = -1
         self._used_weight_1m = 0.0
+        self._used_weight_minute = -1
+        self._local_weight = 0.0
+        self._local_weight_minute = -1
+        self._weight_depth = 0
+        self._weight_reserved_for_call = False
+        self._weight_budget_lock = threading.Lock()
         # Binance 418 = IP ban. Any request during the ban extends it, so this is never
         # bypassed (not even by closes) and never cleared by login/close-cool paths.
         self._rest_ban_until = 0.0
         self._rest_ban_host = self._http_host_name()
         self._rest_ban_strikes = 0
         self._load_persisted_ban()
+        # Optional WS/book provider (wired from tick_stream) — Sep quiet REST rein.
+        self._tick_provider: Any = None
+        self._book_ticker_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._mark_price_cache: dict[str, tuple[float, float]] = {}
         if self.cfg.api_key and self.cfg.api_secret and not self.cfg.paper:
             self._connected = True
             self.sync_server_time(force=True)
+
+    def set_tick_provider(self, provider: Any) -> None:
+        """Inject WS tick lookup: provider(symbol) -> {bid,ask,...} | None."""
+        self._tick_provider = provider
 
     @property
     def base_url(self) -> str:
@@ -418,10 +437,17 @@ class BinanceConnector:
             return
         self._used_weight_1m = w
         minute = int(time.time() // 60)
+        self._used_weight_minute = minute
+        self._local_weight = max(float(getattr(self, "_local_weight", 0.0) or 0.0), w)
+        self._local_weight_minute = minute
         # Binance futures IP limit is 2400/min. Pause discretionary traffic before 429 → 418.
         if w >= REST_WEIGHT_SOFT_LIMIT:
             self._weight_hot_minute = minute
             secs = max(1.0, 60.0 - (time.time() % 60.0))
+            # A reading already at/over the hard cap means this minute stampeded.
+            # Spill into the next minute so the retry herd cannot restart at :00.
+            if w >= REST_WEIGHT_HARD_LIMIT:
+                secs += 25.0
             until = time.monotonic() + secs
             if until > getattr(self, "_weight_cool_until", 0.0):
                 self._weight_cool_until = until
@@ -465,26 +491,84 @@ class BinanceConnector:
         counts = getattr(self, "_path_counts", None) or {}
         return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:6]
 
+    def _estimate_request_weight(self, method: str, path: str, params: dict[str, Any] | None) -> float:
+        """Local budget so a burst cannot jump 1600 → 5800 before Binance's header comes back."""
+        p = str(path or "")
+        has_symbol = bool((params or {}).get("symbol"))
+        if "positionRisk" in p:
+            return 5.0 if has_symbol else 230.0
+        if "bookTicker" in p:
+            return 2.0 if has_symbol else 5.0
+        if "klines" in p:
+            return 10.0
+        if "ticker/24hr" in p or "ticker/24h" in p:
+            return 1.0 if has_symbol else 40.0
+        if "premiumIndex" in p:
+            return 1.0 if has_symbol else 10.0
+        if "exchangeInfo" in p:
+            return 40.0
+        if str(method).upper() != "GET":
+            return 1.0
+        return 5.0
+
+    def _reserve_local_weight(self, method: str, path: str, params: dict[str, Any] | None) -> float:
+        est = self._estimate_request_weight(method, path, params)
+        lock = getattr(self, "_weight_budget_lock", None)
+        if lock is None:
+            lock = self._weight_budget_lock = threading.Lock()
+        with lock:
+            minute = int(time.time() // 60)
+            if int(getattr(self, "_local_weight_minute", -1)) != minute:
+                self._local_weight_minute = minute
+                self._local_weight = 0.0
+            reported = 0.0
+            if int(getattr(self, "_used_weight_minute", -1)) == minute:
+                reported = float(self._used_weight_1m or 0.0)
+            self._local_weight = max(float(self._local_weight or 0.0), reported) + est
+            projected = float(self._local_weight)
+            if projected >= REST_WEIGHT_SOFT_LIMIT:
+                secs = max(1.0, 60.0 - (time.time() % 60.0))
+                if projected >= REST_WEIGHT_HARD_LIMIT:
+                    secs += 25.0
+                until = time.monotonic() + secs
+                if until > getattr(self, "_weight_cool_until", 0.0):
+                    self._weight_cool_until = until
+                self._weight_hot_minute = minute
+                if projected > float(self._used_weight_1m or 0.0):
+                    self._used_weight_1m = projected
+                    self._used_weight_minute = minute
+            return projected
+
     def _raise_if_weight_cooling(
         self,
         signed: bool,
         *,
         method: str = "GET",
         path: str = "",
+        params: dict[str, Any] | None = None,
         bypass_rest_cool: bool = False,
     ) -> None:
-        left = self._weight_pause_left()
-        if left <= 0:
-            return
-        if bypass_rest_cool:
-            return
-        if not signed:
-            raise RuntimeError(f"Binance REST cooling (weight) {left:.0f}s left")
-        # Signed order place/cancel still allowed (flatten / enter). Discretionary signed GETs
-        # (positionRisk, userTrades, income, …) pause — idle fan-out was the 418 source.
-        if str(method).upper() != "GET":
-            return
-        raise RuntimeError(f"Binance REST cooling (weight) {left:.0f}s left")
+        direct = int(getattr(self, "_weight_depth", 0) or 0) == 0
+        if not getattr(self, "_weight_reserved_for_call", False):
+            self._weight_reserved_for_call = True
+            self._reserve_local_weight(method, path, params)
+        try:
+            is_get = str(method).upper() == "GET"
+            # Orders (POST/DELETE) still go out so a naked 10x can flatten.
+            # Every GET — including bypass confirms — stops once this process
+            # has reserved the soft budget. That is what kept weight under 2400.
+            if not is_get:
+                return
+            left = self._weight_pause_left()
+            projected = float(getattr(self, "_local_weight", 0.0) or 0.0)
+            if left <= 0 and projected < REST_WEIGHT_SOFT_LIMIT:
+                return
+            raise RuntimeError(
+                f"Binance REST cooling (weight) {max(left, 1.0):.0f}s left"
+            )
+        finally:
+            if direct:
+                self._weight_reserved_for_call = False
 
     def used_weight_1m(self) -> float:
         return float(getattr(self, "_used_weight_1m", 0.0) or 0.0)
@@ -588,10 +672,11 @@ class BinanceConnector:
 
         headers = self._headers(signed)
         mutating = _is_order_mutation(method, path)
+        self._weight_depth = int(getattr(self, "_weight_depth", 0) or 0) + 1
         try:
             self._raise_if_banned()
             self._raise_if_weight_cooling(
-                signed, method=method, path=path, bypass_rest_cool=bypass_rest_cool
+                signed, method=method, path=path, params=params, bypass_rest_cool=bypass_rest_cool
             )
             if not bypass_rest_cool:
                 self._raise_if_rest_cooling()
@@ -620,6 +705,9 @@ class BinanceConnector:
             self._close_http()
             raise
         finally:
+            self._weight_depth = max(0, int(getattr(self, "_weight_depth", 1) or 1) - 1)
+            if self._weight_depth == 0:
+                self._weight_reserved_for_call = False
             if mutating:
                 self._invalidate_fresh_book()
 
@@ -634,21 +722,27 @@ class BinanceConnector:
         *,
         bypass_rest_cool: bool = False,
     ) -> Any:
-        self._raise_if_banned()
-        self._raise_if_weight_cooling(
-            signed, method=method, path=path, bypass_rest_cool=bypass_rest_cool
-        )
-        if not bypass_rest_cool:
-            self._raise_if_rest_cooling()
-        if _is_order_mutation(method, path):
-            self._invalidate_fresh_book()
-            try:
-                return self._request_once(
-                    method, path, params, signed, timeout, base_url, bypass_rest_cool=bypass_rest_cool
-                )
-            finally:
+        self._weight_depth = int(getattr(self, "_weight_depth", 0) or 0) + 1
+        try:
+            self._raise_if_banned()
+            self._raise_if_weight_cooling(
+                signed, method=method, path=path, params=params, bypass_rest_cool=bypass_rest_cool
+            )
+            if not bypass_rest_cool:
+                self._raise_if_rest_cooling()
+            if _is_order_mutation(method, path):
                 self._invalidate_fresh_book()
-        return self._request_once(method, path, params, signed, timeout, base_url, bypass_rest_cool=bypass_rest_cool)
+                try:
+                    return self._request_once(
+                        method, path, params, signed, timeout, base_url, bypass_rest_cool=bypass_rest_cool
+                    )
+                finally:
+                    self._invalidate_fresh_book()
+            return self._request_once(method, path, params, signed, timeout, base_url, bypass_rest_cool=bypass_rest_cool)
+        finally:
+            self._weight_depth = max(0, int(getattr(self, "_weight_depth", 1) or 1) - 1)
+            if self._weight_depth == 0:
+                self._weight_reserved_for_call = False
 
     def _request_once(
         self,
@@ -1586,18 +1680,31 @@ class BinanceConnector:
                 return {"ok": True, "margin_type": mt, "symbol": sym, "note": "already_set"}
             return {"ok": False, "error": msg}
 
-    def symbol_leverage(self, symbol: str | None = None) -> int:
-        sym = (symbol or self.cfg.symbol).upper()
+    def _exchange_leverage_or_none(self, symbol: str) -> int | None:
+        """Exchange leverage, or None when the read failed. Never invent the target."""
+        sym = symbol.upper()
         if self.cfg.paper:
             return int(self.cfg.leverage)
         try:
             rows = self._request("GET", "/fapi/v2/positionRisk", {"symbol": sym}, signed=True)
-            if rows:
-                lev = int(float(rows[0].get("leverage", self.cfg.leverage)))
-                if lev > 0:
-                    return lev
-        except RuntimeError as e:
+        except Exception as e:
             log.warning("symbol_leverage: %s", e)
+            return None
+        if not rows:
+            return None
+        try:
+            lev = int(float(rows[0].get("leverage") or 0))
+        except (TypeError, ValueError):
+            return None
+        return lev if lev > 0 else None
+
+    def symbol_leverage(self, symbol: str | None = None) -> int:
+        sym = (symbol or self.cfg.symbol).upper()
+        if self.cfg.paper:
+            return int(self.cfg.leverage)
+        lev = self._exchange_leverage_or_none(sym)
+        if lev:
+            return lev
         return int(self.cfg.leverage)
 
     def _remember_account(self, acct: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1797,34 +1904,96 @@ class BinanceConnector:
         self.invalidate_positions_cache()
         return {"ok": len(errors) == 0, "aligned": aligned, "errors": errors or None}
 
+    def _cached_book_ticker(self, sym: str, *, max_age_s: float) -> dict[str, Any] | None:
+        ent = self._book_ticker_cache.get(sym)
+        if not ent:
+            return None
+        ts, tick = ent
+        if time.time() - ts > max_age_s:
+            return None
+        return dict(tick)
+
+    def _store_book_ticker(self, sym: str, tick: dict[str, Any]) -> dict[str, Any]:
+        self._book_ticker_cache[sym] = (time.time(), dict(tick))
+        return tick
+
     def book_ticker(self, symbol: str | None = None) -> dict[str, Any] | None:
-        sym = (symbol or self.cfg.symbol).upper()
-        data = self._request("GET", "/fapi/v1/ticker/bookTicker", {"symbol": sym})
+        """Best bid/ask — WS/cache first. REST only when cool/weight allow (Sep quiet rein)."""
+        sym = (symbol or self.cfg.symbol or "").upper()
+        if not sym:
+            return None
+        # 1) Live WS (or other injected provider).
+        provider = getattr(self, "_tick_provider", None)
+        if callable(provider):
+            try:
+                tick = provider(sym)
+                if tick and float(tick.get("bid") or 0) > 0 and float(tick.get("ask") or 0) > 0:
+                    out = {
+                        "symbol": sym,
+                        "bid": float(tick["bid"]),
+                        "ask": float(tick["ask"]),
+                        "time": int(tick.get("time") or time.time() * 1000),
+                        "source": str(tick.get("source") or "provider"),
+                    }
+                    return self._store_book_ticker(sym, out)
+            except Exception as e:
+                log.debug("tick_provider %s: %s", sym, e)
+        # 2) Fresh local cache.
+        cached = self._cached_book_ticker(sym, max_age_s=BOOK_TICKER_CACHE_TTL_S)
+        if cached:
+            return cached
+        # 3) Under weight/REST cool: serve stale cache (up to 60s) — never fire REST.
+        weight_left = self._weight_pause_left()
+        cool_left = self.rest_cooling_left()
+        if weight_left > 0.05 or cool_left > 0.05:
+            stale = self._cached_book_ticker(sym, max_age_s=60.0)
+            if stale:
+                return stale
+            return None
+        # 4) REST fallback (slow path).
+        try:
+            data = self._request("GET", "/fapi/v1/ticker/bookTicker", {"symbol": sym})
+        except Exception as e:
+            log.debug("book_ticker REST %s: %s", sym, e)
+            return self._cached_book_ticker(sym, max_age_s=60.0)
         bid = float(data.get("bidPrice", 0))
         ask = float(data.get("askPrice", 0))
         if bid <= 0 or ask <= 0:
             return None
-        return {"symbol": sym, "bid": bid, "ask": ask, "time": int(time.time() * 1000)}
+        return self._store_book_ticker(
+            sym,
+            {"symbol": sym, "bid": bid, "ask": ask, "time": int(time.time() * 1000), "source": "rest"},
+        )
 
     def tick(self, symbol: str | None = None) -> dict[str, Any] | None:
         return self.book_ticker(symbol)
 
     def mark_price(self, symbol: str | None = None) -> float:
-        """Mark price for price-band math — 0 when unavailable."""
-        sym = (symbol or self.cfg.symbol).upper()
+        """Mark price for price-band math — 0 when unavailable. Cached; no REST under cool."""
+        sym = (symbol or self.cfg.symbol or "").upper()
+        if not sym:
+            return 0.0
+        ent = self._mark_price_cache.get(sym)
+        if ent and time.time() - ent[0] <= MARK_PRICE_CACHE_TTL_S:
+            return float(ent[1])
+        if self._weight_pause_left() > 0.05 or self.rest_cooling_left() > 0.05:
+            return float(ent[1]) if ent else 0.0
         try:
             data = self._request("GET", "/fapi/v1/premiumIndex", {"symbol": sym}, timeout=5.0)
         except Exception as e:
             log.debug("mark_price %s: %s", sym, e)
-            return 0.0
+            return float(ent[1]) if ent else 0.0
         if isinstance(data, list):
             data = data[0] if data else {}
         if not isinstance(data, dict):
-            return 0.0
+            return float(ent[1]) if ent else 0.0
         try:
-            return max(0.0, float(data.get("markPrice") or 0))
+            px = max(0.0, float(data.get("markPrice") or 0))
         except (TypeError, ValueError):
-            return 0.0
+            return float(ent[1]) if ent else 0.0
+        if px > 0:
+            self._mark_price_cache[sym] = (time.time(), px)
+        return px
 
     def _klines_base_url(self) -> str:
         """Public klines — mainnet has full XAUUSDT history; testnet is too shallow for backtests."""
@@ -2017,8 +2186,10 @@ class BinanceConnector:
             return True
         if not self.cfg.api_key:
             return False
-        # Trust prepare_symbol_cached only briefly — re-verify so failed POSTs cannot stick.
-        if self.is_symbol_prepared(sym, target):
+        blocked_at = float(self._leverage_fail_cache.get((sym, "reduce_blocked")) or 0.0)
+        # A recent "cannot reduce" must not count as success. The old 300s
+        # early return True let the next short open while the exchange was still 10x.
+        if self.is_symbol_prepared(sym, target) and time.time() - blocked_at >= 300.0:
             key = (sym, target, "ISOLATED")
             ts = float(self._prepared_cache.get(key) or 0.0)
             age = time.time() - ts
@@ -2026,38 +2197,34 @@ class BinanceConnector:
                 self.cfg.leverage = target
                 self.cfg.symbol = sym
                 return True
-            try:
-                current = self.symbol_leverage(sym)
-                if current == target:
-                    self.cfg.leverage = target
-                    self.cfg.symbol = sym
-                    self._prepared_cache[key] = time.time()
-                    return True
-                log.warning(
-                    "prepared cache stale %s: exchange=%sx wanted=%sx — re-set",
-                    sym,
-                    current,
-                    target,
-                )
-                self._prepared_cache.pop(key, None)
-            except Exception as e:
-                log.warning("leverage verify %s: %s", sym, e)
-                self._prepared_cache.pop(key, None)
-        current = self.symbol_leverage(sym)
+            confirmed = self._exchange_leverage_or_none(sym)
+            if confirmed == target:
+                self.cfg.leverage = target
+                self.cfg.symbol = sym
+                self._prepared_cache[key] = time.time()
+                return True
+            if confirmed is None:
+                log.warning("leverage verify %s unconfirmed — fail closed", sym)
+                return False
+            log.warning(
+                "prepared cache stale %s: exchange=%sx wanted=%sx — re-set",
+                sym,
+                confirmed,
+                target,
+            )
+            self._prepared_cache.pop(key, None)
+        current = self._exchange_leverage_or_none(sym)
+        if current is None:
+            log.warning("ensure_exchange_leverage %s unconfirmed — fail closed", sym)
+            return False
         if current == target:
             self.cfg.leverage = target
             self._prepared_cache[(sym, target, "ISOLATED")] = time.time()
+            self._leverage_fail_cache.pop((sym, "reduce_blocked"), None)
             return True
-        # Isolated + open position: Binance rejects leverage reductions. Keep the higher
-        # exchange leverage and stop retrying until the symbol is flat.
+        # Isolated + open position: Binance rejects leverage reductions.
+        # Fail closed — callers must not open, and the naked-short lock must flatten.
         if current > target:
-            fail_key = (sym, "reduce_blocked")
-            last = float(self._leverage_fail_cache.get(fail_key) or 0.0)
-            if time.time() - last < 300.0:
-                self.cfg.leverage = current
-                return True
-            # Live open legs only — sticky ghosts must not block 5x reset.
-            # If the book is unconfirmed, assume open (never force a reduce on a guess).
             try:
                 open_legs = [
                     p
@@ -2065,46 +2232,68 @@ class BinanceConnector:
                     if float(p.get("volume") or 0) > 1e-12
                 ]
             except PositionsUnavailable:
-                open_legs = [{"symbol": sym, "volume": 1.0}]
+                log.warning(
+                    "ensure_exchange_leverage %s book unconfirmed at %sx — not treating as %sx",
+                    sym,
+                    current,
+                    target,
+                )
+                return False
             if open_legs:
-                self._leverage_fail_cache[fail_key] = time.time()
+                self._leverage_fail_cache[(sym, "reduce_blocked")] = time.time()
+                self.cfg.leverage = current
                 log.info(
                     "exchange leverage %s stays %sx (cannot reduce to %sx with open position)",
                     sym,
                     current,
                     target,
                 )
-                self.cfg.leverage = current
-                self._prepared_cache[(sym, current, "ISOLATED")] = time.time()
-                return True
+                return False
         try:
-            self._request(
+            data = self._request(
                 "POST",
                 "/fapi/v1/leverage",
                 {"symbol": sym, "leverage": target},
                 signed=True,
             )
-            self.cfg.leverage = target
-            self.cfg.symbol = sym
-            self._prepared_cache = {k: v for k, v in self._prepared_cache.items() if k[0] != sym}
-            self._prepared_cache[(sym, target, "ISOLATED")] = time.time()
-            self._leverage_fail_cache.pop((sym, "reduce_blocked"), None)
-            log.info("exchange leverage %s set %sx -> %sx", sym, current, target)
-            return True
         except RuntimeError as e:
             msg = str(e)
             if "Leverage reduction is not supported" in msg or "-2027" in msg or "-4141" in msg:
                 self._leverage_fail_cache[(sym, "reduce_blocked")] = time.time()
-                self.cfg.leverage = current
-                self._prepared_cache[(sym, current, "ISOLATED")] = time.time()
+                self.cfg.leverage = int(current or 0)
                 log.info(
                     "exchange leverage %s keep %sx — reduction blocked with open position",
                     sym,
                     current,
                 )
-                return True
+                return False
             log.warning("ensure_exchange_leverage %s: %s", sym, e)
             return False
+        wrote = 0
+        if isinstance(data, dict):
+            try:
+                wrote = int(float(data.get("leverage") or 0))
+            except (TypeError, ValueError):
+                wrote = 0
+        if wrote != target:
+            readback = self._exchange_leverage_or_none(sym)
+            if readback != target:
+                log.warning(
+                    "ensure_exchange_leverage %s readback %s != wanted %s",
+                    sym,
+                    readback,
+                    target,
+                )
+                if readback and readback > target:
+                    self._leverage_fail_cache[(sym, "reduce_blocked")] = time.time()
+                return False
+        self.cfg.leverage = target
+        self.cfg.symbol = sym
+        self._prepared_cache = {k: v for k, v in self._prepared_cache.items() if k[0] != sym}
+        self._prepared_cache[(sym, target, "ISOLATED")] = time.time()
+        self._leverage_fail_cache.pop((sym, "reduce_blocked"), None)
+        log.info("exchange leverage %s set %sx -> %sx", sym, current, target)
+        return True
 
     def invalidate_positions_cache(self) -> None:
         # Drop TTL cache only — keep last-good so UI does not flash FLAT on cool/WS events.

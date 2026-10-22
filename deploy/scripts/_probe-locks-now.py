@@ -16,14 +16,16 @@ import binance_connector as bc
 msrc = inspect.getsource(ms.MomentumScanner._manage_positions)
 ssrc = inspect.getsource(bc.BinanceConnector.close_by_position_side)
 csrc = inspect.getsource(bc.BinanceConnector.close_position)
-psrc = inspect.getsource(bc.BinanceConnector.positions)
+live = inspect.getsource(bc.BinanceConnector._positions_live)
 print("naked_5x_not_10x", "target = LONG1_LEVERAGE" not in msrc and "symbol_exchange_leverage" in msrc)
 print("hedge_episode", hasattr(ms.MomentumScanner, "_hedge_episode_active"))
 print("solo_gate", hasattr(ms.MomentumScanner, "_solo_hedge_exit_allowed"))
 print("manual_clamp", hasattr(ms.MomentumScanner, "clamp_manual_open_qty"))
 print("side_close_chunks", "too_many_close_chunks" in ssrc)
 print("short_abort_if_long_left", "long_residual_abort_short" in csrc)
-print("positions_unavailable_not_flat", "unavailable — not empty" in psrc and "PositionsUnavailable" in psrc)
+print("positions_unavailable_not_flat", "PositionsUnavailable" in live and "not empty" in live)
+print("force_confirm_short", hasattr(ms.MomentumScanner, "_force_confirm_short_open"))
+print("sticky_after_fill", hasattr(ms.MomentumScanner, "_snapshot_symbol_legs_to_sticky"))
 print("no_rule_kernel", not Path("rule_kernel.py").exists())
 PY
 """
