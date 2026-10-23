@@ -3319,6 +3319,21 @@ class BinanceConnector:
         if sticky_tz and sticky_tz != tz_name:
             sticky_map = {}
 
+        # While the weight minute is paused, hand back the UTC book we already built.
+        # Waiting here made the phone time out and fall back to the partial fill list.
+        cache_age = time.time() - float(getattr(self, "_last_good_calendar_ts", 0.0) or 0.0)
+        if (
+            sticky_tz == tz_name
+            and sticky_map
+            and self._weight_pause_left() > 0.05
+            and cache_age < 180
+        ):
+            cached = dict(self._last_good_calendar or {})
+            cached["ok"] = True
+            cached["stale"] = True
+            cached["tz"] = tz_name
+            return cached
+
         cool_left = self.rest_cooling_left()
 
         by_day: dict[str, dict[str, float]] = {}
