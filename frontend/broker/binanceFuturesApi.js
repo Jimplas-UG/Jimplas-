@@ -467,7 +467,7 @@ export async function fetchBinanceDiagnostics(apiBaseUrl, timeoutMs = 12000) {
 export async function fetchBinanceTradeCalendar(apiBaseUrl, days = 400) {
   const b = base(apiBaseUrl);
   try {
-    const res = await binanceFetch(b, `/api/trade-calendar?days=${days}`, {}, 15000);
+    const res = await binanceFetch(b, `/api/trade-calendar?days=${days}`, {}, 55000);
     if (!res.ok) return { ok: false, days: [], total_pnl: 0 };
     return await res.json();
   } catch {

@@ -1008,6 +1008,13 @@ class BinanceConnector:
 
     def _fetch_realized_income_rows(self, since_ms: int = 0) -> list[dict[str, Any]]:
         """Paginate REALIZED_PNL income — calendar must not miss days beyond 1000 legs."""
+        # One history read waits out the weight minute instead of returning yesterday's
+        # day buckets. A 418 ban is still not poked.
+        if self.rest_ban_left() > 0:
+            raise RuntimeError(f"Binance REST cooling (418) {self.rest_ban_left():.0f}s left")
+        left = self._weight_pause_left()
+        if left > 0.05:
+            time.sleep(min(left + 0.4, 50.0))
         rows: list[dict[str, Any]] = []
         cursor = max(0, int(since_ms or 0))
         for _ in range(32):
@@ -3297,7 +3304,9 @@ class BinanceConnector:
         self._hydrate_history_cache_from_disk()
 
         sticky_map: dict[str, dict[str, float]] = {}
+        sticky_tz = ""
         if isinstance(self._last_good_calendar, dict):
+            sticky_tz = str(self._last_good_calendar.get("tz") or "")
             for row in self._last_good_calendar.get("days") or []:
                 dk = str(row.get("date") or "")
                 if not dk:
@@ -3306,6 +3315,9 @@ class BinanceConnector:
                     "pnl": float(row.get("pnl") or 0),
                     "trades": float(row.get("trades") or 0),
                 }
+        # Do not paint Nairobi buckets after the calendar moved to UTC.
+        if sticky_tz and sticky_tz != tz_name:
+            sticky_map = {}
 
         cool_left = self.rest_cooling_left()
 
