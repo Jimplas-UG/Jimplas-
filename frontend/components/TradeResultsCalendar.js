@@ -110,22 +110,23 @@ export default function TradeResultsCalendar({
         if (j?.days?.length) {
           const clean = sanitizeCalendarDays(j.days);
           if (clean.length) {
-            setServerDays((prev) => {
-              const merged = mergeCalendarDayRows(prev, clean);
-              const sum = merged.reduce((s, d) => s + Number(d.pnl ?? 0), 0);
-              setTotalPnl(Number.isFinite(sum) ? sum : 0);
-              return merged;
-            });
+            const reported = Number(j.total_pnl);
+            const sum = clean.reduce((s, d) => s + Number(d.pnl ?? 0), 0);
+            setServerDays(clean);
+            setTotalPnl(Number.isFinite(reported) ? reported : sum);
             setCalendarMeta({
-              tz: j.tz || 'Africa/Nairobi',
+              tz: j.tz || 'UTC',
               since: j.since || '',
               source: j.source || 'income',
             });
             return;
           }
         }
-        // Failed/empty fetch — keep previous days; fall back to local deals only if we have none yet.
-        if (brokerDeals?.length) applyLocalDays(brokerDeals);
+        // Failed/empty fetch — keep the last income calendar. Deals are a partial tail.
+        setServerDays((prev) => {
+          if (prev.length || !brokerDeals?.length) return prev;
+          return aggregateDealsToDays(brokerDeals);
+        });
       } finally {
         if (!cancelled) setLoading(false);
       }

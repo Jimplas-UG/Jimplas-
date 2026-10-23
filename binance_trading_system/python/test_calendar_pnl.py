@@ -6,9 +6,12 @@ import time
 
 os.environ["TRADE_CALENDAR_TZ"] = "UTC"
 
+from datetime import datetime, timezone  # noqa: E402
+
 from calendar_pnl import (  # noqa: E402
     aggregate_deal_days,
     aggregate_income_days,
+    day_key_from_ms,
     finalize_calendar_days,
     merge_calendar_day_buckets,
 )
@@ -52,6 +55,24 @@ def test_merge_keeps_sticky_days() -> None:
     assert set(merged.keys()) == {"2026-09-23", "2026-09-24"}
 
 
+def test_utc_day_keeps_late_utc_close() -> None:
+    """22:30 UTC stays on that Binance day, not the next Nairobi day."""
+    ts = int(datetime(2026, 10, 20, 22, 30, tzinfo=timezone.utc).timestamp() * 1000)
+    assert day_key_from_ms(ts) == "2026-10-20"
+
+
+def test_income_rows_are_deduped() -> None:
+    ts = _ms(2026, 10, 20)
+    income = [
+        {"time": ts, "income": "-10", "tranId": 7, "symbol": "DOODUSDT"},
+        {"time": ts, "income": "-10", "tranId": 7, "symbol": "DOODUSDT"},
+        {"time": ts, "income": "4", "tranId": 8, "symbol": "DOODUSDT"},
+    ]
+    by = aggregate_income_days(income, include_trade_time=lambda t: True)
+    assert by["2026-10-20"]["trades"] == 2
+    assert abs(by["2026-10-20"]["pnl"] - (-6)) < 0.01
+
+
 def test_finalize_respects_since() -> None:
     by = {
         "2026-07-10": {"pnl": -10.0, "trades": 1},
@@ -66,6 +87,8 @@ if __name__ == "__main__":
     test_income_is_complete_source()
     test_deals_skip_opens()
     test_merge_keeps_sticky_days()
+    test_utc_day_keeps_late_utc_close()
+    test_income_rows_are_deduped()
     test_finalize_respects_since()
     print("test_calendar_pnl: ALL OK")
 

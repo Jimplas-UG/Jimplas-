@@ -3342,9 +3342,11 @@ class BinanceConnector:
                     log.warning("trade_pnl_calendar deals: %s", e)
                     by_day = {}
 
-        # Union with sticky — partial income/deals polls must not wipe yesterday.
-        fresh_wins = income_ok or source == "income"
-        by_day = merge_calendar_day_buckets(sticky_map, by_day, fresh_wins=fresh_wins)
+        # A complete income read is the calendar. Sticky days are only a fallback
+        # when Binance income could not be read — never blend an old timezone's days
+        # into a fresh UTC book.
+        if not income_ok:
+            by_day = merge_calendar_day_buckets(sticky_map, by_day, fresh_wins=False)
 
         days_out, total = finalize_calendar_days(by_day, days=lim_days, since_date=since_date)
         out = {
@@ -3358,7 +3360,7 @@ class BinanceConnector:
             out["since"] = since_date
         if cool_left > 0.25:
             out["stale"] = True
-        if days_out:
+        if income_ok or days_out:
             self._last_good_calendar = dict(out)
             self._last_good_calendar_ts = time.time()
             self._persist_history_cache()

@@ -9,13 +9,13 @@ export const CALENDAR_VIEWS = [
   { id: 'all', label: 'All time' },
 ];
 
-/** Local civil YYYY-MM-DD (matches phone + East Africa desk day). */
+/** UTC civil day — same boundary as Binance REALIZED_PNL and the fill list. */
 export function dayKeyFromTs(tsMs) {
   const d = new Date(Number(tsMs) || 0);
   if (!Number.isFinite(d.getTime()) || d.getTime() <= 0) return '';
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
 
@@ -31,7 +31,10 @@ export function indexDaysByDate(days) {
   return map;
 }
 
-/** Union daily rows — never drop prior days when a poll returns only today. */
+/**
+ * Incoming income days replace the same date.
+ * A partial fill rollup must not keep a day just because it counted more rows.
+ */
 export function mergeCalendarDayRows(prev, incoming) {
   const map = new Map();
   for (const row of prev ?? []) {
@@ -39,10 +42,7 @@ export function mergeCalendarDayRows(prev, incoming) {
   }
   for (const row of incoming ?? []) {
     if (!row?.date) continue;
-    const old = map.get(row.date);
-    if (!old || Number(row.trades ?? 0) >= Number(old.trades ?? 0)) {
-      map.set(row.date, row);
-    }
+    map.set(row.date, row);
   }
   return [...map.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)));
 }

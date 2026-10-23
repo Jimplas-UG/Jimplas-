@@ -23,10 +23,12 @@ def max_calendar_day_usd() -> float:
 def calendar_tz_name() -> str:
     """
     Day buckets for the Performance calendar.
-    Default Africa/Nairobi (UTC+3) so 'today' matches East Africa desk hours.
-    Override with TRADE_CALENDAR_TZ=UTC for strict Binance UTC days.
+
+    Default UTC so a cell matches Binance REALIZED_PNL and the fill list.
+    A Nairobi midnight was moving late-UTC closes onto the next local day
+    (Oct 20 showed about -$195 instead of the exchange day near -$95).
     """
-    return (os.environ.get("TRADE_CALENDAR_TZ") or "Africa/Nairobi").strip() or "Africa/Nairobi"
+    return (os.environ.get("TRADE_CALENDAR_TZ") or "UTC").strip() or "UTC"
 
 
 def _tzinfo():
@@ -50,10 +52,20 @@ def aggregate_income_days(
     include_trade_time: Callable[[int], bool],
     max_leg: float | None = None,
 ) -> dict[str, dict[str, float]]:
-    """Day buckets from REALIZED_PNL income lines (desk-local calendar day)."""
+    """Day buckets from REALIZED_PNL income lines (UTC calendar day)."""
     lim = max_leg if max_leg is not None else max_calendar_leg_usd()
     by_day: dict[str, dict[str, float]] = {}
+    seen: set[tuple] = set()
     for row in income_rows or []:
+        tran = row.get("tranId")
+        ident = (
+            tran
+            if tran is not None
+            else (row.get("time"), row.get("symbol"), row.get("income"), row.get("tradeId"))
+        )
+        if ident in seen:
+            continue
+        seen.add(ident)
         ts = int(row.get("time") or 0)
         if ts <= 0 or not include_trade_time(ts):
             continue
@@ -155,4 +167,4 @@ def finalize_calendar_days(
     days_out = [d for d in days_out if d["date"] >= cutoff]
     total = round(sum(d["pnl"] for d in days_out), 2)
     return days_out, total
-
+
