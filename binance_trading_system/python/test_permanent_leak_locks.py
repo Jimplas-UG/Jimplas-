@@ -614,6 +614,83 @@ def test_local_weight_budget_stops_burst() -> None:
     print(f"OK local weight budget pauses on full-book read #{raised_at}")
 
 
+def test_close_symbol_read_survives_weight_pause() -> None:
+    """Manual/strategy close may read one symbol during a weight pause. Nothing else may."""
+    from binance_connector import BinanceConnector, BinanceConfig, PositionsUnavailable
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._note_rest_success("2100", signed=True)
+    assert c._weight_pause_left() > 0
+    row = {
+        "symbol": "XVSUSDT",
+        "positionAmt": "-81.1",
+        "positionSide": "SHORT",
+        "entryPrice": "1",
+        "unRealizedProfit": "0",
+        "liquidationPrice": "0",
+        "leverage": "5",
+        "marginType": "isolated",
+    }
+
+    def fake_once(method, path, params, signed, timeout, base_url, *, bypass_rest_cool):
+        assert "positionRisk" in path
+        assert (params or {}).get("symbol") == "XVSUSDT"
+        return [row]
+
+    c._request_once = fake_once  # type: ignore[method-assign]
+    blocked = False
+    try:
+        c.positions("XVSUSDT", force=True, bypass_rest_cool=True)
+    except PositionsUnavailable:
+        blocked = True
+    assert blocked, "bypass alone must not read the book during a weight pause"
+
+    def close_position():
+        kline_blocked = False
+        try:
+            c._raise_if_weight_cooling(
+                True, method="GET", path="/fapi/v1/klines", params={"symbol": "XVSUSDT"}
+            )
+        except RuntimeError:
+            kline_blocked = True
+        assert kline_blocked, "a close must not open market-data GETs"
+        full_blocked = False
+        try:
+            c._raise_if_weight_cooling(True, method="GET", path="/fapi/v2/positionRisk")
+        except RuntimeError:
+            full_blocked = True
+        assert full_blocked, "a close must not open a full-book positionRisk"
+        return c.positions("XVSUSDT", force=True, bypass_rest_cool=True)
+
+    rows = close_position()
+    assert rows and float(rows[0].get("volume") or rows[0].get("positionAmt") or 0) != 0
+
+    def reconcile():
+        with c.closing_book():
+            return c.positions("XVSUSDT", force=True, bypass_rest_cool=True)
+
+    assert reconcile(), "explicit close mark may read one symbol"
+    c._engage_rest_ban(30.0)
+    banned = False
+    try:
+        close_position()
+    except (PositionsUnavailable, RuntimeError) as e:
+        banned = "418" in str(e)
+    assert banned, "418 still blocks a close read"
+    print("OK weight pause: symbol close-read allowed; full book, klines, and 418 stay blocked")
+
+
+def test_leverage_read_does_not_feed_the_weight_pause() -> None:
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._note_rest_success("2100", signed=True)
+    before = float(c._local_weight)
+    assert c._exchange_leverage_or_none("XVSUSDT") is None
+    assert float(c._local_weight) == before
+    print("OK leverage verify does not reserve weight while the minute is paused")
+
+
 def test_sep_premium_quiet_rest_reins() -> None:
     """Non-logic Sep edge: early weight pause, bookTicker WS/cache, pos_mgr idle, idle reconcile."""
     import binance_connector as bc
@@ -677,6 +754,8 @@ if __name__ == "__main__":
     test_positions_single_flight_and_order_invalidation()
     test_naked_10x_ensure_fails_closed()
     test_local_weight_budget_stops_burst()
+    test_close_symbol_read_survives_weight_pause()
+    test_leverage_read_does_not_feed_the_weight_pause()
     test_sep_premium_quiet_rest_reins()
     test_no_rule_kernel_safe_mode()
     test_naked_short_never_10x()

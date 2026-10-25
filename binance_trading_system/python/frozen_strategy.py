@@ -20,6 +20,8 @@ the live modules still match the working contract:
   Smart exit: 6% of partition net — with hedges open, only when short is in profit
   Manual closes require confirm; REST cool on close waits up to 12s then clears
   Partition USD locked at $100 (Sep 23–25) — mainnet/testnet switch must not change it
+  Open legs clip to remaining partition room (50/40/40 requested, committed margin ≤ $100).
+  Same-symbol floating loss of $100 flattens the pair (PARTITION_LOSS), through paired hold.
   Permanent anti-cascade: no rule_kernel / SAFE_MODE; no instant cool-clear;
   PORTAL LONG-before-SHORT; adopt short notional ≤ 1.25×$250; liquidity ≥ $10M;
   episode/invalidation cool floors; Long settle ≥ 3s; 429 ≠ flat
@@ -221,6 +223,11 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert abs(float(ms.DEFAULT_PARTITION_USD) - LOCKED_PARTITION_USD) < 1e-9
     assert "force_locked_partition_usd" in src or "_force_locked_partition_usd" in src
     assert "PARTITION_USD_LOCKED" in src or "locked partition" in src.lower()
+    assert hasattr(ms.MomentumScanner, "_qty_for_room")
+    assert hasattr(ms.MomentumScanner, "_partition_loss_hit")
+    assert "_qty_for_room" in inspect.getsource(ms.MomentumScanner._try_open_short_entry)
+    assert "_qty_for_room" in inspect.getsource(ms.MomentumScanner._try_open_long1)
+    assert "_qty_for_room" in inspect.getsource(ms.MomentumScanner._try_open_long2)
 
     import inspect
     import binance_connector as bc
@@ -240,6 +247,8 @@ def assert_frozen_contract() -> dict[str, Any]:
     manage_src = inspect.getsource(ms.MomentumScanner._manage_positions)
     assert "target = LONG1_LEVERAGE" not in manage_src
     assert "symbol_exchange_leverage" in manage_src
+    assert "PARTITION_LOSS" in manage_src
+    assert "_partition_loss_hit" in manage_src
     # Hedged SHORT_TP must share SHORT_PULLBACK's net-clear gate (no net-red flatten).
     assert hasattr(ms.MomentumScanner, "_hedged_short_exit_net_ok")
     assert "_hedged_short_exit_net_ok" in manage_src

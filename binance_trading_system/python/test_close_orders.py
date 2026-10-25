@@ -91,6 +91,47 @@ def test_hedge_close_no_reduce_only() -> None:
     print("OK hedge close uses positionSide only")
 
 
+def test_user_stream_fill_is_the_close_qty() -> None:
+    """REST ack with executedQty 0 must not hide a fill the private stream already saw."""
+    c = OneWayConnector()
+    c.note_user_fill({"X": "FILLED", "z": "81.1", "c": "BSV32_CLS_SHORT_1", "i": 99, "s": "XVSUSDT"})
+    qty = c._confirmed_executed_qty(
+        {"executedQty": "0", "orderId": 99},
+        symbol="XVSUSDT",
+        client_order_id="BSV32_CLS_SHORT_1",
+    )
+    assert abs(qty - 81.1) < 1e-9
+    print("OK user-stream FILLED is the close quantity")
+
+
+def test_flat_wallet_caps_inflated_available() -> None:
+    c = OneWayConnector()
+    free = c._spendable_margin(61242.87, 174682.49, 0.0, 61242.87)
+    assert abs(free - 61242.87) < 1e-6
+    still = c._spendable_margin(1000.0, 800.0, 0.0, 800.0)
+    assert abs(still - 800.0) < 1e-6
+    open_book = c._spendable_margin(5049.16, 118302.69, -97.8, 5049.16)
+    assert abs(open_book - 5049.16) < 1e-6
+    inflated_withdraw = c._spendable_margin(5049.16, 118302.69, -97.8, 118302.69)
+    assert abs(inflated_withdraw - 5049.16) < 1e-6
+    print("OK flat wallet caps availableBalance that sits above the wallet")
+
+
+def test_known_hedge_side_survives_unset_mode() -> None:
+    """Weight pause makes is_hedge_mode() fail closed. The book side still closes."""
+    c = OneWayConnector()
+    p = c._market_close_params(
+        symbol="XVSUSDT",
+        side="BUY",
+        quantity=81.1,
+        client_order_id="test",
+        hedge_position_side="SHORT",
+    )
+    assert p.get("positionSide") == "SHORT"
+    assert "reduceOnly" not in p
+    print("OK known SHORT side closes without reduceOnly when hedge mode is unset")
+
+
 def test_oneway_close_has_reduce_only() -> None:
     c = OneWayConnector()
     p = c._market_close_params(
@@ -419,6 +460,9 @@ def test_apply_symbol_positions_snapshot_clears_sticky() -> None:
 
 if __name__ == "__main__":
     test_hedge_close_no_reduce_only()
+    test_user_stream_fill_is_the_close_qty()
+    test_flat_wallet_caps_inflated_available()
+    test_known_hedge_side_survives_unset_mode()
     test_oneway_close_has_reduce_only()
     test_hedge_tp_no_reduce_only()
     test_recovery_long_opens_position_side_long()

@@ -31,7 +31,7 @@ class LiveConnector:
         self._positions = positions or []
         self.closed: list[dict] = []
 
-    def positions(self, symbol=None, force=False) -> list[dict]:
+    def positions(self, symbol=None, force=False, bypass_rest_cool=False) -> list[dict]:
         if symbol:
             return [p for p in self._positions if p["symbol"] == symbol.upper()]
         return list(self._positions)

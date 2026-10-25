@@ -197,6 +197,55 @@ def test_close_all_no_already_flat_on_unavailable() -> None:
     print("OK close_all does not already_flat on unavailable")
 
 
+def test_auto_legs_stay_inside_partition() -> None:
+    from momentum_scanner import LegPosition
+
+    conn = SimpleNamespace(cfg=SimpleNamespace(paper=True, api_key=""), _connected=False)
+    sc = MomentumScanner(conn, lambda: True)
+    sc._partition_usd = 100.0
+    coin = CoinStrategy(symbol="LIGHTUSDT", price=0.315)
+    coin.short = LegPosition(side="SELL", entry=0.2992, qty=835.0, leverage=5, magic=88001)
+    coin.long1 = LegPosition(side="BUY", entry=0.3089, qty=1294.0, leverage=10, magic=88002)
+    full = sc._qty_for("LIGHTUSDT", 0.315, 10, 40.0)
+    room = sc._qty_for_room(coin, "LIGHTUSDT", 0.315, 10, 40.0)
+    assert 0 < room < full * 0.4, (room, full)
+    coin.long2 = LegPosition(side="BUY", entry=0.315, qty=1269.0, leverage=10, magic=88003)
+    assert sc._qty_for_room(coin, "LIGHTUSDT", 0.32, 10, 40.0) == 0.0
+    print("OK auto legs cannot commit margin past the $100 partition")
+
+
+def test_partition_loss_flattens_pair() -> None:
+    from momentum_scanner import LegPosition
+
+    conn = SimpleNamespace(cfg=SimpleNamespace(paper=True, api_key=""), _connected=False)
+    sc = MomentumScanner(conn, lambda: True)
+    coin = CoinStrategy(symbol="LIGHTUSDT", price=0.24)
+    coin.short = LegPosition(side="SELL", entry=0.3028, qty=835.0, leverage=5, magic=88001)
+    coin.long1 = LegPosition(side="BUY", entry=0.31197, qty=2563.0, leverage=10, magic=88002)
+    closed: dict[str, object] = {}
+
+    def fake_close(c, reason, force=False):
+        closed["reason"] = reason
+        closed["force"] = force
+        closed["pnl"] = c.unrealized_pnl
+        return {"ok": True}
+
+    sc._close_all = fake_close  # type: ignore[method-assign]
+    sc._manage_positions(coin)
+    assert closed.get("reason") == "PARTITION_LOSS"
+    assert closed.get("force") is True
+    assert float(closed["pnl"]) <= -100.0
+
+    coin.price = 0.30
+    coin.unrealized_pnl = (0.3028 - 0.30) * 835.0 + (0.30 - 0.31197) * 2563.0
+    assert coin.unrealized_pnl > -100.0
+    assert sc._partition_loss_hit(coin, coin.price) is False
+    coin.price = 2.0
+    coin.unrealized_pnl = -500.0
+    assert sc._partition_loss_hit(coin, coin.price) is False
+    print("OK partition loss flattens the pair and ignores a foreign mark")
+
+
 def test_frozen() -> None:
     snap = assert_frozen_contract()
     assert snap["strategy_id"] == "short_first_v1"
@@ -217,5 +266,7 @@ if __name__ == "__main__":
     test_force_cool_short_circuit_unavailable()
     test_reconcile_defers_when_unavailable()
     test_close_all_no_already_flat_on_unavailable()
+    test_auto_legs_stay_inside_partition()
+    test_partition_loss_flattens_pair()
     test_frozen()
     print("test_sep23_capital_locks: ALL OK")

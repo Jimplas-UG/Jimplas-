@@ -5,6 +5,7 @@ Mirrors mt5_connector.py surface: status, bars, tick, order, positions.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import http.client
@@ -14,6 +15,7 @@ import math
 import os
 import re
 import ssl
+import sys
 import threading
 import time
 import urllib.error
@@ -539,6 +541,42 @@ class BinanceConnector:
                     self._used_weight_minute = minute
             return projected
 
+    # Frames that are already closing. A symbol book read (weight 5) may pass
+    # a weight pause from here. Bypass alone does not — SHORT_GONE confirms stay paused.
+    _CLOSE_READ_FRAMES = frozenset(
+        {
+            "close_position",
+            "close_by_position_side",
+            "close_all_positions",
+            "_close_all",
+            "_close_one",
+            "_position_side_qty",
+            "api_close",
+            "api_close_all",
+        }
+    )
+
+    @contextlib.contextmanager
+    def closing_book(self):
+        """Mark an in-progress close so its symbol book read can pass a weight pause."""
+        self._close_read_depth = int(getattr(self, "_close_read_depth", 0) or 0) + 1
+        try:
+            yield
+        finally:
+            self._close_read_depth = max(0, int(self._close_read_depth) - 1)
+
+    def _in_close_path(self) -> bool:
+        if int(getattr(self, "_close_read_depth", 0) or 0) > 0:
+            return True
+        frame = sys._getframe(1)
+        for _ in range(16):
+            if frame is None:
+                return False
+            if frame.f_code.co_name in self._CLOSE_READ_FRAMES:
+                return True
+            frame = frame.f_back
+        return False
+
     def _raise_if_weight_cooling(
         self,
         signed: bool,
@@ -555,9 +593,18 @@ class BinanceConnector:
         try:
             is_get = str(method).upper() == "GET"
             # Orders (POST/DELETE) still go out so a naked 10x can flatten.
-            # Every GET — including bypass confirms — stops once this process
-            # has reserved the soft budget. That is what kept weight under 2400.
+            # Discretionary GETs stop once this process has reserved the soft
+            # budget. bypass_rest_cool does not open that door (SHORT_GONE
+            # confirms stay paused). A close already in progress may read one
+            # symbol's book. A 418 is handled separately and is never bypassed.
             if not is_get:
+                return
+            close_symbol = str((params or {}).get("symbol") or "").strip()
+            close_path = str(path or "")
+            # One symbol book, or the single close-order lookup. Nothing else.
+            if self._in_close_path() and close_symbol and (
+                "positionRisk" in close_path or close_path == "/fapi/v1/order"
+            ):
                 return
             left = self._weight_pause_left()
             projected = float(getattr(self, "_local_weight", 0.0) or 0.0)
@@ -1593,11 +1640,12 @@ class BinanceConnector:
             "newClientOrderId": client_order_id[:36],
         }
         hedge = hedge_position_side.upper() if hedge_position_side else ""
-        if self.is_hedge_mode():
-            if hedge in ("LONG", "SHORT"):
-                params["positionSide"] = hedge
-            else:
-                params.update(self._position_side_param(side.upper(), reduce=True))
+        # A live LONG/SHORT row is hedge mode. A failed positionSide/dual read
+        # must not drop that side and send reduceOnly — Binance rejects it (-4061).
+        if hedge in ("LONG", "SHORT"):
+            params["positionSide"] = hedge
+        elif self.is_hedge_mode():
+            params.update(self._position_side_param(side.upper(), reduce=True))
         else:
             params["reduceOnly"] = "true"
         return params
@@ -1687,15 +1735,29 @@ class BinanceConnector:
                 return {"ok": True, "margin_type": mt, "symbol": sym, "note": "already_set"}
             return {"ok": False, "error": msg}
 
+    def _log_leverage_unconfirmed(self, symbol: str, message: str) -> None:
+        now = time.monotonic()
+        book = getattr(self, "_lev_unconfirmed_log", None)
+        if book is None:
+            book = self._lev_unconfirmed_log = {}
+        sym = symbol.upper()
+        if now - float(book.get(sym) or 0.0) < 30.0:
+            return
+        book[sym] = now
+        log.warning("%s", message)
+
     def _exchange_leverage_or_none(self, symbol: str) -> int | None:
         """Exchange leverage, or None when the read failed. Never invent the target."""
         sym = symbol.upper()
         if self.cfg.paper:
             return int(self.cfg.leverage)
+        # A paused minute must not reserve more weight on every manage tick.
+        if self.rest_ban_left() > 0 or self._weight_pause_left() > 0.05:
+            return None
         try:
             rows = self._request("GET", "/fapi/v2/positionRisk", {"symbol": sym}, signed=True)
         except Exception as e:
-            log.warning("symbol_leverage: %s", e)
+            self._log_leverage_unconfirmed(sym, f"symbol_leverage: {e}")
             return None
         if not rows:
             return None
@@ -1738,6 +1800,22 @@ class BinanceConnector:
             **({"warning": warning} if warning else {}),
         }
 
+    def _spendable_margin(self, wallet: float, free: float, upnl: float, withdraw: float) -> float:
+        """Free margin shown and cached for orders.
+
+        Testnet availableBalance (and sometimes maxWithdrawAmount) can sit far
+        above the wallet after a balance reset. Spendable funds stay on the wallet,
+        plus open profit, while a trade is open.
+        """
+        if wallet <= 0:
+            return max(0.0, free)
+        if free > wallet * 1.25:
+            ceiling = wallet + max(upnl, 0.0)
+            if 0 < withdraw <= ceiling * 1.25:
+                ceiling = max(ceiling, withdraw)
+            return min(free, ceiling)
+        return max(0.0, free)
+
     def account_info_light(self) -> dict[str, Any] | None:
         """Single Binance account call — for login/status hot paths."""
         if self.cfg.paper:
@@ -1746,7 +1824,12 @@ class BinanceConnector:
         total = float(data.get("totalWalletBalance", 0))
         upnl = float(data.get("totalUnrealizedProfit", 0))
         margin = float(data.get("totalPositionInitialMargin", 0))
-        free = float(data.get("availableBalance", 0))
+        free = self._spendable_margin(
+            total,
+            float(data.get("availableBalance", 0)),
+            upnl,
+            float(data.get("maxWithdrawAmount", 0) or 0),
+        )
         acct = {
             "login": self.cfg.api_key[:8] + "…",
             "server": "testnet" if self.cfg.testnet else "mainnet",
@@ -1861,7 +1944,12 @@ class BinanceConnector:
         total = float(data.get("totalWalletBalance", 0))
         upnl = float(data.get("totalUnrealizedProfit", 0))
         margin = float(data.get("totalPositionInitialMargin", 0))
-        free = float(data.get("availableBalance", 0))
+        free = self._spendable_margin(
+            total,
+            float(data.get("availableBalance", 0)),
+            upnl,
+            float(data.get("maxWithdrawAmount", 0) or 0),
+        )
         margin_type = self._account_margin_type_from_positions()
         acct = {
             "login": self.cfg.api_key[:8] + "…",
@@ -2211,7 +2299,7 @@ class BinanceConnector:
                 self._prepared_cache[key] = time.time()
                 return True
             if confirmed is None:
-                log.warning("leverage verify %s unconfirmed — fail closed", sym)
+                self._log_leverage_unconfirmed(sym, f"leverage verify {sym} unconfirmed — fail closed")
                 return False
             log.warning(
                 "prepared cache stale %s: exchange=%sx wanted=%sx — re-set",
@@ -2222,7 +2310,7 @@ class BinanceConnector:
             self._prepared_cache.pop(key, None)
         current = self._exchange_leverage_or_none(sym)
         if current is None:
-            log.warning("ensure_exchange_leverage %s unconfirmed — fail closed", sym)
+            self._log_leverage_unconfirmed(sym, f"ensure_exchange_leverage {sym} unconfirmed — fail closed")
             return False
         if current == target:
             self.cfg.leverage = target
@@ -2378,13 +2466,15 @@ class BinanceConnector:
         ):
             return list(self._positions_cache)
         # force=True during REST/weight cool: uncertain book — never pretend flat.
-        if force and not bypass_rest_cool and self.rest_cooling_left() > 0.05:
+        # A close already in progress may still read one symbol (see _raise_if_weight_cooling).
+        close_read = self._in_close_path()
+        if force and not bypass_rest_cool and not close_read and self.rest_cooling_left() > 0.05:
             raise PositionsUnavailable(
                 f"REST cooling ({self._rest_cool_reason or 'rate'}) "
                 f"{self.rest_cooling_left():.0f}s — positions unconfirmed"
             )
         weight_left = self._weight_pause_left()
-        if force and not bypass_rest_cool and weight_left > 0.05:
+        if force and not bypass_rest_cool and not close_read and weight_left > 0.05:
             raise PositionsUnavailable(
                 f"REST cooling (weight) {weight_left:.0f}s — positions unconfirmed"
             )
@@ -2508,6 +2598,49 @@ class BinanceConnector:
             log.warning("query_order_by_client_id %s %s: %s", symbol, client_order_id, e)
             return None
 
+    def note_user_fill(self, order: dict[str, Any]) -> None:
+        """Remember a private-stream fill so a close ack with no executedQty is not a failure."""
+        status = str(order.get("X") or "").upper()
+        if status not in ("FILLED", "PARTIALLY_FILLED"):
+            return
+        try:
+            qty = float(order.get("z") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty <= 0:
+            return
+        row = {
+            "qty": qty,
+            "ts": time.time(),
+            "symbol": str(order.get("s") or "").upper(),
+            "status": status,
+        }
+        book = getattr(self, "_user_fills", None)
+        if book is None:
+            book = self._user_fills = {}
+        cid = str(order.get("c") or "")[:36]
+        oid = str(order.get("i") or "")
+        if cid:
+            book[cid] = row
+        if oid:
+            book[f"id:{oid}"] = row
+        if len(book) > 200:
+            oldest = sorted(book.items(), key=lambda kv: float(kv[1].get("ts") or 0))[:50]
+            for key, _row in oldest:
+                book.pop(key, None)
+
+    def _user_fill_qty(self, client_order_id: str, *, max_age_s: float = 120.0) -> float:
+        book = getattr(self, "_user_fills", None) or {}
+        row = book.get(str(client_order_id or "")[:36])
+        if not isinstance(row, dict):
+            return 0.0
+        if time.time() - float(row.get("ts") or 0) > max_age_s:
+            return 0.0
+        try:
+            return max(0.0, float(row.get("qty") or 0))
+        except (TypeError, ValueError):
+            return 0.0
+
     def _confirmed_executed_qty(
         self,
         resp: dict[str, Any] | None,
@@ -2520,9 +2653,17 @@ class BinanceConnector:
             raw = resp.get("executedQty")
             if raw is not None and str(raw) != "":
                 try:
-                    return max(0.0, float(raw))
+                    qty = max(0.0, float(raw))
                 except (TypeError, ValueError):
-                    pass
+                    qty = 0.0
+                if qty > 1e-12:
+                    return qty
+        streamed = self._user_fill_qty(client_order_id)
+        if streamed <= 1e-12 and isinstance(resp, dict) and resp.get("orderId"):
+            streamed = self._user_fill_qty(f"id:{resp.get('orderId')}")
+        if streamed > 1e-12:
+            log.info("close fill adopted from user stream %s qty=%s", client_order_id, streamed)
+            return streamed
         existing = self.query_order_by_client_id(symbol, client_order_id) if client_order_id else None
         if isinstance(existing, dict):
             try:
@@ -2681,7 +2822,13 @@ class BinanceConnector:
             return {"ok": False, "error": reason}
 
         acct = self._request("GET", "/fapi/v2/account", signed=True)
-        free = float(acct.get("availableBalance", 0))
+        wallet = float(acct.get("totalWalletBalance") or 0)
+        free = self._spendable_margin(
+            wallet,
+            float(acct.get("availableBalance", 0)),
+            float(acct.get("totalUnrealizedProfit") or 0),
+            float(acct.get("maxWithdrawAmount") or 0),
+        )
         risk_usd = qty * abs(intended - (sl or intended))
         if sl and free < risk_usd * 1.5:
             return {"ok": False, "error": f"insufficient_margin free={free:.2f}"}
@@ -3904,7 +4051,13 @@ class BinanceConnector:
         if self.cfg.api_key and not self.cfg.paper:
             try:
                 acct = self._request("GET", "/fapi/v2/account", signed=True)
-                free = float(acct.get("availableBalance", 0))
+                wallet = float(acct.get("totalWalletBalance") or 0)
+                free = self._spendable_margin(
+                    wallet,
+                    float(acct.get("availableBalance", 0)),
+                    float(acct.get("totalUnrealizedProfit") or 0),
+                    float(acct.get("maxWithdrawAmount") or 0),
+                )
                 notional = qty * intended
                 if free < notional / max(exchange_lev, 1) * 1.1:
                     return {"ok": False, "error": f"insufficient_margin free={free:.2f}"}

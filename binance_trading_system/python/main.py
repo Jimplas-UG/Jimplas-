@@ -1607,8 +1607,10 @@ def api_close(body: CloseBody):
                     raise HTTPException(status_code=400, detail={"ok": False, "error": err, **r})
 
         # Verify exchange state before telling the client CLOSED.
+        # Symbol read only — a weight pause must not turn a filled close into CLOSE_FAILED.
         try:
-            remaining = connector.positions(sym, force=True)
+            with connector.closing_book():
+                remaining = connector.positions(sym, force=True, bypass_rest_cool=True)
         except PositionsUnavailable as e:
             log.warning("close verify positions unavailable %s: %s — not inventing flat", sym, e)
             remaining = None

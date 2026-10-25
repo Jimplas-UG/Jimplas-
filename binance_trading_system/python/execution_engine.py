@@ -318,7 +318,15 @@ class ExecutionEngine:
             return 1e9
         try:
             acct = self._connector._request("GET", "/fapi/v2/account", signed=True)
+            wallet = float(acct.get("totalWalletBalance") or 0)
             free = float(acct.get("availableBalance", 0))
+            if hasattr(self._connector, "_spendable_margin"):
+                free = self._connector._spendable_margin(
+                    wallet,
+                    free,
+                    float(acct.get("totalUnrealizedProfit") or 0),
+                    float(acct.get("maxWithdrawAmount") or 0),
+                )
             self._account_cache = (free, 0.0, now)
             self._account_cache_ts = now
             return free

@@ -8,7 +8,9 @@ Each recovery long requires a confirmed primary short, settle delay, and live ad
 (not peak-only latch). While the short is underwater, Long 1 / Long 2 stay paired
 (no independent TP/0.5% trail) until rescue, invalidation, or a *net-clear* short TP
 flattens all. Hard SHORT_TP while hedges are open is deferred when episode net is still
-red (same discipline as SHORT_PULLBACK) — wait RESCUE / INVALIDATION / SMART_EXIT.
+red (same discipline as SHORT_PULLBACK) — wait RESCUE / INVALIDATION / SMART_EXIT /
+PARTITION_LOSS. Open legs are clipped so committed margin stays inside the $100
+partition. A same-symbol floating loss of $100 flattens the pair.
 Short TP at 2.5% down; the short trail keeps a profitable-MFE floor so it never acts
 as a hard stop. Recovery longs are never left without the primary short.
 """
@@ -18,6 +20,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -114,9 +118,18 @@ SIGNALS_PER_TF = int(os.environ.get("SCANNER_SIGNALS_PER_TF", "5"))
 TIMEFRAMES_MIN = (1, 3, 5, 15)
 ENTRY_TIMEFRAME = os.environ.get("SCANNER_ENTRY_TF", "15m").strip().lower()
 SIGNAL_WINDOW_SEC = {f"{m}m": m * 60 for m in TIMEFRAMES_MIN}
-RISK_CONFIG_PATH = os.environ.get(
-    "SCANNER_RISK_CONFIG_PATH", "/var/lib/bilshenz/scanner-risk.json"
-)
+def _default_risk_path() -> str:
+    explicit = os.environ.get("SCANNER_RISK_CONFIG_PATH")
+    if explicit:
+        return explicit
+    base = os.path.basename(sys.argv[0] if sys.argv else "")
+    # Test processes must not read or write the operator halt file.
+    if base.startswith("test_"):
+        return os.path.join(tempfile.gettempdir(), f"bilshenz-test-risk-{os.getpid()}.json")
+    return "/var/lib/bilshenz/scanner-risk.json"
+
+
+RISK_CONFIG_PATH = _default_risk_path()
 
 MAGIC_SHORT = 88001
 MAGIC_LONG1 = 88002
@@ -2836,6 +2849,43 @@ class MomentumScanner:
             qty = max(0.001, round(qty, 3))
         return qty
 
+    def _open_margin_usd(self, coin: CoinStrategy) -> float:
+        """Margin already committed on this symbol at the locked leg leverages."""
+        total = 0.0
+        if coin.short and coin.short.entry > 0 and coin.short.qty > 0:
+            total += abs(float(coin.short.qty) * float(coin.short.entry)) / float(SHORT_LEVERAGE)
+        if coin.long1 and coin.long1.entry > 0 and coin.long1.qty > 0:
+            total += abs(float(coin.long1.qty) * float(coin.long1.entry)) / float(LONG1_LEVERAGE)
+        if coin.long2 and coin.long2.entry > 0 and coin.long2.qty > 0:
+            total += abs(float(coin.long2.qty) * float(coin.long2.entry)) / float(LONG2_LEVERAGE)
+        return total
+
+    def _qty_for_room(
+        self,
+        coin: CoinStrategy,
+        symbol: str,
+        price: float,
+        leverage: int,
+        partition_pct: float,
+    ) -> float:
+        """Requested leg size, clipped so committed margin cannot pass $100."""
+        self._force_locked_partition_usd(persist=False)
+        wanted = float(self._partition_usd) * float(partition_pct) / 100.0
+        room = max(0.0, float(LOCKED_PARTITION_USD) - self._open_margin_usd(coin))
+        use = min(wanted, room)
+        if use < 1.0:
+            log.warning(
+                "scanner %s skip leg — $%.0f partition already committed %.2f",
+                symbol,
+                LOCKED_PARTITION_USD,
+                self._open_margin_usd(coin),
+            )
+            return 0.0
+        full = self._qty_for(symbol, price, leverage, partition_pct)
+        if wanted <= 0 or full <= 0:
+            return 0.0
+        return full * (use / wanted)
+
     def max_manual_open_qty(self, symbol: str, side: str, price: float) -> float:
         """Hard ceiling for manual desk opens — locked $100 partition stack (Sep23-25).
 
@@ -2957,7 +3007,9 @@ class MomentumScanner:
         signal_id = f"{sym}_SHORT_{coin.entry_signal_key or coin.last_update_ms}"
         try:
             entry = coin.price
-            qty = self._qty_for(sym, entry, SHORT_LEVERAGE, self._short_pct)
+            qty = self._qty_for_room(coin, sym, entry, SHORT_LEVERAGE, self._short_pct)
+            if qty <= 0:
+                return
             tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
             if coin.submitted_entry_signal_id == signal_id:
                 self._recover_primary_short_entry(coin, sym, qty, entry, tp)
@@ -3041,7 +3093,9 @@ class MomentumScanner:
         signal_id = f"{sym}_LONG1_{coin.entry_signal_key or coin.last_update_ms}"
         try:
             entry = coin.price
-            qty = self._qty_for(sym, entry, LONG1_LEVERAGE, self._long1_pct)
+            qty = self._qty_for_room(coin, sym, entry, LONG1_LEVERAGE, self._long1_pct)
+            if qty <= 0:
+                return
             tp = entry * (1.0 + LONG_TP_PCT / 100.0)
             if coin.submitted_long1_signal_id == signal_id:
                 if coin.long1:
@@ -3106,7 +3160,9 @@ class MomentumScanner:
         signal_id = f"{sym}_LONG2_{coin.entry_signal_key or coin.last_update_ms}"
         try:
             entry = coin.price
-            qty = self._qty_for(sym, entry, LONG2_LEVERAGE, self._long2_pct)
+            qty = self._qty_for_room(coin, sym, entry, LONG2_LEVERAGE, self._long2_pct)
+            if qty <= 0:
+                return
             tp = entry * (1.0 + LONG_TP_PCT / 100.0)
             if coin.submitted_long2_signal_id == signal_id:
                 if coin.long2:
@@ -3178,6 +3234,28 @@ class MomentumScanner:
             return (price - leg.entry) * leg.qty
         return (leg.entry - price) * leg.qty
 
+    def _marks_plausible(self, coin: CoinStrategy, price: float) -> bool:
+        """Reject a mark that cannot belong to this symbol's open legs."""
+        if price <= 0:
+            return False
+        for leg in (coin.short, coin.long1, coin.long2):
+            if leg is None:
+                continue
+            entry = float(leg.entry or 0)
+            if entry <= 0:
+                return False
+            if abs(price - entry) / entry > 0.45:
+                return False
+        return True
+
+    def _partition_loss_hit(self, coin: CoinStrategy, price: float) -> bool:
+        """True when this symbol's floating loss has used up the $100 partition."""
+        if not (coin.short or coin.long1 or coin.long2):
+            return False
+        if not self._marks_plausible(coin, price):
+            return False
+        return float(coin.unrealized_pnl) <= -float(LOCKED_PARTITION_USD)
+
     def _manage_positions(self, coin: CoinStrategy) -> None:
         if not self._ensure_pair_coherence(coin):
             return
@@ -3217,6 +3295,15 @@ class MomentumScanner:
         long1_pnl = self._leg_pnl(coin.long1, price) if coin.long1 else 0.0
         long2_pnl = self._leg_pnl(coin.long2, price) if coin.long2 else 0.0
         coin.unrealized_pnl = short_pnl + long1_pnl + long2_pnl
+        if self._partition_loss_hit(coin, price):
+            log.error(
+                "scanner %s PARTITION_LOSS pnl=%.4f breaches $%.0f partition — flattening",
+                sym,
+                coin.unrealized_pnl,
+                LOCKED_PARTITION_USD,
+            )
+            self._close_all(coin, "PARTITION_LOSS", force=True)
+            return
         cost_buf = self._exit_cost_buffer_usd()
 
         if self._effective_smart_exit_pct() > 0 and self._partition_usd > 0:

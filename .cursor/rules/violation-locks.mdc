@@ -13,8 +13,10 @@ Operator ordered Oct cascade layers removed, then ordered these **capital locks*
 2. **Hedge episode paired hold** — once adverse peak ≥ +2% or L1/L2 live/closed, **no solo** Long TP / 0.5% pullback while short still open (`_solo_hedge_exit_allowed` / `_try_close_hedge_leg`).
 3. **No L1/L2 at/past 6.5% invalidation** — gates in `_long1_entry_allowed` / `_long2_entry_allowed`.
 4. **Manual opens capped** to $100 partition legs via `clamp_manual_open_qty` (reject oversize).
-5. **MARKET_LOT_SIZE** clamp on opens; **chunked closes**, LONG before SHORT, **abort SHORT if LONG residual**.
-6. **`force=True` positions fail-closed empty** — never sticky ghosts into risk/leverage.
+5. **Auto legs cannot commit past $100** — `_qty_for_room` clips Short/Long1/Long2 so committed margin stays inside the partition. 50/40/40 stays the request; the last leg is skipped or cut when the slice is full.
+6. **PARTITION_LOSS** — same-symbol floating loss of $100 flattens the whole pair (`_close_all`, force), including through paired hold. A bad mark (`|mark-entry|/entry > 0.45`) must not fire it.
+7. **MARKET_LOT_SIZE** clamp on opens; **chunked closes**, LONG before SHORT, **abort SHORT if LONG residual**.
+8. **`force=True` positions fail-closed empty** — never sticky ghosts into risk/leverage.
 
 ## Still forbidden (Oct cascade)
 

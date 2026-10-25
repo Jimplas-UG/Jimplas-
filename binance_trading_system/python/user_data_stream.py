@@ -131,6 +131,8 @@ class BinanceUserDataStream:
                 self._connector.invalidate_positions_cache()
             if hasattr(self._connector, "_invalidate_fresh_book"):
                 self._connector._invalidate_fresh_book()
+            if hasattr(self._connector, "note_user_fill"):
+                self._connector.note_user_fill(o)
             log.info(
                 "USER_WS order %s %s %s status=%s",
                 sym,
