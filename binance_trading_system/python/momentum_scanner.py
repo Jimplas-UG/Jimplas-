@@ -2047,7 +2047,14 @@ class MomentumScanner:
         from binance_connector import PositionsUnavailable
 
         try:
-            positions = self._connector.positions(force=True)
+            # Prefer shared/confirmed book. Full-book force every 30s was the testnet
+            # HARD→418 stampede (one call ≈ 1.7k–2.8k used-weight). Connector gates
+            # full-book; confirmed_positions reuses last_good inside the share window.
+            conf = getattr(self._connector, "confirmed_positions", None)
+            if callable(conf):
+                positions = conf(max_age_s=30.0)
+            else:
+                positions = self._connector.positions(force=True)
         except PositionsUnavailable as e:
             log.warning("reconcile deferred — positions unavailable: %s", e)
             return {"ok": False, "deferred": True, "error": "positions_unavailable", "detail": str(e)}
@@ -3450,14 +3457,19 @@ class MomentumScanner:
                 # Hedged hard-TP must not flatten a net-red episode (C98/RLC leak).
                 # Same net gate as SHORT_PULLBACK; orphan longs still forbidden once we do close.
                 if not self._hedged_short_exit_net_ok(coin):
-                    log.info(
-                        "scanner %s defer %s — hedges open net=%.4f < cost_buf=%.4f "
-                        "(paired hold until RESCUE/INVALIDATION/SMART_EXIT)",
-                        sym,
-                        short_exit_reason,
-                        coin.unrealized_pnl,
-                        cost_buf,
-                    )
+                    # Throttle: manage ticks every second — do not flood the log during paired hold.
+                    now_m = time.monotonic()
+                    last = float(getattr(self, "_defer_tp_log_mono", 0.0) or 0.0)
+                    if now_m - last >= 30.0:
+                        self._defer_tp_log_mono = now_m
+                        log.info(
+                            "scanner %s defer %s — hedges open net=%.4f < cost_buf=%.4f "
+                            "(paired hold until RESCUE/INVALIDATION/SMART_EXIT/PARTITION_LOSS)",
+                            sym,
+                            short_exit_reason,
+                            coin.unrealized_pnl,
+                            cost_buf,
+                        )
                     return
                 # Recovery longs may never outlive the primary short.
                 self._close_all(coin, short_exit_reason)

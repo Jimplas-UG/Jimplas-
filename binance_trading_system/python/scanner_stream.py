@@ -28,8 +28,9 @@ MAINNET_REST = "https://fapi.binance.com"
 TESTNET_REST = "https://testnet.binancefuture.com"
 RECONNECT_MIN_SEC = 0.02
 RECONNECT_MAX_SEC = 0.6
-REST_POLL_SEC = 0.75
-WS_STALL_SEC = 2.5
+# Sep quiet rein: when WS is silent, do not stampede REST every 750ms (IP weight death).
+REST_POLL_SEC = 3.0
+WS_STALL_SEC = 5.0
 CLIENT_HB_SEC = 1.5
 # Offload on_tick so asyncio can answer Binance WS keepalive pings (prevents 1011 timeouts).
 # Single worker + scanner RLock — prevents concurrent ticks from racing strategy state.

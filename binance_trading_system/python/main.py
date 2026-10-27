@@ -291,7 +291,8 @@ async def lifespan(app: FastAPI):
 
     async def _seed_scanner_history() -> None:
         # Wait for weight from exchangeInfo/account boot to settle before kline fan-out.
-        await asyncio.sleep(8.0)
+        # Sep quiet: never seed into an already-hot minute (12×klines was the restart HARD spike).
+        await asyncio.sleep(20.0)
         try:
             if connector.rest_cooling_left() > 0.5:
                 log.warning("scanner history seed deferred — REST cool")
@@ -300,6 +301,10 @@ async def lifespan(app: FastAPI):
             weight_left = float(pause() or 0.0) if callable(pause) else 0.0
             if weight_left > 0.05:
                 log.warning("scanner history seed deferred — weight cool %.0fs", weight_left)
+                return
+            used = float(getattr(connector, "used_weight_1m", lambda: 0.0)() or 0.0)
+            if used >= 800.0:
+                log.warning("scanner history seed deferred — used weight already %.0f", used)
                 return
             n = await asyncio.to_thread(momentum_scanner.seed_history_from_klines)
             log.info("scanner history seed complete (%s)", n)
@@ -1243,7 +1248,21 @@ def api_bars(symbol: str, count: int = 320, from_ms: int | None = None, to_ms: i
     cache_key = (sym, int(count), from_ms, to_ms)
     now = time.time()
     cached = _bars_cache.get(cache_key)
-    if cached and now - cached[0] < _PUBLIC_CACHE_TTL_SEC:
+    weight_left = 0.0
+    try:
+        weight_left = float(connector._weight_pause_left() or 0.0)
+    except Exception:
+        weight_left = 0.0
+    # Sep quiet rein: never stampede klines during a weight pause — serve cache or 503.
+    if weight_left > 0.05:
+        if cached:
+            bars = cached[1]
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Binance REST cooling (weight) {weight_left:.0f}s — bars paused",
+            )
+    elif cached and now - cached[0] < _PUBLIC_CACHE_TTL_SEC:
         bars = cached[1]
     else:
         try:

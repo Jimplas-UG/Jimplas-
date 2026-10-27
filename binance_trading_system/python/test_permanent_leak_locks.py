@@ -560,21 +560,36 @@ def test_positions_single_flight_and_order_invalidation() -> None:
     from binance_connector import BinanceConnector, BinanceConfig
 
     c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
-    calls = {"n": 0}
+    calls = {"n": 0, "paths": []}
     row = {"symbol": "BTCUSDT", "positionAmt": "-1", "positionSide": "SHORT", "entryPrice": "1",
            "unRealizedProfit": "0", "liquidationPrice": "0", "leverage": "5", "marginType": "isolated"}
 
     def fake_once(method, path, params, signed, timeout, base_url, *, bypass_rest_cool):
+        calls["paths"].append(path)
         if "positionRisk" in path:
+            # Testnet full-book must not use this path; symbol-scoped ok.
+            assert (params or {}).get("symbol"), "testnet must not full-book positionRisk"
             calls["n"] += 1
             return [row]
+        if path.endswith("/account") or path.endswith("/fapi/v2/account"):
+            calls["n"] += 1
+            return {
+                "positions": [row],
+                "totalWalletBalance": "100",
+                "availableBalance": "100",
+                "totalUnrealizedProfit": "0",
+                "totalPositionInitialMargin": "0",
+                "maxWithdrawAmount": "100",
+            }
         return {"orderId": 1, "status": "FILLED"}
 
     c._request_once = fake_once  # type: ignore[assignment]
     c.positions(force=True)
     c.positions(force=True)
     c.positions("BTCUSDT", force=True)
-    assert calls["n"] == 1, f"concurrent force reads must share one positionRisk, got {calls['n']}"
+    assert calls["n"] == 1, f"concurrent force reads must share one book read, got {calls['n']}"
+    assert not any("positionRisk" in p and "BTCUSDT" not in str(calls) for p in calls["paths"][:1])
+    assert any("/account" in p for p in calls["paths"]), "testnet full book must use account"
     c._request("POST", "/fapi/v1/order", {"symbol": "BTCUSDT"}, signed=True)
     c.positions(force=True)
     assert calls["n"] == 2, "any order must invalidate the shared book"
@@ -702,7 +717,16 @@ def test_sep_premium_quiet_rest_reins() -> None:
     assert bc.REST_WEIGHT_HARD_LIMIT <= 2100.0
     assert bc.POSITIONS_SHARE_S >= 30.0
     assert bc.POSITIONS_SHARE_FLAT_S >= 60.0
+    assert bc.FULL_BOOK_MIN_INTERVAL_S >= 120.0
+    assert bc.FULL_BOOK_WEIGHT_GATE <= 500.0
     assert ms.RECONCILE_IDLE_MS >= 120_000
+    import inspect
+    assert "POSITIONS_SHARE_S" in inspect.getsource(bc.BinanceConnector.confirmed_positions)
+    assert "POSITIONS_SHARE_S" in inspect.getsource(bc.BinanceConnector.exchange_short_qty)
+    assert "_full_book_rest_allowed" in inspect.getsource(bc.BinanceConnector._positions_live)
+    assert "confirmed_positions" in inspect.getsource(ms.MomentumScanner._reconcile_from_exchange_locked)
+    import scanner_stream as ss
+    assert float(ss.REST_POLL_SEC) >= 2.5
 
     c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
     rest_calls = {"n": 0}
@@ -743,7 +767,71 @@ def test_sep_premium_quiet_rest_reins() -> None:
     assert pm._thread is None
     main_src = Path(__file__).with_name("main.py").read_text(encoding="utf-8")
     assert "set_tick_provider" in main_src
+    assert "bars paused" in main_src or "weight) {weight_left" in main_src
+    # Mainnet public klines must not trip the testnet desk pause.
+    c._weight_cool_until = 0.0
+    c._used_weight_1m = 0.0
+    c._local_weight = 0.0
+    c._note_rest_success("2200", signed=False, host="fapi.binance.com")
+    assert c._weight_pause_left() <= 0.05, "foreign-host weight must not pause the trading host"
+    c._note_rest_success("2200", signed=True, host=c._trading_host())
+    assert c._weight_pause_left() > 0.05
     print("OK Sep premium quiet-REST reins (weight/bookTicker/pos_mgr/idle)")
+
+
+def test_full_book_position_risk_gated() -> None:
+    """Testnet must never discretionary full-book positionRisk — account book instead."""
+    import binance_connector as bc
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    calls = {"risk": 0, "account": 0}
+    row = {
+        "symbol": "PTBUSDT",
+        "positionAmt": "-10",
+        "entryPrice": "1",
+        "unRealizedProfit": "0",
+        "leverage": 5,
+        "marginType": "isolated",
+        "positionSide": "SHORT",
+        "liquidationPrice": "0",
+    }
+
+    def fake_req(method, path, params=None, signed=False, timeout=8.0, base_url=None, *, bypass_rest_cool=False):
+        if "positionRisk" in path:
+            calls["risk"] += 1
+            raise AssertionError("testnet must not call full-book positionRisk")
+        if "account" in path:
+            calls["account"] += 1
+            return {
+                "positions": [row],
+                "totalWalletBalance": "100",
+                "availableBalance": "100",
+                "totalUnrealizedProfit": "0",
+                "totalPositionInitialMargin": "0",
+                "maxWithdrawAmount": "100",
+            }
+        raise AssertionError(f"unexpected {path}")
+
+    c._request = fake_req  # type: ignore[assignment]
+    assert c._full_book_rest_allowed() is False
+    first = c.positions(force=True)
+    assert len(first) == 1 and calls["account"] == 1 and calls["risk"] == 0
+    second = c.positions(force=True)
+    assert second == first and calls["account"] == 1
+    # Symbol-scoped on testnet uses sticky/account — no positionRisk.
+    c._book_fresh_ts = 0.0
+    c._account_book_mono = 0.0
+    before = calls["account"]
+    c.positions("PTBUSDT", force=True)
+    assert calls["risk"] == 0
+    assert calls["account"] >= before
+    # Mainnet still may full-book when cold + interval ok.
+    m = BinanceConnector(BinanceConfig(paper=False, testnet=False, api_key="k", api_secret="s"))
+    assert m._full_book_rest_allowed() is True
+    assert bc.FULL_BOOK_MIN_INTERVAL_S >= 120.0
+    assert bc.ACCOUNT_INFO_TTL_S >= 30.0
+    print("OK testnet avoids positionRisk; account book + status TTL")
 
 
 if __name__ == "__main__":
@@ -757,6 +845,7 @@ if __name__ == "__main__":
     test_close_symbol_read_survives_weight_pause()
     test_leverage_read_does_not_feed_the_weight_pause()
     test_sep_premium_quiet_rest_reins()
+    test_full_book_position_risk_gated()
     test_no_rule_kernel_safe_mode()
     test_naked_short_never_10x()
     test_hedged_short_tp_net_red_gate()

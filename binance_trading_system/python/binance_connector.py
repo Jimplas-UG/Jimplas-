@@ -65,11 +65,20 @@ def _retry_after_seconds(v: Any) -> float | None:
 # stampede to 3k+/min before the pause engaged (Oct 12–20 418/SHORT_GONE storm).
 REST_WEIGHT_SOFT_LIMIT = 1600.0
 REST_WEIGHT_HARD_LIMIT = 2100.0
-# Full-book positionRisk costs ~230 weight on testnet (measured), so ≤6/min is the budget.
+# Full-book positionRisk on testnet returns used-weight ~1700–2800 for ONE call (Oct 27
+# measured: every reconcile → HARD → 418). Mainnet docs say weight 5; testnet does not.
+# Never hot-path full-book. Symbol-scoped is weight 5. Gate full-book to ≥2 min and low weight.
 # Our orders and user-stream ORDER/ACCOUNT events invalidate the shared book immediately.
 # Idle flat book can share longer — 10s share + 12s force-reconcile was enough to 418 alone.
 POSITIONS_SHARE_S = 30.0
 POSITIONS_SHARE_FLAT_S = 60.0
+FULL_BOOK_MIN_INTERVAL_S = 120.0
+FULL_BOOK_WEIGHT_GATE = 400.0
+# Local reserve only — real testnet cost can be 2k+; interval gate stops a second call.
+FULL_BOOK_EST_WEIGHT = 500.0
+# Status/reconcile were re-hitting /account the instant a 75s pause ended → HARD loop.
+ACCOUNT_INFO_TTL_S = 45.0
+ACCOUNT_BOOK_MIN_INTERVAL_S = 120.0
 # Prefer WS / sticky mid — REST bookTicker every 2s was the #1 weight burner on FRA.
 BOOK_TICKER_CACHE_TTL_S = 5.0
 MARK_PRICE_CACHE_TTL_S = 8.0
@@ -431,9 +440,23 @@ class BinanceConnector:
             "symbol": symbol,
         }
 
-    def _note_rest_success(self, used_weight: Any = None, *, signed: bool = False) -> None:
+    def _trading_host(self) -> str:
+        return str(urllib.parse.urlparse(self.base_url).hostname or "").lower()
+
+    def _note_rest_success(
+        self,
+        used_weight: Any = None,
+        *,
+        signed: bool = False,
+        host: str | None = None,
+    ) -> None:
         if getattr(self, "_rest_ban_strikes", 0) and self.rest_ban_left() <= 0:
             self._rest_ban_strikes = 0
+        # Mainnet public klines (history) must not drive the testnet desk weight pause.
+        trade_host = self._trading_host()
+        req_host = str(host or trade_host or "").lower()
+        if trade_host and req_host and req_host != trade_host:
+            return
         w = _float_or_none(used_weight)
         if w is None:
             return
@@ -450,6 +473,10 @@ class BinanceConnector:
             # Spill into the next minute so the retry herd cannot restart at :00.
             if w >= REST_WEIGHT_HARD_LIMIT:
                 secs += 25.0
+            # Testnet full-book blowouts stay in the rolling 60s window — hold ≥75s so
+            # the next reconcile cannot re-arm HARD every minute into a 418.
+            if w >= REST_WEIGHT_SOFT_LIMIT:
+                secs = max(secs, 75.0)
             until = time.monotonic() + secs
             if until > getattr(self, "_weight_cool_until", 0.0):
                 self._weight_cool_until = until
@@ -498,7 +525,7 @@ class BinanceConnector:
         p = str(path or "")
         has_symbol = bool((params or {}).get("symbol"))
         if "positionRisk" in p:
-            return 5.0 if has_symbol else 230.0
+            return 5.0 if has_symbol else FULL_BOOK_EST_WEIGHT
         if "bookTicker" in p:
             return 2.0 if has_symbol else 5.0
         if "klines" in p:
@@ -746,7 +773,11 @@ class BinanceConnector:
                 elif resp.status == 429:
                     self._engage_rest_cool("429", min(max(retry_after or 10.0, 1.0), 60.0))
                 raise RuntimeError(f"{msg} (code={code}, http={resp.status})")
-            self._note_rest_success(resp.getheader("X-MBX-USED-WEIGHT-1M"), signed=signed)
+            self._note_rest_success(
+                resp.getheader("X-MBX-USED-WEIGHT-1M"),
+                signed=signed,
+                host=host,
+            )
             return json.loads(body) if body else {}
         except Exception:
             self._close_http()
@@ -757,6 +788,14 @@ class BinanceConnector:
                 self._weight_reserved_for_call = False
             if mutating:
                 self._invalidate_fresh_book()
+
+    def _foreign_rest_host(self, base_url: str | None) -> bool:
+        """True when the request host is not the live trading host (e.g. mainnet klines on testnet desk)."""
+        if not base_url:
+            return False
+        req = str(urllib.parse.urlparse(base_url).hostname or "").lower()
+        trade = self._trading_host()
+        return bool(req and trade and req != trade)
 
     def _request(
         self,
@@ -770,13 +809,16 @@ class BinanceConnector:
         bypass_rest_cool: bool = False,
     ) -> Any:
         self._weight_depth = int(getattr(self, "_weight_depth", 0) or 0) + 1
+        foreign = self._foreign_rest_host(base_url)
         try:
             self._raise_if_banned()
-            self._raise_if_weight_cooling(
-                signed, method=method, path=path, params=params, bypass_rest_cool=bypass_rest_cool
-            )
-            if not bypass_rest_cool:
-                self._raise_if_rest_cooling()
+            # Foreign-host public history must not reserve or trip the trading-host pause.
+            if not foreign:
+                self._raise_if_weight_cooling(
+                    signed, method=method, path=path, params=params, bypass_rest_cool=bypass_rest_cool
+                )
+                if not bypass_rest_cool:
+                    self._raise_if_rest_cooling()
             if _is_order_mutation(method, path):
                 self._invalidate_fresh_book()
                 try:
@@ -825,7 +867,11 @@ class BinanceConnector:
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     out = json.loads(resp.read().decode("utf-8"))
-                    self._note_rest_success(resp.headers.get("X-MBX-USED-WEIGHT-1M"), signed=signed)
+                    self._note_rest_success(
+                        resp.headers.get("X-MBX-USED-WEIGHT-1M"),
+                        signed=signed,
+                        host=urllib.parse.urlparse(root).hostname,
+                    )
                     return out
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", errors="replace")
@@ -1514,7 +1560,7 @@ class BinanceConnector:
         self,
         symbol: str | None = None,
         *,
-        max_age_s: float = 1.5,
+        max_age_s: float = POSITIONS_SHARE_S,
         bypass_rest_cool: bool = False,
     ) -> list[dict[str, Any]]:
         """Hot-path book: reuse a fresh *confirmed* snapshot; else force REST.
@@ -1522,8 +1568,9 @@ class BinanceConnector:
         Never invents flat from sticky on error (raises PositionsUnavailable).
         Cuts per-tick force spam that caused live 429 → false SHORT_GONE.
 
-        While REST-cool is engaged, trust last_good up to 30s instead of force-spam
-        (force would only raise unavailable and inflate 429 storms).
+        Default share is POSITIONS_SHARE_S (30s) — the old 1.5s default re-hit
+        full-book positionRisk every manage tick and burned the Sep quiet edge.
+        While REST-cool / weight-pause is engaged, trust last_good longer.
         """
         sym = (symbol or "").upper() or None
         now = time.time()
@@ -1560,7 +1607,7 @@ class BinanceConnector:
             )
         return self.positions(sym, force=True, bypass_rest_cool=bypass_rest_cool)
 
-    def exchange_short_qty(self, symbol: str | None = None, *, max_age_s: float = 1.5) -> float:
+    def exchange_short_qty(self, symbol: str | None = None, *, max_age_s: float = POSITIONS_SHARE_S) -> float:
         """Open short leg size on symbol (hedge SHORT or one-way SELL)."""
         sym = (symbol or self.cfg.symbol).upper()
         total = 0.0
@@ -1575,7 +1622,7 @@ class BinanceConnector:
                 total += float(p.get("volume") or 0)
         return total
 
-    def exchange_long_qty(self, symbol: str | None = None, *, max_age_s: float = 1.5) -> float:
+    def exchange_long_qty(self, symbol: str | None = None, *, max_age_s: float = POSITIONS_SHARE_S) -> float:
         """Open long leg size on symbol (hedge LONG or one-way BUY)."""
         sym = (symbol or self.cfg.symbol).upper()
         total = 0.0
@@ -1700,6 +1747,14 @@ class BinanceConnector:
         sym = (symbol or self.cfg.symbol).upper()
         if self.cfg.paper:
             return self.cfg.margin_type.upper()
+        for p in list(getattr(self, "_last_good_positions", None) or []):
+            if str(p.get("symbol") or "").upper() != sym:
+                continue
+            mt = str(p.get("margin_type") or "").upper()
+            if mt in ("ISOLATED", "CROSS"):
+                return mt
+        if bool(getattr(self.cfg, "testnet", False)):
+            return self.cfg.margin_type.upper()
         try:
             rows = self._request("GET", "/fapi/v2/positionRisk", {"symbol": sym}, signed=True)
             if rows:
@@ -1751,8 +1806,20 @@ class BinanceConnector:
         sym = symbol.upper()
         if self.cfg.paper:
             return int(self.cfg.leverage)
+        # Sticky book first — testnet positionRisk (even symbol-scoped) re-armed HARD.
+        for p in list(getattr(self, "_last_good_positions", None) or []):
+            if str(p.get("symbol") or "").upper() != sym:
+                continue
+            try:
+                lev = int(float(p.get("exchange_leverage") or 0))
+            except (TypeError, ValueError):
+                lev = 0
+            if lev > 0:
+                return lev
         # A paused minute must not reserve more weight on every manage tick.
         if self.rest_ban_left() > 0 or self._weight_pause_left() > 0.05:
+            return None
+        if bool(getattr(self.cfg, "testnet", False)):
             return None
         try:
             rows = self._request("GET", "/fapi/v2/positionRisk", {"symbol": sym}, signed=True)
@@ -1820,6 +1887,19 @@ class BinanceConnector:
         """Single Binance account call — for login/status hot paths."""
         if self.cfg.paper:
             return self.account_info()
+        # Frontend status polls must not re-enter /account every few seconds (HARD loop).
+        if (
+            self._last_good_account
+            and (time.time() - float(getattr(self, "_last_good_account_ts", 0.0) or 0.0))
+            < ACCOUNT_INFO_TTL_S
+        ):
+            return dict(self._last_good_account)
+        if self._weight_pause_left() > 0.05 or self.rest_cooling_left() > 0.25:
+            return self._sticky_account(warning=self._rest_cool_reason or "weight")
+        used = float(getattr(self, "_used_weight_1m", 0.0) or 0.0)
+        minute = int(time.time() // 60)
+        if int(getattr(self, "_used_weight_minute", -1)) == minute and used >= FULL_BOOK_WEIGHT_GATE:
+            return self._sticky_account(warning="weight")
         data = self._request("GET", "/fapi/v2/account", signed=True)
         total = float(data.get("totalWalletBalance", 0))
         upnl = float(data.get("totalUnrealizedProfit", 0))
@@ -1967,8 +2047,14 @@ class BinanceConnector:
         return self._remember_account(acct)
 
     def _account_margin_type_from_positions(self) -> str:
-        """Reflect Binance — ISOLATED unless any open position is CROSS."""
-        open_pos = self.positions(force=True)
+        """Reflect Binance — ISOLATED unless any open position is CROSS.
+
+        Never force a full-book positionRisk here — that alone was HARD→418 on testnet.
+        """
+        try:
+            open_pos = self.confirmed_positions(max_age_s=POSITIONS_SHARE_FLAT_S)
+        except Exception:
+            open_pos = list(getattr(self, "_last_good_positions", None) or [])
         if not open_pos:
             return self.symbol_margin_type()
         for p in open_pos:
@@ -1976,6 +2062,125 @@ class BinanceConnector:
             if mt == "CROSS":
                 return "CROSS"
         return "ISOLATED"
+
+    def _full_book_rest_allowed(self, *, bypass_rest_cool: bool = False) -> bool:
+        """Full-book positionRisk is a testnet weight bomb — allow rarely when cold.
+
+        Testnet: never discretionary. One call returns used-weight ~1.7k–3.8k and
+        HARD→418 loops. Use /fapi/v2/account positions[] (weight ~5) instead.
+        """
+        if bool(getattr(self.cfg, "testnet", False)) and not bypass_rest_cool and not self._in_close_path():
+            return False
+        if bypass_rest_cool or self._in_close_path():
+            return True
+        if self._weight_pause_left() > 0.05:
+            return False
+        used = float(getattr(self, "_used_weight_1m", 0.0) or 0.0)
+        minute = int(time.time() // 60)
+        if int(getattr(self, "_used_weight_minute", -1)) == minute and used >= FULL_BOOK_WEIGHT_GATE:
+            return False
+        last = float(getattr(self, "_last_full_book_mono", 0.0) or 0.0)
+        if last > 0.0 and (time.monotonic() - last) < FULL_BOOK_MIN_INTERVAL_S:
+            return False
+        return True
+
+    def _rows_to_position_legs(self, data: list[Any]) -> list[dict[str, Any]]:
+        """Normalize positionRisk / account.positions rows into desk leg dicts."""
+        out: list[dict[str, Any]] = []
+        for p in data:
+            if not isinstance(p, dict):
+                continue
+            amt = float(p.get("positionAmt", 0) or 0)
+            if abs(amt) < 1e-12:
+                continue
+            side = "BUY" if amt > 0 else "SELL"
+            pos_side = str(p.get("positionSide") or "").upper()
+            if not pos_side or pos_side == "BOTH":
+                pos_side = "LONG" if amt > 0 else "SHORT"
+            from leverage_policy import policy_display_leverage
+
+            policy_lev = policy_display_leverage(side=side, position_side=pos_side)
+            leg_label = "SHORT" if pos_side == "SHORT" else "LONG"
+            out.append(
+                {
+                    "ticket": p.get("symbol"),
+                    "symbol": p.get("symbol"),
+                    "type": side,
+                    "positionSide": pos_side,
+                    "leg": leg_label,
+                    "volume": abs(amt),
+                    "price_open": float(p.get("entryPrice", 0) or 0),
+                    "sl": 0.0,
+                    "tp": 0.0,
+                    "profit": float(p.get("unRealizedProfit", 0) or 0),
+                    "magic": DEFAULT_MAGIC,
+                    "liquidationPrice": float(p.get("liquidationPrice", 0) or 0),
+                    "leverage": policy_lev,
+                    "exchange_leverage": int(float(p.get("leverage", self.cfg.leverage) or self.cfg.leverage)),
+                    "margin_type": str(p.get("marginType") or "ISOLATED").upper(),
+                }
+            )
+        return out
+
+    def _positions_from_account_book(
+        self, *, force: bool = False, bypass_rest_cool: bool = False
+    ) -> list[dict[str, Any]]:
+        """Full open-book via /fapi/v2/account (weight ~5) — testnet-safe alternate to positionRisk."""
+        last_m = float(getattr(self, "_account_book_mono", 0.0) or 0.0)
+        if (
+            last_m > 0
+            and (time.monotonic() - last_m) <= ACCOUNT_BOOK_MIN_INTERVAL_S
+            and self._last_good_positions_ts > 0
+        ):
+            return list(self._last_good_positions)
+        if self._weight_pause_left() > 0.05 and not bypass_rest_cool:
+            if self._last_good_positions_ts > 0:
+                return list(self._last_good_positions)
+            if force:
+                raise PositionsUnavailable(
+                    f"REST cooling (weight) {self._weight_pause_left():.0f}s — account book unconfirmed"
+                )
+            return list(self._last_good_positions) if self._last_good_positions_ts > 0 else []
+        used = float(getattr(self, "_used_weight_1m", 0.0) or 0.0)
+        minute = int(time.time() // 60)
+        if (
+            not bypass_rest_cool
+            and int(getattr(self, "_used_weight_minute", -1)) == minute
+            and used >= FULL_BOOK_WEIGHT_GATE
+        ):
+            if self._last_good_positions_ts > 0:
+                return list(self._last_good_positions)
+            if force:
+                raise PositionsUnavailable("account book gated — weight hot")
+            return []
+        try:
+            data = self._request(
+                "GET",
+                "/fapi/v2/account",
+                signed=True,
+                bypass_rest_cool=bypass_rest_cool,
+            )
+        except Exception as e:
+            if force and self._last_good_positions_ts <= 0:
+                raise PositionsUnavailable(str(e)) from e
+            if self._last_good_positions_ts > 0:
+                return list(self._last_good_positions)
+            if force:
+                raise PositionsUnavailable(str(e)) from e
+            return []
+        rows = data.get("positions") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            rows = []
+        out = self._rows_to_position_legs(rows)
+        now = time.time()
+        self._positions_cache = list(out)
+        self._positions_cache_ts = now
+        self._last_good_positions = list(out)
+        self._last_good_positions_ts = now
+        self._account_book_mono = time.monotonic()
+        self._book_fresh = list(out)
+        self._book_fresh_ts = time.monotonic()
+        return out
 
     def align_isolated_margin_open_symbols(self) -> dict[str, Any]:
         """Set ISOLATED on every symbol with an open position."""
@@ -2288,7 +2493,8 @@ class BinanceConnector:
             key = (sym, target, "ISOLATED")
             ts = float(self._prepared_cache.get(key) or 0.0)
             age = time.time() - ts
-            if age < 60.0:
+            # Sep quiet rein: once prepared, trust 5 minutes — every-minute reconfirm burned weight.
+            if age < 300.0:
                 self.cfg.leverage = target
                 self.cfg.symbol = sym
                 return True
@@ -2430,6 +2636,9 @@ class BinanceConnector:
     def _invalidate_fresh_book(self) -> None:
         self._order_epoch = getattr(self, "_order_epoch", 0) + 1
         self._book_fresh_ts = 0.0
+        # Post-order confirm must be allowed to refresh once (weight pause still binds).
+        self._last_full_book_mono = 0.0
+        self._account_book_mono = 0.0
 
     def positions(self, symbol: str | None = None, *, force: bool = False, bypass_rest_cool: bool = False) -> list[dict[str, Any]]:
         if self.cfg.paper:
@@ -2478,6 +2687,26 @@ class BinanceConnector:
             raise PositionsUnavailable(
                 f"REST cooling (weight) {weight_left:.0f}s — positions unconfirmed"
             )
+        # Full-book positionRisk is a testnet HARD/418 bomb — use account book (weight ~5).
+        if symbol is None and not self._full_book_rest_allowed(bypass_rest_cool=bypass_rest_cool):
+            return self._positions_from_account_book(force=force, bypass_rest_cool=bypass_rest_cool)
+        # Testnet: even symbol-scoped positionRisk re-armed HARD in live logs — stay on account/sticky
+        # except close-path confirms (bypass / closing_book).
+        if (
+            symbol
+            and bool(getattr(self.cfg, "testnet", False))
+            and not bypass_rest_cool
+            and not close_read
+        ):
+            sym_u = symbol.upper()
+            if self._last_good_positions_ts > 0:
+                return [
+                    p
+                    for p in self._last_good_positions
+                    if str(p.get("symbol") or "").upper() == sym_u
+                ]
+            book = self._positions_from_account_book(force=force, bypass_rest_cool=bypass_rest_cool)
+            return [p for p in book if str(p.get("symbol") or "").upper() == sym_u]
         try:
             params: dict[str, Any] = {}
             if symbol:
@@ -2517,43 +2746,13 @@ class BinanceConnector:
             return []
         if not isinstance(data, list):
             data = [data] if data else []
-        out: list[dict[str, Any]] = []
-        for p in data:
-            amt = float(p.get("positionAmt", 0))
-            if abs(amt) < 1e-12:
-                continue
-            side = "BUY" if amt > 0 else "SELL"
-            pos_side = str(p.get("positionSide") or "").upper()
-            if not pos_side or pos_side == "BOTH":
-                pos_side = "LONG" if amt > 0 else "SHORT"
-            from leverage_policy import policy_display_leverage
-
-            policy_lev = policy_display_leverage(side=side, position_side=pos_side)
-            leg_label = "SHORT" if pos_side == "SHORT" else "LONG"
-            out.append(
-                {
-                    "ticket": p.get("symbol"),
-                    "symbol": p.get("symbol"),
-                    "type": side,
-                    "positionSide": pos_side,
-                    "leg": leg_label,
-                    "volume": abs(amt),
-                    "price_open": float(p.get("entryPrice", 0)),
-                    "sl": 0.0,
-                    "tp": 0.0,
-                    "profit": float(p.get("unRealizedProfit", 0)),
-                    "magic": DEFAULT_MAGIC,
-                    "liquidationPrice": float(p.get("liquidationPrice", 0)),
-                    "leverage": policy_lev,
-                    "exchange_leverage": int(float(p.get("leverage", self.cfg.leverage))),
-                    "margin_type": str(p.get("marginType") or "ISOLATED").upper(),
-                }
-            )
+        out = self._rows_to_position_legs(data)
         if symbol is None:
             self._positions_cache = out
             self._positions_cache_ts = now
             self._last_good_positions = list(out)
             self._last_good_positions_ts = now
+            self._last_full_book_mono = time.monotonic()
             if getattr(self, "_book_epoch_at_send", -1) == getattr(self, "_order_epoch", 0):
                 self._book_fresh = list(out)
                 self._book_fresh_ts = time.monotonic()
