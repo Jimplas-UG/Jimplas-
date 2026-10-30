@@ -830,7 +830,8 @@ def test_full_book_position_risk_gated() -> None:
     m = BinanceConnector(BinanceConfig(paper=False, testnet=False, api_key="k", api_secret="s"))
     assert m._full_book_rest_allowed() is True
     assert bc.FULL_BOOK_MIN_INTERVAL_S >= 120.0
-    assert bc.ACCOUNT_INFO_TTL_S >= 30.0
+    assert bc.ACCOUNT_INFO_TTL_S >= 120.0
+    assert bc.ACCOUNT_BOOK_MIN_INTERVAL_S >= 180.0
     print("OK testnet avoids positionRisk; account book + status TTL")
 
 

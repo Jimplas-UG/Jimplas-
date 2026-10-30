@@ -338,28 +338,15 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(min(60.0, 2.0 * attempt))
 
     async def refresh_24h_loop() -> None:
-        # Immediate fill so market overview has live 24h % right after boot.
-        try:
-            pct_map = await asyncio.to_thread(connector.ticker_24h_map)
-            vol_map = await asyncio.to_thread(connector.ticker_24h_volume_map)
-            fund_map = await asyncio.to_thread(connector.funding_rate_map)
-            n = await asyncio.to_thread(momentum_scanner.apply_24h_pct_map, pct_map)
-            nv = await asyncio.to_thread(momentum_scanner.apply_volume_map, vol_map)
-            nf = await asyncio.to_thread(momentum_scanner.apply_funding_rate_map, fund_map)
-            if n or nv or nf:
-                log.info("scanner initial market stats pct=%s vol=%s fund=%s", n, nv, nf)
-                _flush_scanner_snapshot()
-        except Exception as e:
-            log.warning("initial 24h refresh: %s", e)
+        # Sep quiet: do NOT stampede ticker/24hr+premiumIndex on boot beside exchangeInfo.
+        await asyncio.sleep(90.0)
         while True:
             try:
-                # Idle market-stats refresh: was 45s → weight storm. Sep premium: 180s + soft gate.
-                await asyncio.sleep(180.0)
-                if connector.rest_cooling_left() > 0.5:
-                    continue
                 pause = getattr(connector, "_weight_pause_left", None)
                 weight_left = float(pause() or 0.0) if callable(pause) else 0.0
-                if weight_left > 0.05 or float(getattr(connector, "used_weight_1m", lambda: 0.0)() or 0.0) >= 1400.0:
+                used = float(getattr(connector, "used_weight_1m", lambda: 0.0)() or 0.0)
+                if connector.rest_cooling_left() > 0.5 or weight_left > 0.05 or used >= 800.0:
+                    await asyncio.sleep(30.0)
                     continue
                 tracked = int((momentum_scanner.status() or {}).get("symbols_tracked") or 0)
                 if tracked < 50:
@@ -378,12 +365,15 @@ async def lifespan(app: FastAPI):
                 nv = await asyncio.to_thread(momentum_scanner.apply_volume_map, vol_map)
                 nf = await asyncio.to_thread(momentum_scanner.apply_funding_rate_map, fund_map)
                 if n or nv or nf:
-                    log.info("scanner refreshed market stats pct=%s vol=%s fund=%s", n, nv, nf)
+                    log.info("scanner market stats pct=%s vol=%s fund=%s", n, nv, nf)
                     _flush_scanner_snapshot()
+                # Idle: 180s + cold gate (was 45s stampede).
+                await asyncio.sleep(180.0)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 log.warning("24h refresh loop: %s", e)
+                await asyncio.sleep(30.0)
 
     asyncio.create_task(load_scanner_symbols())
     asyncio.create_task(refresh_24h_loop())

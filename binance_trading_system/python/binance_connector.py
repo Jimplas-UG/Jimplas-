@@ -77,8 +77,9 @@ FULL_BOOK_WEIGHT_GATE = 400.0
 # Local reserve only — real testnet cost can be 2k+; interval gate stops a second call.
 FULL_BOOK_EST_WEIGHT = 500.0
 # Status/reconcile were re-hitting /account the instant a 75s pause ended → HARD loop.
-ACCOUNT_INFO_TTL_S = 45.0
-ACCOUNT_BOOK_MIN_INTERVAL_S = 120.0
+# Testnet /fapi/v2/account alone returned used-weight ~2.3k–3.3k (Oct 27) — treat as bomb.
+ACCOUNT_INFO_TTL_S = 120.0
+ACCOUNT_BOOK_MIN_INTERVAL_S = 180.0
 # Prefer WS / sticky mid — REST bookTicker every 2s was the #1 weight burner on FRA.
 BOOK_TICKER_CACHE_TTL_S = 5.0
 MARK_PRICE_CACHE_TTL_S = 8.0
@@ -536,6 +537,9 @@ class BinanceConnector:
             return 1.0 if has_symbol else 10.0
         if "exchangeInfo" in p:
             return 40.0
+        if p.endswith("/account") or p.endswith("/fapi/v2/account"):
+            # Official weight 5; testnet headers show multi-k — reserve aggressively.
+            return FULL_BOOK_EST_WEIGHT if bool(getattr(self.cfg, "testnet", False)) else 5.0
         if str(method).upper() != "GET":
             return 1.0
         return 5.0
@@ -628,11 +632,15 @@ class BinanceConnector:
                 return
             close_symbol = str((params or {}).get("symbol") or "").strip()
             close_path = str(path or "")
-            # One symbol book, or the single close-order lookup. Nothing else.
-            if self._in_close_path() and close_symbol and (
-                "positionRisk" in close_path or close_path == "/fapi/v1/order"
-            ):
-                return
+            # Flatten must proceed through a weight pause: one-symbol book, account book,
+            # and the close-order lookup. Full-book positionRisk stays blocked.
+            if self._in_close_path():
+                if close_path.endswith("/account"):
+                    return
+                if close_path == "/fapi/v1/order" and close_symbol:
+                    return
+                if "positionRisk" in close_path and close_symbol:
+                    return
             left = self._weight_pause_left()
             projected = float(getattr(self, "_local_weight", 0.0) or 0.0)
             if left <= 0 and projected < REST_WEIGHT_SOFT_LIMIT:
@@ -1883,6 +1891,34 @@ class BinanceConnector:
             return min(free, ceiling)
         return max(0.0, free)
 
+    def _account_info_from_balance(self) -> dict[str, Any] | None:
+        """Light wallet via /fapi/v2/balance (keeps testnet status off the /account bomb)."""
+        rows = self._request("GET", "/fapi/v2/balance", signed=True)
+        if not isinstance(rows, list):
+            rows = [rows] if rows else []
+        usdt = next((r for r in rows if str(r.get("asset") or "").upper() == "USDT"), None) or {}
+        total = float(usdt.get("balance") or usdt.get("crossWalletBalance") or 0)
+        avail = float(usdt.get("availableBalance") or total)
+        # Balance endpoint has no UPNL — keep last sticky profit only while a book is open.
+        sticky_profit = 0.0
+        if self._sticky_positions():
+            sticky_profit = float((self._last_good_account or {}).get("profit") or 0.0)
+        free = self._spendable_margin(total, avail, sticky_profit, avail)
+        acct = {
+            "login": self.cfg.api_key[:8] + "…",
+            "server": "testnet" if self.cfg.testnet else "mainnet",
+            "balance": total,
+            "equity": total + sticky_profit,
+            "margin": max(0.0, total - avail),
+            "margin_free": free,
+            "profit": sticky_profit,
+            "currency": "USDT",
+            "trade_allowed": True,
+            "leverage": int(self.cfg.leverage),
+            "margin_type": self.cfg.margin_type,
+        }
+        return self._remember_account(acct)
+
     def account_info_light(self) -> dict[str, Any] | None:
         """Single Binance account call — for login/status hot paths."""
         if self.cfg.paper:
@@ -1900,6 +1936,9 @@ class BinanceConnector:
         minute = int(time.time() // 60)
         if int(getattr(self, "_used_weight_minute", -1)) == minute and used >= FULL_BOOK_WEIGHT_GATE:
             return self._sticky_account(warning="weight")
+        # Testnet: /account is a measured weight bomb — status uses /balance instead.
+        if bool(getattr(self.cfg, "testnet", False)):
+            return self._account_info_from_balance()
         data = self._request("GET", "/fapi/v2/account", signed=True)
         total = float(data.get("totalWalletBalance", 0))
         upnl = float(data.get("totalUnrealizedProfit", 0))
@@ -2063,13 +2102,28 @@ class BinanceConnector:
                 return "CROSS"
         return "ISOLATED"
 
+    def _sticky_positions(self, symbol: str | None = None) -> list[dict[str, Any]] | None:
+        """UI/hot-path sticky book. Non-empty last_good counts even if ts was never stamped."""
+        rows = list(getattr(self, "_last_good_positions", None) or [])
+        if not rows and not float(getattr(self, "_last_good_positions_ts", 0.0) or 0.0):
+            cache = getattr(self, "_positions_cache", None)
+            if cache:
+                rows = list(cache)
+        if not rows and float(getattr(self, "_last_good_positions_ts", 0.0) or 0.0) <= 0:
+            return None
+        if symbol:
+            sym_u = symbol.upper()
+            return [p for p in rows if str(p.get("symbol") or "").upper() == sym_u]
+        return rows
+
     def _full_book_rest_allowed(self, *, bypass_rest_cool: bool = False) -> bool:
         """Full-book positionRisk is a testnet weight bomb — allow rarely when cold.
 
         Testnet: never discretionary. One call returns used-weight ~1.7k–3.8k and
         HARD→418 loops. Use /fapi/v2/account positions[] (weight ~5) instead.
         """
-        if bool(getattr(self.cfg, "testnet", False)) and not bypass_rest_cool and not self._in_close_path():
+        # Testnet: never full-book positionRisk (even close bypass) — use account / symbol scope.
+        if bool(getattr(self.cfg, "testnet", False)):
             return False
         if bypass_rest_cool or self._in_close_path():
             return True
@@ -2127,20 +2181,32 @@ class BinanceConnector:
     ) -> list[dict[str, Any]]:
         """Full open-book via /fapi/v2/account (weight ~5) — testnet-safe alternate to positionRisk."""
         last_m = float(getattr(self, "_account_book_mono", 0.0) or 0.0)
+        sticky = self._sticky_positions()
         if (
             last_m > 0
             and (time.monotonic() - last_m) <= ACCOUNT_BOOK_MIN_INTERVAL_S
-            and self._last_good_positions_ts > 0
+            and sticky is not None
         ):
-            return list(self._last_good_positions)
+            return list(sticky)
         if self._weight_pause_left() > 0.05 and not bypass_rest_cool:
-            if self._last_good_positions_ts > 0:
-                return list(self._last_good_positions)
+            if sticky is not None:
+                return list(sticky)
             if force:
                 raise PositionsUnavailable(
                     f"REST cooling (weight) {self._weight_pause_left():.0f}s — account book unconfirmed"
                 )
-            return list(self._last_good_positions) if self._last_good_positions_ts > 0 else []
+            return []
+        # Testnet /account is a measured ~2k–3k used-weight bomb. Reuse sticky while
+        # the book is still valid. Cold start (no sticky) and post-order invalidate
+        # (account_book_mono reset to 0) still get one account read.
+        if (
+            bool(getattr(self.cfg, "testnet", False))
+            and not bypass_rest_cool
+            and not self._in_close_path()
+            and sticky is not None
+            and last_m > 0
+        ):
+            return list(sticky)
         used = float(getattr(self, "_used_weight_1m", 0.0) or 0.0)
         minute = int(time.time() // 60)
         if (
@@ -2148,8 +2214,8 @@ class BinanceConnector:
             and int(getattr(self, "_used_weight_minute", -1)) == minute
             and used >= FULL_BOOK_WEIGHT_GATE
         ):
-            if self._last_good_positions_ts > 0:
-                return list(self._last_good_positions)
+            if sticky is not None:
+                return list(sticky)
             if force:
                 raise PositionsUnavailable("account book gated — weight hot")
             return []
@@ -2161,10 +2227,11 @@ class BinanceConnector:
                 bypass_rest_cool=bypass_rest_cool,
             )
         except Exception as e:
-            if force and self._last_good_positions_ts <= 0:
+            sticky = self._sticky_positions()
+            if force and sticky is None:
                 raise PositionsUnavailable(str(e)) from e
-            if self._last_good_positions_ts > 0:
-                return list(self._last_good_positions)
+            if sticky is not None:
+                return list(sticky)
             if force:
                 raise PositionsUnavailable(str(e)) from e
             return []
@@ -2698,14 +2765,11 @@ class BinanceConnector:
             and not bypass_rest_cool
             and not close_read
         ):
-            sym_u = symbol.upper()
-            if self._last_good_positions_ts > 0:
-                return [
-                    p
-                    for p in self._last_good_positions
-                    if str(p.get("symbol") or "").upper() == sym_u
-                ]
+            sticky = self._sticky_positions(symbol)
+            if sticky is not None:
+                return sticky
             book = self._positions_from_account_book(force=force, bypass_rest_cool=bypass_rest_cool)
+            sym_u = symbol.upper()
             return [p for p in book if str(p.get("symbol") or "").upper() == sym_u]
         try:
             params: dict[str, Any] = {}
@@ -3760,10 +3824,11 @@ class BinanceConnector:
         if self.rest_ban_left() > 0:
             return self._rest_ban_result(sym)
         self._wait_or_clear_cool_for_close()
-        try:
-            positions = self.positions(sym, force=True, bypass_rest_cool=True)
-        except PositionsUnavailable as e:
-            return {"ok": False, "error": "positions_unavailable", "detail": str(e)}
+        with self.closing_book():
+            try:
+                positions = self.positions(sym, force=True, bypass_rest_cool=True)
+            except PositionsUnavailable as e:
+                return {"ok": False, "error": "positions_unavailable", "detail": str(e)}
         if not positions:
             return {"ok": False, "error": "no_open_position"}
 
@@ -3781,7 +3846,8 @@ class BinanceConnector:
         positions = sorted(positions, key=_close_rank)
 
         try:
-            self.cancel_all_orders(sym, bypass_rest_cool=True)
+            with self.closing_book():
+                self.cancel_all_orders(sym, bypass_rest_cool=True)
         except Exception as e:
             log.warning("close_position cancel orders %s: %s", sym, e)
 
@@ -4055,7 +4121,8 @@ class BinanceConnector:
         self._wait_or_clear_cool_for_close()
         # Multi-pass: MARKET(+IOC) per symbol, then retry leftovers after brief settle.
         for attempt in range(3):
-            positions = self.positions(force=True, bypass_rest_cool=True)
+            with self.closing_book():
+                positions = self.positions(force=True, bypass_rest_cool=True)
             if not positions:
                 break
             symbols = sorted({str(p.get("symbol") or "").upper() for p in positions if p.get("symbol")})
@@ -4076,7 +4143,16 @@ class BinanceConnector:
             if attempt < 2:
                 time.sleep(1.2)
         self.invalidate_positions_cache()
-        remaining = self.positions(force=True, bypass_rest_cool=True)
+        with self.closing_book():
+            remaining = self.positions(force=True, bypass_rest_cool=True)
+        # Flat book ⇒ kill sticky floating so status cannot paint a ghost UPNL.
+        if not remaining and self._last_good_account:
+            flat_acct = dict(self._last_good_account)
+            flat_acct["profit"] = 0.0
+            flat_acct["equity"] = float(flat_acct.get("balance") or flat_acct.get("equity") or 0.0)
+            flat_acct.pop("stale", None)
+            flat_acct.pop("warning", None)
+            self._remember_account(flat_acct)
         return {
             "ok": len(remaining) == 0,
             "closed": all_closed,
