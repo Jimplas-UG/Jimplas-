@@ -1842,6 +1842,20 @@ class BinanceConnector:
             return None
         return lev if lev > 0 else None
 
+    def _sticky_symbol_has_open_volume(self, symbol: str) -> bool:
+        """True when last-good book shows a live leg. No REST — testnet must not read positionRisk."""
+        sym = symbol.upper()
+        for p in list(getattr(self, "_last_good_positions", None) or []):
+            if str(p.get("symbol") or "").upper() != sym:
+                continue
+            try:
+                vol = abs(float(p.get("volume") or p.get("positionAmt") or 0.0))
+            except (TypeError, ValueError):
+                vol = 0.0
+            if vol > 1e-12:
+                return True
+        return False
+
     def symbol_leverage(self, symbol: str | None = None) -> int:
         sym = (symbol or self.cfg.symbol).upper()
         if self.cfg.paper:
@@ -2572,27 +2586,37 @@ class BinanceConnector:
                 self._prepared_cache[key] = time.time()
                 return True
             if confirmed is None:
-                self._log_leverage_unconfirmed(sym, f"leverage verify {sym} unconfirmed — fail closed")
-                return False
-            log.warning(
-                "prepared cache stale %s: exchange=%sx wanted=%sx — re-set",
-                sym,
-                confirmed,
-                target,
-            )
-            self._prepared_cache.pop(key, None)
+                # Testnet never reads positionRisk. Drop cache and re-POST below
+                # when the symbol is flat — do not abort every short.
+                self._prepared_cache.pop(key, None)
+            else:
+                log.warning(
+                    "prepared cache stale %s: exchange=%sx wanted=%sx — re-set",
+                    sym,
+                    confirmed,
+                    target,
+                )
+                self._prepared_cache.pop(key, None)
         current = self._exchange_leverage_or_none(sym)
         if current is None:
-            self._log_leverage_unconfirmed(sym, f"ensure_exchange_leverage {sym} unconfirmed — fail closed")
-            return False
-        if current == target:
+            if self.rest_ban_left() > 0:
+                self._log_leverage_unconfirmed(sym, f"ensure_exchange_leverage {sym} unconfirmed — 418 ban")
+                return False
+            if self._sticky_symbol_has_open_volume(sym):
+                self._log_leverage_unconfirmed(
+                    sym,
+                    f"ensure_exchange_leverage {sym} unconfirmed with open legs — fail closed",
+                )
+                return False
+            # Flat / never-seen: POST target. Trust the write. Never invent 5x.
+        elif current == target:
             self.cfg.leverage = target
             self._prepared_cache[(sym, target, "ISOLATED")] = time.time()
             self._leverage_fail_cache.pop((sym, "reduce_blocked"), None)
             return True
         # Isolated + open position: Binance rejects leverage reductions.
         # Fail closed — callers must not open, and the naked-short lock must flatten.
-        if current > target:
+        if current is not None and current > target:
             try:
                 open_legs = [
                     p
@@ -2644,11 +2668,13 @@ class BinanceConnector:
             except (TypeError, ValueError):
                 wrote = 0
         if wrote != target:
-            readback = self._exchange_leverage_or_none(sym)
+            # Testnet cannot read leverage back. The POST body is the confirmation.
+            readback = None if bool(getattr(self.cfg, "testnet", False)) else self._exchange_leverage_or_none(sym)
             if readback != target:
                 log.warning(
-                    "ensure_exchange_leverage %s readback %s != wanted %s",
+                    "ensure_exchange_leverage %s write=%s readback=%s wanted=%s",
                     sym,
+                    wrote,
                     readback,
                     target,
                 )

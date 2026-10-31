@@ -610,6 +610,67 @@ def test_naked_10x_ensure_fails_closed() -> None:
     print("OK naked 10x ensure fails closed (no false 5x success)")
 
 
+def test_testnet_flat_book_posts_leverage_without_position_risk() -> None:
+    """Oct 30: testnet None-read aborted every short. Flat book must POST 5x and trust the write."""
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    calls: list[tuple[str, str]] = []
+
+    def fake_req(method, path, params=None, signed=False, timeout=8.0, base_url=None, *, bypass_rest_cool=False):
+        calls.append((method, path))
+        if "positionRisk" in path:
+            raise AssertionError("testnet ensure must not read positionRisk")
+        if path.endswith("/leverage") and method == "POST":
+            assert (params or {}).get("symbol") == "SOPHUSDT"
+            assert int((params or {}).get("leverage") or 0) == 5
+            return {"leverage": 5, "symbol": "SOPHUSDT", "maxNotionalValue": "100000"}
+        raise AssertionError(f"unexpected {method} {path}")
+
+    c._request = fake_req  # type: ignore[method-assign]
+    assert c.ensure_exchange_leverage("SOPHUSDT", 5) is True
+    assert c.cfg.leverage == 5
+    assert calls == [("POST", "/fapi/v1/leverage")]
+    assert c.is_symbol_prepared("SOPHUSDT", 5)
+    assert c.ensure_exchange_leverage("SOPHUSDT", 5) is True
+    assert calls == [("POST", "/fapi/v1/leverage")], "warm 5-min cache must not re-POST"
+    c._prepared_cache[("SOPHUSDT", 5, "ISOLATED")] = time.time() - 301.0
+    assert c.ensure_exchange_leverage("SOPHUSDT", 5) is True
+    assert calls == [("POST", "/fapi/v1/leverage"), ("POST", "/fapi/v1/leverage")]
+    print("OK testnet flat book POSTs 5x without positionRisk")
+
+
+def test_testnet_unconfirmed_open_leg_still_fails_closed() -> None:
+    """Unknown leverage + live sticky leg must not POST or open at mystery x."""
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+    c._last_good_positions = [{"symbol": "AINUSDT", "volume": 12.0, "exchange_leverage": 0}]
+
+    def fake_req(method, path, params=None, signed=False, timeout=8.0, base_url=None, *, bypass_rest_cool=False):
+        raise AssertionError(f"must not REST {method} {path} with open unconfirmed legs")
+
+    c._request = fake_req  # type: ignore[method-assign]
+    assert c.ensure_exchange_leverage("AINUSDT", 5) is False
+    print("OK unconfirmed open legs fail closed (no POST)")
+
+
+def test_testnet_leverage_post_must_confirm_write() -> None:
+    """Do not treat a blank POST as 5x — scanner must still abort."""
+    from binance_connector import BinanceConnector, BinanceConfig
+
+    c = BinanceConnector(BinanceConfig(paper=False, testnet=True, api_key="k", api_secret="s"))
+
+    def fake_req(method, path, params=None, signed=False, timeout=8.0, base_url=None, *, bypass_rest_cool=False):
+        if path.endswith("/leverage"):
+            return {"symbol": "BLESSUSDT"}
+        raise AssertionError(f"unexpected {path}")
+
+    c._request = fake_req  # type: ignore[method-assign]
+    assert c.ensure_exchange_leverage("BLESSUSDT", 5) is False
+    print("OK unconfirmed leverage POST fails closed")
+
+
 def test_local_weight_budget_stops_burst() -> None:
     """Reserve full-book positionRisk cost before Binance answers, and stop at the soft cap."""
     from binance_connector import REST_WEIGHT_SOFT_LIMIT, BinanceConnector, BinanceConfig
@@ -842,6 +903,9 @@ if __name__ == "__main__":
     test_weight_soft_limit_pauses_market_data_only()
     test_positions_single_flight_and_order_invalidation()
     test_naked_10x_ensure_fails_closed()
+    test_testnet_flat_book_posts_leverage_without_position_risk()
+    test_testnet_unconfirmed_open_leg_still_fails_closed()
+    test_testnet_leverage_post_must_confirm_write()
     test_local_weight_budget_stops_burst()
     test_close_symbol_read_survives_weight_pause()
     test_leverage_read_does_not_feed_the_weight_pause()
