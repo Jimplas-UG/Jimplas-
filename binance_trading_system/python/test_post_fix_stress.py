@@ -42,16 +42,15 @@ def test_distinct_signals_do_not_collapse() -> None:
     print("OK stress 50 distinct signals: 50 orders, 0 duplicates")
 
 
-def test_timeout_retries_same_client_then_stops() -> None:
+def test_timeout_is_one_send_then_uncertain() -> None:
     conn = MockConnector()
     conn.fail_times = 2
     eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
     r = eng.execute(_signal(signal_id="stress_timeout"))
     orders = [c for c in conn.calls if c.get("op") == "order"]
-    ids = {c.get("client_order_id") or c.get("newClientOrderId") for c in orders}
-    assert r.ok and r.retry_count == 2
-    assert len(orders) == 3
-    print("OK stress timeout: 2 failures then 1 fill, client ids", ids or "engine-assigned")
+    assert not r.ok and r.stage == "uncertain_fill"
+    assert len(orders) == 1
+    print("OK stress timeout: 1 send, then uncertain, no blind resend")
 
 
 def test_paired_hold_survives_tick_burst() -> None:
@@ -100,7 +99,7 @@ def main() -> None:
     t0 = time.perf_counter()
     test_duplicate_burst_is_one_order()
     test_distinct_signals_do_not_collapse()
-    test_timeout_retries_same_client_then_stops()
+    test_timeout_is_one_send_then_uncertain()
     test_paired_hold_survives_tick_burst()
     test_partition_loss_fires_once_per_breach()
     elapsed = time.perf_counter() - t0

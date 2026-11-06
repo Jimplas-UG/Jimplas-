@@ -181,17 +181,38 @@ def test_precision_min_notional() -> None:
     print("OK precision/min notional handled")
 
 
-def test_timeout_retry_works() -> None:
+def test_timeout_is_not_resent() -> None:
+    """A timed-out order may have filled, and a filled id is not rejected on reuse."""
     conn = MockConnector()
     conn.fail_times = 2
     eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
-    t0 = time.perf_counter()
     r = eng.execute(_signal(signal_id="retry_test_1"))
-    elapsed = (time.perf_counter() - t0) * 1000
+    orders = [c for c in conn.calls if c.get("op") == "order"]
+    assert not r.ok and r.stage == "uncertain_fill", r.stage
+    assert len(orders) == 1
+    print("OK timeout is not resent")
+
+
+def test_definite_failure_still_retries() -> None:
+    """A clear refusal means nothing executed, so the backoff retry stays."""
+    conn = MockConnector()
+    fails = [{"ok": False, "error": "Timestamp outside recvWindow", "binance_code": -1021, "retryable": True}] * 2
+    real = conn.place_market_order
+
+    def place(*a: object, **k: object) -> dict:
+        if fails:
+            conn.calls.append({"op": "order"})
+            return dict(fails.pop())
+        return real(*a, **k)
+
+    conn.place_market_order = place  # type: ignore[method-assign]
+    eng = ExecutionEngine(conn, session_ok=lambda: (True, ""))
+    t0 = time.perf_counter()
+    r = eng.execute(_signal(signal_id="retry_test_2"))
     assert r.ok, r.error
     assert r.retry_count == 2
-    assert elapsed >= 200
-    print("OK timeout retry works")
+    assert (time.perf_counter() - t0) * 1000 >= 200
+    print("OK definite failure retries")
 
 
 def test_duplicate_prevention() -> None:
@@ -272,7 +293,8 @@ if __name__ == "__main__":
         test_tp_created,
         test_invalid_quantity_blocked,
         test_precision_min_notional,
-        test_timeout_retry_works,
+        test_timeout_is_not_resent,
+        test_definite_failure_still_retries,
         test_duplicate_prevention,
         test_insufficient_margin,
         test_forward_dry_run_blocks,

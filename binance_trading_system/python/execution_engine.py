@@ -16,11 +16,14 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from execution_guard import CircuitBreaker
 from leverage_policy import apply_leverage_policy, exchange_leverage, required_leverage, sizing_leverage
 
 log = logging.getLogger("execution_engine")
 
 RETRY_BACKOFF_MS = (100, 200, 400)
+# Longer than the 60s recvWindow, after which Binance refuses a stalled request.
+UNKNOWN_HOLD_S = 90.0
 MAX_RETRIES = 3
 CLIENT_ID_PREFIX = "BSV32"
 
@@ -159,6 +162,14 @@ class ExecutionEngine:
         self._isolation_check: Callable[[str], tuple[bool, str]] | None = None
         self._close_pending_check: Callable[[str], bool] | None = None
         self._latency_ring: deque[dict[str, Any]] = deque(maxlen=32)
+        self.breaker = CircuitBreaker()
+        self._unknown_until: dict[str, float] = {}
+
+    def unknown_symbols(self) -> list[str]:
+        """Symbols with an order whose outcome is still unproven."""
+        now = time.monotonic()
+        self._unknown_until = {s: t for s, t in self._unknown_until.items() if t > now}
+        return sorted(self._unknown_until)
 
     @property
     def last_error(self) -> str | None:
@@ -341,6 +352,37 @@ class ExecutionEngine:
                 return self._account_cache[0]
             return None
 
+    def _resolve_unknown(self, sym: str, client_id: str, reference_price: float) -> dict[str, Any] | None:
+        """Ask the exchange what became of an order whose reply was lost.
+
+        Returns a fill, or None when no fill can be proven. None never means "safe to resend":
+        a filled id is not rejected on reuse, and a stalled request can land after a lookup.
+        Resending waits for the scanner's stale-submit TTL, which outlasts recvWindow.
+        """
+        conn = self._connector
+        if hasattr(conn, "lookup_client_order"):
+            state, order = conn.lookup_client_order(sym, client_id)
+        elif hasattr(conn, "query_order_by_client_id"):
+            order = conn.query_order_by_client_id(sym, client_id)
+            state = "found" if order else "unknown"
+        else:
+            return None
+        if state != "found" or not order:
+            log.warning("EXEC_UNKNOWN coin=%s client_id=%s lookup=%s", sym, client_id, state)
+            return None
+        executed = float(order.get("executedQty") or 0)
+        if executed <= 0:
+            log.warning("EXEC_UNKNOWN coin=%s client_id=%s status=%s", sym, client_id, order.get("status"))
+            return None
+        orig = float(order.get("origQty") or 0)
+        return {
+            "ok": True,
+            "fill_price": float(order.get("avgPrice") or 0) or reference_price,
+            "quantity": executed,
+            "partial": orig > 0 and executed < orig - 1e-12,
+            "order_id": order.get("orderId"),
+        }
+
     def execute(self, signal: ExecutionSignal, *, manual: bool = False) -> ExecutionResult:
         t0 = time.perf_counter()
         sym = signal.symbol.upper()
@@ -505,11 +547,25 @@ class ExecutionEngine:
         self._inflight_client_ids.add(client_id)
 
         try:
-            self._connector.prepare_symbol_cached(sym, exchange_lev, "ISOLATED")
-            # Manual: prepare_symbol_cached already set leverage; skip sync positionRisk.
-            # Auto: ensure_exchange_leverage is a no-op when prepare cache is warm.
-            if not manual and hasattr(self._connector, "ensure_exchange_leverage"):
-                self._connector.ensure_exchange_leverage(sym, exchange_lev)
+            try:
+                self._connector.prepare_symbol_cached(sym, exchange_lev, "ISOLATED")
+                # Manual: prepare_symbol_cached already set leverage; skip sync positionRisk.
+                # Auto: ensure_exchange_leverage is a no-op when prepare cache is warm.
+                if not manual and hasattr(self._connector, "ensure_exchange_leverage"):
+                    if self._connector.ensure_exchange_leverage(sym, exchange_lev) is False:
+                        # The leg would fill at whatever leverage the symbol still holds.
+                        result.error = f"leverage_unconfirmed:{exchange_lev}x"
+                        result.stage = "failed"
+                        self._log_failure(signal, reason=result.error, retry_decision="no_retry_prepare")
+                        self._emit(signal, "failed", client_order_id=client_id, error=result.error)
+                        return result
+            except Exception as e:  # noqa: BLE001
+                # Nothing was sent. A raised prepare used to skip the rest of the tick.
+                result.error = f"prepare_failed: {e}"
+                result.stage = "failed"
+                self._log_failure(signal, reason=result.error, retry_decision="no_retry_prepare")
+                self._emit(signal, "failed", client_order_id=client_id, error=result.error)
+                return result
             last_err: Exception | None = None
             for attempt in range(MAX_RETRIES + 1):
                 try:
@@ -528,28 +584,37 @@ class ExecutionEngine:
                         code = order_resp.get("binance_code")
                         http = order_resp.get("http_code")
                         retryable = bool(order_resp.get("retryable"))
-                        # Timeout / uncertain ACK — check if the same clientOrderId already filled.
-                        if retryable and hasattr(self._connector, "query_order_by_client_id"):
-                            existing = self._connector.query_order_by_client_id(sym, client_id)
-                            if existing and str(existing.get("status") or "").upper() in (
-                                "FILLED",
-                                "PARTIALLY_FILLED",
-                            ):
-                                order_resp = {
-                                    "ok": True,
-                                    "fill_price": float(existing.get("avgPrice") or signal.reference_price),
-                                    "quantity": float(existing.get("executedQty") or signal.quantity),
-                                    "order_id": existing.get("orderId"),
-                                }
-                                log.info(
-                                    "EXEC_RECOVERED coin=%s client_id=%s order=%s after %s",
-                                    sym,
-                                    client_id,
-                                    order_resp.get("order_id"),
-                                    err,
+                        unknown = bool(order_resp.get("outcome_unknown")) or (
+                            retryable and "timeout" in err.lower()
+                        )
+                        if unknown:
+                            self.breaker.record_failure("orders", err)
+                            recovered = self._resolve_unknown(sym, client_id, signal.reference_price)
+                            if recovered is None:
+                                # No resend: only the stale-submit TTL can prove it never landed.
+                                self._unknown_until[sym] = time.monotonic() + UNKNOWN_HOLD_S
+                                result.error = f"uncertain_fill:{err}"
+                                result.stage = "uncertain_fill"
+                                result.binance_code = code
+                                result.http_code = http
+                                result.retry_decision = "no_retry_outcome_unknown"
+                                self._log_failure(
+                                    signal,
+                                    reason=result.error,
+                                    http_code=http,
+                                    binance_code=code,
+                                    retry_decision=result.retry_decision,
                                 )
-                            else:
-                                order_resp = {"ok": False, "error": err, "binance_code": code, "http_code": http, "retryable": retryable}
+                                self._emit(signal, result.stage, client_order_id=client_id, error=result.error)
+                                return result
+                            order_resp = recovered
+                            log.info(
+                                "EXEC_RECOVERED coin=%s client_id=%s order=%s after %s",
+                                sym,
+                                client_id,
+                                order_resp.get("order_id"),
+                                err,
+                            )
                         if not order_resp.get("ok"):
                             result.error = err
                             result.binance_code = code
@@ -592,6 +657,17 @@ class ExecutionEngine:
                     if signal.signal_ts_ms > 0:
                         signal_to_ack = round(time.time() * 1000 - signal.signal_ts_ms, 1)
                     result.ok = True
+                    self.breaker.record_success("orders")
+                    if order_resp.get("partial"):
+                        # Book what filled. Full fills keep the requested size so sizing is unchanged.
+                        result.quantity = float(order_resp.get("quantity") or signal.quantity)
+                        log.warning(
+                            "EXEC_PARTIAL coin=%s client_id=%s requested=%s filled=%s",
+                            sym,
+                            client_id,
+                            signal.quantity,
+                            result.quantity,
+                        )
                     result.fill_price = fill
                     result.order_id = order_id
                     result.latency_ms = latency
@@ -702,41 +778,30 @@ class ExecutionEngine:
                     last_err = e
                     err = str(e)
                     code = _parse_binance_code(err)
-                    retryable = "timeout" in err.lower() or "timed out" in err.lower() or "URLError" in err
-                    if retryable and hasattr(self._connector, "query_order_by_client_id"):
-                        existing = self._connector.query_order_by_client_id(sym, client_id)
-                        if existing and str(existing.get("status") or "").upper() in (
-                            "FILLED",
-                            "PARTIALLY_FILLED",
-                        ):
-                            order_resp = {
-                                "ok": True,
-                                "fill_price": float(existing.get("avgPrice") or signal.reference_price),
-                                "quantity": float(existing.get("executedQty") or signal.quantity),
-                                "order_id": existing.get("orderId"),
-                            }
-                            # Re-enter success path by recursive-ish continue with fake ok —
-                            # simplest: mark filled and return via building result here.
-                            fill = float(order_resp["fill_price"])
-                            order_id = order_resp.get("order_id")
-                            latency = round((time.perf_counter() - t0) * 1000, 1)
-                            result.ok = True
-                            result.fill_price = fill
-                            result.order_id = order_id
-                            result.latency_ms = latency
-                            result.stage = "filled"
-                            result.retry_count = attempt
-                            self._filled_client_ids.add(client_id)
-                            log.info("EXEC_RECOVERED_EXC coin=%s order=%s", sym, order_id)
-                            return result
-                    if retryable and attempt < MAX_RETRIES:
-                        wait = RETRY_BACKOFF_MS[min(attempt, len(RETRY_BACKOFF_MS) - 1)] / 1000.0
-                        time.sleep(wait)
-                        continue
+                    # Raised past place_market_order's own handling, so the outcome is unknown.
+                    self.breaker.record_failure("orders", err)
+                    recovered = self._resolve_unknown(sym, client_id, signal.reference_price)
+                    if recovered is not None:
+                        result.ok = True
+                        result.fill_price = float(recovered["fill_price"])
+                        result.order_id = recovered.get("order_id")
+                        result.latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+                        result.stage = "filled"
+                        result.retry_count = attempt
+                        if recovered.get("partial"):
+                            result.quantity = float(recovered["quantity"])
+                        self._filled_client_ids.add(client_id)
+                        log.info("EXEC_RECOVERED_EXC coin=%s order=%s", sym, result.order_id)
+                        return result
+                    self._unknown_until[sym] = time.monotonic() + UNKNOWN_HOLD_S
+                    err = f"uncertain_fill:{err}"
+                    last_err = RuntimeError(err)
                     break
 
             err = str(last_err) if last_err else "order_failed"
-            if "timeout" in err.lower() or "timed out" in err.lower():
+            if err.startswith("uncertain_fill:"):
+                result.stage = "uncertain_fill"
+            elif "timeout" in err.lower() or "timed out" in err.lower():
                 err = f"uncertain_fill:{err}"
                 result.stage = "uncertain_fill"
             else:

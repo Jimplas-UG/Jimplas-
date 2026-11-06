@@ -35,13 +35,22 @@ EXTRA = (
     "deploy/oracle/preflight.sh",
     "deploy/oracle/arm-trading.sh",
     "deploy/oracle/bilshenz.env.template",
+    "deploy/oracle/watchdog.py",
+    "deploy/oracle/bilshenz-watchdog.service",
+    "deploy/oracle/bilshenz-watchdog.timer",
+    "binance_trading_system/python/execution_guard.py",
+    "binance_trading_system/python/test_protective_layer.py",
+    "binance_trading_system/python/sim/fake_exchange.py",
+    "binance_trading_system/python/sim/harness.py",
+    "binance_trading_system/python/sim/scenarios.py",
+    "binance_trading_system/python/sim/run_matrix.py",
 )
 BLOCKED_NAME = re.compile(r"(^|/)(\.env[^/]*|_auth[^/]*|.*\.pem|.*\.key|id_(rsa|ed25519)[^/]*)$", re.I)
 # A value after these names means a real secret reached the bundle.
 SECRET_VALUE = re.compile(
     rb"(?m)^\s*(BINANCE_API_KEY|BINANCE_API_SECRET|BRIDGE_TOKEN|DESK_API_KEY|AUTH_JWT_SECRET|SESSION_ENC_KEY)=\S+"
 )
-TEXT_LF = (".sh", ".service", ".template")
+TEXT_LF = (".sh", ".service", ".timer", ".template")
 
 
 def main() -> int:
@@ -75,6 +84,11 @@ def main() -> int:
         target.unlink()
         print("REFUSED secret value in", refused, "- no bundle written")
         return 1
+    # The install step globs bilshenz-oracle-*.tar.gz, so an older bundle could be used instead.
+    for old in OUT.glob("bilshenz-oracle-*.tar.gz"):
+        if old != target:
+            old.unlink()
+            print("removed older bundle", old.name)
     print(f"{target}  files={count}  bytes={target.stat().st_size}")
     return 0
 

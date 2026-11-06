@@ -49,7 +49,9 @@ def save_binance_session(api_key: str, api_secret: str, testnet: bool) -> None:
     path = _session_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(envelope)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(envelope)
+        os.replace(tmp, path)
         try:
             path.chmod(0o600)
         except OSError:

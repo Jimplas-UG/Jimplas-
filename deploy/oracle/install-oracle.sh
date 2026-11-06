@@ -32,7 +32,7 @@ echo "==> Code"
 mkdir -p "$APP_DIR" "$STATE_DIR" "$LOG_DIR"
 chmod 700 "$STATE_DIR"
 tar -xzf "$BUNDLE" -C "$APP_DIR"
-find "$APP_DIR/deploy" -type f \( -name '*.sh' -o -name '*.service' -o -name '*.template' \) \
+find "$APP_DIR/deploy" -type f \( -name '*.sh' -o -name '*.service' -o -name '*.timer' -o -name '*.template' \) \
   -exec sed -i 's/\r$//' {} +
 
 echo "==> Python"
@@ -80,6 +80,7 @@ ROTATE
 echo "==> systemd"
 cp -f "$APP_DIR/deploy/systemd/bilshenz-binance-api.service" /etc/systemd/system/
 cp -f "$APP_DIR/deploy/systemd/bilshenz-desk-api.service" /etc/systemd/system/
+cp -f "$APP_DIR/deploy/oracle/bilshenz-watchdog.service" "$APP_DIR/deploy/oracle/bilshenz-watchdog.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable bilshenz-binance-api bilshenz-desk-api >/dev/null
 
@@ -90,6 +91,9 @@ cd "$APP_DIR/binance_trading_system/python"
   exit 1
 }
 tail -1 "$LOG_DIR/install-tests.log"
+
+# Safe before the bot runs: the watchdog holds while the service is stopped.
+systemctl enable --now bilshenz-watchdog.timer >/dev/null
 
 cat <<'NEXT'
 

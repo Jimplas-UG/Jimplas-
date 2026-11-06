@@ -192,6 +192,16 @@ def _ws_token_ok(websocket: WebSocket) -> bool:
     return token == BRIDGE_TOKEN
 
 
+if __name__ == "__main__":
+    # Two bridges on one key double-trade the account. The port only fails after startup, so
+    # take this first. It covers one host: the old server and Oracle cannot see each other.
+    from execution_guard import InstanceLock, default_lock_path
+
+    _instance_lock = InstanceLock(default_lock_path())
+    if not _instance_lock.acquire():
+        log.error("DUPLICATE_WORKER another bridge holds %s, exiting", _instance_lock.path)
+        raise SystemExit(3)
+
 connector = BinanceConnector(config_from_env())
 pos_mgr = PositionManager(connector)
 pos_mgr.start()
@@ -242,6 +252,7 @@ momentum_scanner = MomentumScanner(
     get_testnet=lambda: connector.cfg.testnet,
     on_snapshot=_on_scanner_snapshot,
 )
+momentum_scanner.require_startup_recovery()
 
 scanner_stream = BinanceScannerStream(
     get_testnet=lambda: connector.cfg.testnet,

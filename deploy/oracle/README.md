@@ -92,6 +92,10 @@ If the API key has an IP allow-list, add the new IP first.
 **Turn trading off:** `sudo bash /opt/bilshenz/deploy/oracle/arm-trading.sh off`
 This blocks new entries. Open pairs still need managing or closing from the app.
 
+**Watchdog:** a timer checks the bridge every 30 seconds and restarts it only if it is hung
+(three failed checks, at most three restarts an hour). It never starts a service you stopped.
+Actions are logged to `/var/log/bilshenz/watchdog.log`.
+
 **Roll back:** turn trading off on Oracle, stop its services, then re-enable and start the old
 server. Keep the old server for a week before deleting it.
 
@@ -103,6 +107,11 @@ grep -c 'scanner SHORT ' binance-api.log    # trades are flowing again
 grep -c 'EXEC_TP_REJECTED' binance-api.log  # above 0 means resting take-profits are refused
 grep -c '418 IP ban' binance-api.log        # should stay at 0
 grep 'reason=SHORT_TP' binance-api.log | tail
+grep -c 'CIRCUIT_OPEN' binance-api.log      # new entries paused by repeated failures
+grep -c 'EXEC_UNKNOWN' binance-api.log      # order outcomes that needed reconciling
+grep -c 'RECONCILE_QTY' binance-api.log     # bot size corrected from the exchange
+grep -c 'DUPLICATE_WORKER' binance-api.log  # a second bridge was refused
+cat watchdog.log                            # every watchdog action
 ```
 
 Judge P&L from Binance income records only, and allow days rather than hours: normal daily

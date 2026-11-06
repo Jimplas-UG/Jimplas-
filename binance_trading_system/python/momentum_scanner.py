@@ -18,6 +18,7 @@ as a hard stop. Recovery longs are never left without the primary short.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from execution_engine import ExecutionEngine, ExecutionSignal
+from execution_guard import atomic_write_json
 from leverage_policy import LONG1_LEVERAGE, LONG2_LEVERAGE, SHORT_LEVERAGE
 from pair_isolation import pair_gate
 from strategy_guards import (
@@ -225,6 +227,22 @@ class CoinStrategy:
         return self.status in (STATUS_WATCHING, STATUS_PENDING, STATUS_SHORT, STATUS_LONG1, STATUS_LONG2)
 
 
+def _defer_when_book_unknown(fn: Callable[..., None]) -> Callable[..., None]:
+    """An unreadable book blocks this attempt. It must not raise out of the tick."""
+
+    @functools.wraps(fn)
+    def wrapper(self: "MomentumScanner", coin: "CoinStrategy") -> None:
+        from binance_connector import PositionsUnavailable
+
+        try:
+            fn(self, coin)
+        except PositionsUnavailable as e:
+            self._last_exec_error = f"{coin.symbol}: positions_unavailable"
+            log.warning("scanner %s %s deferred, book unconfirmed: %s", coin.symbol, fn.__name__, e)
+
+    return wrapper
+
+
 class MomentumScanner:
     """Runs on every mini-ticker tick across USDT-M perpetual symbols."""
 
@@ -288,10 +306,68 @@ class MomentumScanner:
         self._adopt_attempt_ms: dict[str, int] = {}
         self._last_known_active_symbol: str | None = None
         self._exit_outcomes: deque[dict[str, Any]] = deque(maxlen=128)
+        self._recovery_required = False
+        self._recovery_complete = True
+        # Legs whose order outcome is unknown. Only these may resend after the TTL. A clear
+        # refusal is not resent, as before: changing that is a strategy decision.
+        self._resend_after_ttl: set[tuple[str, str]] = set()
+        self._last_qty_gap: dict[tuple[str, str], tuple[str, str, float]] = {}
+        self._last_tick_mono = 0.0
+        self._load_entry_cooldowns()
 
     @property
     def engine(self) -> ExecutionEngine:
         return self._engine
+
+    def require_startup_recovery(self) -> None:
+        """No new primary entry until one reconcile has confirmed the book."""
+        self._recovery_required = True
+        self._recovery_complete = False
+
+    def _new_exposure_block(self) -> str:
+        if self._recovery_required and not self._recovery_complete:
+            return "startup_recovery_incomplete"
+        if self._engine.breaker.blocked():
+            return "circuit_open"
+        if self._engine.unknown_symbols():
+            return "order_outcome_unknown"
+        return ""
+
+    def _fresh_leg_volumes(self, symbol: str) -> tuple[float, float] | None:
+        """(short, long) from a live read, past the sticky book. None when it cannot be read."""
+        try:
+            rows = self._connector.positions(symbol, force=True, bypass_rest_cool=True) or []
+        except Exception as e:  # noqa: BLE001
+            log.warning("fresh book %s unavailable: %s", symbol, e)
+            return None
+        short = sum(float(p.get("volume") or 0) for p in rows if p.get("positionSide") == "SHORT")
+        long_ = sum(float(p.get("volume") or 0) for p in rows if p.get("positionSide") == "LONG")
+        return short, long_
+
+    def _cooldown_path(self) -> str:
+        return os.path.join(os.path.dirname(RISK_CONFIG_PATH) or ".", "scanner-cooldowns.json")
+
+    def _load_entry_cooldowns(self) -> None:
+        """A restart must not shorten a cooldown. A bad file loses cooldowns, nothing more."""
+        try:
+            with open(self._cooldown_path(), encoding="utf-8") as fh:
+                raw = json.load(fh)
+            now = int(time.time() * 1000)
+            self._entry_cooldown_until_ms = {
+                str(k).upper(): int(v) for k, v in raw.items() if int(v) > now
+            }
+        except FileNotFoundError:
+            return
+        except Exception as e:  # noqa: BLE001
+            log.warning("entry cooldown file ignored: %s", e)
+
+    def _persist_entry_cooldowns(self) -> None:
+        now = int(time.time() * 1000)
+        live = {k: v for k, v in self._entry_cooldown_until_ms.items() if v > now}
+        try:
+            atomic_write_json(self._cooldown_path(), live)
+        except Exception as e:  # noqa: BLE001
+            log.warning("entry cooldown persist: %s", e)
 
     def _exchange_positions(self) -> list[dict[str, Any]]:
         """Live/cached book. Must NEVER swallow PositionsUnavailable as [] (false SHORT_GONE)."""
@@ -350,6 +426,8 @@ class MomentumScanner:
 
     def _is_flat_for_reconcile(self) -> bool:
         """True when scanner and sticky book show no open legs — slow idle REST."""
+        if self._engine.unknown_symbols():
+            return False
         for coin in self._coins.values():
             if getattr(coin, "short", None) or getattr(coin, "long1", None) or getattr(coin, "long2", None):
                 return False
@@ -1230,20 +1308,40 @@ class MomentumScanner:
             self._connector.invalidate_positions_cache()
         except Exception:
             pass
+        # Long 1 alone on the exchange is not a Long 2 fill. Adopting it booked a hedge that
+        # did not exist and stopped the real one from ever being sent.
+        if not self._exchange_shows_long2(coin, fallback_qty):
+            return False
         if self._adopt_exchange_long2(coin, sym, fallback_qty, fallback_entry, tp):
             coin.submitted_long2_signal_id = coin.submitted_long2_signal_id or f"{sym}_LONG2_{coin.entry_signal_key}"
             return True
         return False
 
+    def _exchange_shows_long2(self, coin: CoinStrategy, wanted_qty: float) -> bool:
+        leg = self._exchange_long_leg(coin.symbol)
+        total = float((leg or {}).get("volume") or 0)
+        long1_qty = float(coin.long1.qty or 0) if coin.long1 else 0.0
+        return total - long1_qty > max(1e-12, 0.02 * float(wanted_qty or 0))
+
     def _clear_stale_submit(self, coin: CoinStrategy, which: str) -> bool:
         """Clear sticky submit only when stale and exchange confirms flat for that leg."""
+        if (coin.symbol, which) not in self._resend_after_ttl:
+            return False
+        cleared = self._clear_stale_submit_checked(coin, which)
+        if cleared:
+            self._resend_after_ttl.discard((coin.symbol, which))
+        return cleared
+
+    def _clear_stale_submit_checked(self, coin: CoinStrategy, which: str) -> bool:
         now = int(time.time() * 1000)
         if which == "entry":
             if not coin.submitted_entry_signal_id or coin.short:
                 return False
             if coin.entry_submit_ms and now - coin.entry_submit_ms < SUBMIT_STALE_MS:
                 return False
-            if self._exchange_has_short(coin.symbol):
+            # A resend needs proof. The sticky book can still say flat after a late fill.
+            live = self._fresh_leg_volumes(coin.symbol)
+            if live is None or live[0] > 1e-12:
                 return False
             coin.submitted_entry_signal_id = ""
             coin.entry_submit_ms = 0
@@ -1253,7 +1351,8 @@ class MomentumScanner:
                 return False
             if coin.long1_submit_ms and now - coin.long1_submit_ms < SUBMIT_STALE_MS:
                 return False
-            if self._exchange_has_long(coin.symbol):
+            live = self._fresh_leg_volumes(coin.symbol)
+            if live is None or live[1] > 1e-12:
                 return False
             coin.submitted_long1_signal_id = ""
             coin.long1_submit_ms = 0
@@ -1262,6 +1361,9 @@ class MomentumScanner:
             if not coin.submitted_long2_signal_id or coin.long2:
                 return False
             if coin.long2_submit_ms and now - coin.long2_submit_ms < SUBMIT_STALE_MS:
+                return False
+            live = self._fresh_leg_volumes(coin.symbol)
+            if live is None or self._exchange_shows_long2(coin, 0.0):
                 return False
             coin.submitted_long2_signal_id = ""
             coin.long2_submit_ms = 0
@@ -1433,6 +1535,7 @@ class MomentumScanner:
         prev = int(self._entry_cooldown_until_ms.get(sym) or 0)
         if until > prev:
             self._entry_cooldown_until_ms[sym] = until
+            self._persist_entry_cooldowns()
         log.info(
             "scanner entry cooldown %s for %ss reason=%s",
             sym,
@@ -2059,6 +2162,9 @@ class MomentumScanner:
         # invent orphans or wipe live scanner state (live US/RLC incidents).
         from binance_connector import PositionsUnavailable
 
+        # A late fill only shows up on a live read, so pull those symbols past the sticky book.
+        for sym in self._engine.unknown_symbols():
+            self._fresh_leg_volumes(sym)
         try:
             # Prefer shared/confirmed book. Full-book force every 30s was the testnet
             # HARD→418 stampede (one call ≈ 1.7k–2.8k used-weight). Connector gates
@@ -2070,10 +2176,14 @@ class MomentumScanner:
                 positions = self._connector.positions(force=True)
         except PositionsUnavailable as e:
             log.warning("reconcile deferred — positions unavailable: %s", e)
+            if "cooling" not in str(e).lower():
+                self._engine.breaker.record_failure("book", str(e))
             return {"ok": False, "deferred": True, "error": "positions_unavailable", "detail": str(e)}
         except Exception as e:
             log.warning("reconcile deferred — positions fetch failed: %s", e)
+            self._engine.breaker.record_failure("book", str(e))
             return {"ok": False, "deferred": True, "error": "positions_fetch_failed", "detail": str(e)}
+        self._engine.breaker.record_success("book")
 
         open_syms = {
             str(p.get("symbol") or "").upper()
@@ -2140,6 +2250,10 @@ class MomentumScanner:
             ):
                 self._reset_coin_state(coin)
                 reset.append(coin.symbol)
+        self._align_leg_quantities(positions)
+        if not self._recovery_complete and getattr(self._connector, "_connected", False):
+            self._recovery_complete = True
+            log.info("RECOVERY_COMPLETE open_symbols=%s adopted=%s", sorted(open_syms), adopted.get("symbols"))
         if reset:
             self._maybe_execute_best_pending()
         return {
@@ -2149,7 +2263,44 @@ class MomentumScanner:
             "adopted": adopted,
         }
 
+    def _align_leg_quantities(self, positions: list[dict[str, Any]]) -> None:
+        """Report any size gap. Book a late fill, the one gap that only a fault can cause.
+
+        A smaller exchange size is logged and left alone. Rewriting it changes what RESCUE sees
+        after a resting TP fires, which is a trading decision. Tolerance sits above rounding.
+        """
+        book_ms = int(float(getattr(self._connector, "_last_good_positions_ts", 0.0) or 0.0) * 1000)
+        for coin in self._coins.values():
+            if not (coin.short or coin.long1 or coin.long2):
+                continue
+            # A book read before the latest order cannot judge that order.
+            latest = max(coin.entry_submit_ms, coin.long1_submit_ms, coin.long2_submit_ms)
+            if book_ms <= latest + 1000:
+                continue
+            rows = [p for p in positions if str(p.get("symbol") or "").upper() == coin.symbol]
+            live_short = sum(float(p.get("volume") or 0) for p in rows if p.get("positionSide") == "SHORT")
+            live_long = sum(float(p.get("volume") or 0) for p in rows if p.get("positionSide") == "LONG")
+            if coin.short and live_short > 0 and abs(coin.short.qty - live_short) > 0.005 * live_short:
+                self._log_qty_gap(coin.symbol, "SHORT", coin.short.qty, live_short)
+                if live_short > coin.short.qty:
+                    coin.short.qty = live_short
+            legs = [leg for leg in (coin.long1, coin.long2) if leg]
+            held = sum(leg.qty for leg in legs)
+            if legs and live_long > 0 and abs(held - live_long) > 0.005 * live_long:
+                self._log_qty_gap(coin.symbol, "LONG", held, live_long)
+                if live_long > held:
+                    for leg in legs:
+                        leg.qty = leg.qty * live_long / held
+
+    def _log_qty_gap(self, symbol: str, side: str, scanner_qty: float, exchange_qty: float) -> None:
+        key = (symbol, side, round(exchange_qty, 8))
+        if key != self._last_qty_gap.get((symbol, side)):
+            self._last_qty_gap[(symbol, side)] = key
+            log.warning("RECONCILE_QTY %s %s scanner=%s exchange=%s", symbol, side, scanner_qty, exchange_qty)
+
     def _reset_coin_state(self, coin: CoinStrategy) -> None:
+        for which in ("entry", "long1", "long2"):
+            self._resend_after_ttl.discard((coin.symbol, which))
         coin.short = None
         coin.long1 = None
         coin.long2 = None
@@ -2415,10 +2566,17 @@ class MomentumScanner:
         if not candidates:
             return
         # Try best first; fall through if blocked/failed without opening.
+        if self._new_exposure_block():
+            return
+        from binance_connector import PositionsUnavailable
+
         for coin in candidates[:5]:
             before = bool(coin.short)
             self._try_open_short_entry(coin)
-            if coin.short or (not before and self._exchange_has_short(coin.symbol)):
+            try:
+                if coin.short or (not before and self._exchange_has_short(coin.symbol)):
+                    return
+            except PositionsUnavailable:
                 return
             if self._one_at_a_time and self._has_open_strategy():
                 return
@@ -2441,6 +2599,9 @@ class MomentumScanner:
             can_exec, block_reason = False, "positions_unavailable"
         env_blocked, _ = _exec_env_blocked()
         return {
+            "last_tick_age_s": round(time.monotonic() - self._last_tick_mono, 1) if self._last_tick_mono else None,
+            "recovery_complete": self._recovery_complete,
+            "circuit": self._engine.breaker.state(),
             "enabled": self._enabled,
             "exec_enabled": can_exec,
             "can_execute": can_exec,
@@ -2505,6 +2666,7 @@ class MomentumScanner:
             return
         if price <= 0:
             return
+        self._last_tick_mono = time.monotonic()
         with self._lock:
             self._on_tick_locked(sym, price, ts_ms, pct_24h, quote_vol_24h)
 
@@ -2983,18 +3145,24 @@ class MomentumScanner:
             entry = coin.price
             qty = self._qty_for(sym, entry, SHORT_LEVERAGE, self._short_pct)
             tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
-            self._recover_primary_short_entry(coin, sym, qty, entry, tp)
+            if not self._recover_primary_short_entry(coin, sym, qty, entry, tp):
+                self._clear_stale_submit(coin, "entry")
             return
         if self._one_at_a_time and self._has_open_strategy() and self._global_active_symbol() != sym:
             self._maybe_execute_best_pending()
             return
         self._try_open_short_entry(coin)
 
+    @_defer_when_book_unknown
     def _try_open_short_entry(self, coin: CoinStrategy) -> None:
         sym = coin.symbol
         if coin.short:
             return
         if not self._entry_signal_ok(coin):
+            return
+        block = self._new_exposure_block()
+        if block:
+            self._last_exec_error = f"{sym}: {block}"
             return
         if sym in self._in_flight:
             return
@@ -3048,7 +3216,8 @@ class MomentumScanner:
                 return
             tp = entry * (1.0 - SHORT_TP_PCT / 100.0)
             if coin.submitted_entry_signal_id == signal_id:
-                self._recover_primary_short_entry(coin, sym, qty, entry, tp)
+                if not self._recover_primary_short_entry(coin, sym, qty, entry, tp):
+                    self._clear_stale_submit(coin, "entry")
                 return
             coin.submitted_entry_signal_id = signal_id
             coin.entry_submit_ms = int(time.time() * 1000)
@@ -3107,6 +3276,8 @@ class MomentumScanner:
                     log.info("scanner %s entry already submitted (%s) — skipping re-send", sym, r.stage or r.error)
             else:
                 # Sticky submit: do not clear on transient failure — recover if filled, else wait TTL.
+                if r.stage == "uncertain_fill":
+                    self._resend_after_ttl.add((sym, "entry"))
                 if not self._recover_primary_short_entry(coin, sym, qty, entry, tp):
                     self._clear_stale_submit(coin, "entry")
                 err = str(r.error or "order_failed")
@@ -3117,6 +3288,7 @@ class MomentumScanner:
         finally:
             self._in_flight.discard(sym)
 
+    @_defer_when_book_unknown
     def _try_open_long1(self, coin: CoinStrategy) -> None:
         sym = coin.symbol
         if not self._long1_entry_allowed(coin):
@@ -3136,7 +3308,8 @@ class MomentumScanner:
             if coin.submitted_long1_signal_id == signal_id:
                 if coin.long1:
                     return
-                self._recover_long1_entry(coin, sym, qty, entry, tp)
+                if not self._recover_long1_entry(coin, sym, qty, entry, tp):
+                    self._clear_stale_submit(coin, "long1")
                 return
             coin.submitted_long1_signal_id = signal_id
             coin.long1_submit_ms = int(time.time() * 1000)
@@ -3164,7 +3337,7 @@ class MomentumScanner:
             if r.ok:
                 fill = float(r.fill_price or entry)
                 tp = fill * (1.0 + LONG_TP_PCT / 100.0)
-                coin.long1 = LegPosition("BUY", fill, qty, LONG1_LEVERAGE, MAGIC_LONG1, tp)
+                coin.long1 = LegPosition("BUY", fill, float(r.quantity or qty), LONG1_LEVERAGE, MAGIC_LONG1, tp)
                 coin.status = STATUS_LONG1
                 coin.long1_peak_price = fill
                 self._mark_long1_opened(coin, sym)
@@ -3176,6 +3349,8 @@ class MomentumScanner:
                 if not self._recover_long1_entry(coin, sym, qty, entry, tp):
                     log.info("scanner %s long1 already submitted (%s) — skipping re-send", sym, r.stage or r.error)
             else:
+                if r.stage == "uncertain_fill":
+                    self._resend_after_ttl.add((sym, "long1"))
                 if not self._recover_long1_entry(coin, sym, qty, entry, tp):
                     self._clear_stale_submit(coin, "long1")
                 err = str(r.error or "order_failed")
@@ -3184,6 +3359,7 @@ class MomentumScanner:
         finally:
             self._in_flight.discard(sym)
 
+    @_defer_when_book_unknown
     def _try_open_long2(self, coin: CoinStrategy) -> None:
         sym = coin.symbol
         if not self._long2_entry_allowed(coin):
@@ -3203,7 +3379,8 @@ class MomentumScanner:
             if coin.submitted_long2_signal_id == signal_id:
                 if coin.long2:
                     return
-                self._recover_long2_entry(coin, sym, qty, entry, tp)
+                if not self._recover_long2_entry(coin, sym, qty, entry, tp):
+                    self._clear_stale_submit(coin, "long2")
                 return
             coin.submitted_long2_signal_id = signal_id
             coin.long2_submit_ms = int(time.time() * 1000)
@@ -3230,7 +3407,7 @@ class MomentumScanner:
             if r.ok:
                 fill = float(r.fill_price or entry)
                 tp = fill * (1.0 + LONG_TP_PCT / 100.0)
-                coin.long2 = LegPosition("BUY", fill, qty, LONG2_LEVERAGE, MAGIC_LONG2, tp)
+                coin.long2 = LegPosition("BUY", fill, float(r.quantity or qty), LONG2_LEVERAGE, MAGIC_LONG2, tp)
                 coin.long2_peak_price = fill
                 coin.status = STATUS_LONG2
                 self._mark_long2_opened(coin)
@@ -3242,6 +3419,8 @@ class MomentumScanner:
                 if not self._recover_long2_entry(coin, sym, qty, entry, tp):
                     log.info("scanner %s long2 already submitted (%s) — skipping re-send", sym, r.stage or r.error)
             else:
+                if r.stage == "uncertain_fill":
+                    self._resend_after_ttl.add((sym, "long2"))
                 if not self._recover_long2_entry(coin, sym, qty, entry, tp):
                     self._clear_stale_submit(coin, "long2")
                 err = str(r.error or "order_failed")
@@ -3853,7 +4032,17 @@ class MomentumScanner:
                 if live is None:
                     pass
                 elif live:
-                    close_result = self._connector.close_position(sym, None)
+                    try:
+                        close_result = self._connector.close_position(sym, None)
+                    except Exception as e:  # noqa: BLE001
+                        # Socket errors raised here skipped the backoff and the outcome record.
+                        # State is kept, and the exchange decides what happens next.
+                        log.warning("scanner close %s raised %s: %s", sym, type(e).__name__, e)
+                        close_result = {
+                            "ok": False,
+                            "error": f"close_raised:{type(e).__name__}",
+                            "broker": "binance",
+                        }
                 else:
                     fail_cache = getattr(self._connector, "_leverage_fail_cache", None) or {}
                     blocked_at = float(fail_cache.get((sym, "reduce_blocked")) or 0.0)

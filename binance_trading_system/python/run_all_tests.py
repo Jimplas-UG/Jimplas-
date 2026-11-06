@@ -27,6 +27,7 @@ TESTS = [
     "test_desk_quality.py",
     "test_post_fix_stress.py",
     "test_audit_nov_fixes.py",
+    "test_protective_layer.py",
 ]
 
 

@@ -1,0 +1,6 @@
+[Unit]
+Description=Bilshenz bridge hang check (one pass)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/bilshenz/deploy/oracle/watchdog.py

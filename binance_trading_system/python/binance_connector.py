@@ -116,6 +116,21 @@ def round_to_step(value: float, step: float) -> float:
     return round(rounded, precision)
 
 
+def round_position_qty(value: float, step: float) -> float:
+    """Size for closing a whole live position, which is already an exact multiple of the step.
+
+    round_to_step can floor one step short on a large position, and the dust left on the LONG
+    side then blocks the SHORT close. Entry sizing stays on round_to_step.
+    """
+    if step <= 0:
+        return value
+    precision = max(0, int(round(-math.log10(step)))) if step < 1 else 0
+    units = value / step
+    nearest = round(units)
+    whole = nearest if abs(units - nearest) <= max(1e-9, abs(units) * 1e-12) else math.floor(units)
+    return round(whole * step, precision)
+
+
 def round_to_tick(price: float, tick: float) -> float:
     return round_to_step(price, tick)
 
@@ -382,8 +397,9 @@ class BinanceConnector:
         if not path:
             return
         try:
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump({"until_epoch": self._rest_ban_until, "host": self._rest_ban_host}, fh)
+            from execution_guard import atomic_write_json
+
+            atomic_write_json(path, {"until_epoch": self._rest_ban_until, "host": self._rest_ban_host})
         except Exception as e:  # noqa: BLE001
             log.warning("rest ban persist %s: %s", path, e)
 
@@ -1326,8 +1342,10 @@ class BinanceConnector:
             self.cfg.leverage = int(leverage)
             self.cfg.margin_type = mt
             return
-        self.prepare_symbol(sym, leverage, mt)
-        self._prepared_cache[key] = time.time()
+        # Cache only a confirmed set. A failed POST cached here let the next leg go out at
+        # the old leverage, because every later check trusted the cache.
+        if self.prepare_symbol(sym, leverage, mt):
+            self._prepared_cache[key] = time.time()
 
     def _parse_order_error(self, exc: Exception) -> dict[str, Any]:
         msg = str(exc)
@@ -1348,11 +1366,15 @@ class BinanceConnector:
             or "broken pipe" in low
             or "temporarily unavailable" in low
         )
+        # Binance documents 5xx as "execution status unknown". Anything that is not one of our
+        # RuntimeErrors failed after the request left: socket errors, a garbled body.
+        outcome_unknown = http_code in (408, 500, 502, 503, 504) or not isinstance(exc, RuntimeError)
         return {
             "error": msg,
             "http_code": http_code,
             "binance_code": binance_code,
-            "retryable": retryable,
+            "retryable": retryable or outcome_unknown,
+            "outcome_unknown": outcome_unknown,
         }
 
     def place_market_order(
@@ -1431,15 +1453,45 @@ class BinanceConnector:
             parsed["ok"] = False
             parsed["latency_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
             return parsed
+        latency_ms = round((_time.perf_counter() - t0) * 1000, 1)
+        # A 200 is not a fill. An empty body proves nothing, and a thin book can expire a
+        # MARKET order part-filled or unfilled.
+        if not isinstance(entry_resp, dict) or not entry_resp.get("orderId"):
+            return {
+                "ok": False,
+                "error": "order_response_unreadable",
+                "retryable": True,
+                "outcome_unknown": True,
+                "latency_ms": latency_ms,
+            }
+        status = str(entry_resp.get("status") or "").upper()
+        executed = _float_or_none(entry_resp.get("executedQty"))
+        if status and executed is not None and executed <= 0:
+            if status in ("NEW", "PARTIALLY_FILLED"):
+                return {
+                    "ok": False,
+                    "error": f"order_not_final:{status}",
+                    "retryable": True,
+                    "outcome_unknown": True,
+                    "latency_ms": latency_ms,
+                }
+            return {
+                "ok": False,
+                "error": f"order_unfilled:{status}",
+                "retryable": False,
+                "latency_ms": latency_ms,
+            }
+        partial = bool(status and executed is not None and 0 < executed < qty - 1e-12)
         fill = float(entry_resp.get("avgPrice") or 0) or price
         return {
             "ok": True,
             "symbol": sym,
             "side": side_u,
-            "quantity": qty,
+            "quantity": executed if partial else qty,
+            "partial": partial,
             "fill_price": fill,
             "order_id": entry_resp.get("orderId"),
-            "latency_ms": round((_time.perf_counter() - t0) * 1000, 1),
+            "latency_ms": latency_ms,
             "retryable": False,
         }
 
@@ -2891,6 +2943,29 @@ class BinanceConnector:
             log.warning("query_order_by_client_id %s %s: %s", symbol, client_order_id, e)
             return None
 
+    def lookup_client_order(self, symbol: str, client_order_id: str) -> tuple[str, dict[str, Any] | None]:
+        """("found", order), ("absent", None), or ("unknown", None) when the read itself failed.
+
+        "absent" only means not yet visible: a stalled request can still land after this.
+        """
+        if self.cfg.paper or not self.cfg.api_key:
+            return "unknown", None
+        try:
+            order = self._request(
+                "GET",
+                "/fapi/v1/order",
+                {"symbol": symbol.upper(), "origClientOrderId": client_order_id[:36]},
+                signed=True,
+                timeout=5.0,
+            )
+        except Exception as e:  # noqa: BLE001
+            text = str(e)
+            if "-2013" in text or "does not exist" in text.lower():
+                return "absent", None
+            log.warning("lookup_client_order %s %s: %s", symbol, client_order_id, e)
+            return "unknown", None
+        return ("found", order) if isinstance(order, dict) and order.get("orderId") else ("unknown", None)
+
     def note_user_fill(self, order: dict[str, Any]) -> None:
         """Remember a private-stream fill so a close ack with no executedQty is not a failure."""
         status = str(order.get("X") or "").upper()
@@ -3491,7 +3566,7 @@ class BinanceConnector:
         # Full-leg exits (volume=None) always use live exchange size to avoid dust.
         # Partial exits must NEVER bump below-min qty up to minQty — that can wipe a sibling short.
         qty_src = pos_vol if volume is None else min(float(volume), pos_vol)
-        remaining = round_to_step(qty_src, step)
+        remaining = round_position_qty(qty_src, step) if volume is None else round_to_step(qty_src, step)
         if volume is None:
             if remaining < min_q:
                 remaining = min_q
@@ -3897,7 +3972,8 @@ class BinanceConnector:
             # Full-pair flatten always uses each leg's own size. A shared `volume`
             # would wrongly size both LONG and SHORT to the same qty.
             qty_src = pos_vol if volume is None or len(positions) > 1 else float(volume)
-            remaining = round_to_step(qty_src, step)
+            whole_leg = volume is None or len(positions) > 1
+            remaining = round_position_qty(qty_src, step) if whole_leg else round_to_step(qty_src, step)
             if remaining < min_q:
                 remaining = min_q
             if remaining > pos_vol + 1e-12:
@@ -4285,16 +4361,17 @@ class BinanceConnector:
                 out.append(str(s.get("symbol", "")).upper())
         return sorted(sym for sym in out if sym)
 
-    def prepare_symbol(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> None:
+    def prepare_symbol(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
+        """Returns False when the exchange did not confirm the leverage."""
         sym = symbol.upper()
         self.cfg.symbol = sym
         self.cfg.leverage = int(leverage)
         self.cfg.margin_type = "ISOLATED"
         self._symbol_info = None
         if self.cfg.paper:
-            return
+            return True
         if not self.cfg.api_key:
-            return
+            return True
         try:
             self._request(
                 "POST",
@@ -4314,6 +4391,8 @@ class BinanceConnector:
             )
         except RuntimeError as e:
             log.warning("prepare_symbol leverage %s: %s", sym, e)
+            return False
+        return True
 
     def order_market_leg(
         self,
