@@ -316,6 +316,11 @@ class ExecutionEngine:
         cfg = self._connector.cfg
         if getattr(cfg, "paper", False) or not cfg.api_key:
             return 1e9
+        # Testnet /account is the measured 2k-3k used-weight call (see binance_connector). Every
+        # entry and hedge paid it. Use what status polls warmed; the exchange still rejects a
+        # real shortfall, and unknown margin must not false-block.
+        if getattr(cfg, "testnet", False):
+            return self._account_cache[0] if self._account_cache_ts > 0 else None
         try:
             acct = self._connector._request("GET", "/fapi/v2/account", signed=True)
             wallet = float(acct.get("totalWalletBalance") or 0)
@@ -669,6 +674,11 @@ class ExecutionEngine:
                                         order_id=tp_resp.get("order_id"),
                                         client_order_id=f"{client_id}_TP",
                                     )
+                                else:
+                                    # A refused TP used to vanish here, so the log could not
+                                    # show whether exits were resting or scanner-only.
+                                    log.warning("EXEC_TP_REJECTED coin=%s err=%s", sym, tp_resp.get("error"))
+                                    self._emit(signal, "tp_failed", error=str(tp_resp.get("error")))
                             except Exception as e:
                                 log.warning("EXEC_TP_FAIL coin=%s err=%s", sym, e)
                                 self._emit(signal, "tp_failed", error=str(e))

@@ -1418,6 +1418,9 @@ class BinanceConnector:
             "type": "MARKET",
             "quantity": qty,
             "newClientOrderId": client_order_id[:36],
+            # Default ACK returns avgPrice 0, so every leg was booked at the signal tick and
+            # TP / hedge / rescue maths ran on a price the order never got.
+            "newOrderRespType": "RESULT",
         }
         params.update(self._position_side_param_for_leg(side_u, leg_u))
         t0 = _time.perf_counter()
@@ -1428,7 +1431,7 @@ class BinanceConnector:
             parsed["ok"] = False
             parsed["latency_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
             return parsed
-        fill = float(entry_resp.get("avgPrice") or price)
+        fill = float(entry_resp.get("avgPrice") or 0) or price
         return {
             "ok": True,
             "symbol": sym,
@@ -1693,6 +1696,7 @@ class BinanceConnector:
             "type": "MARKET",
             "quantity": quantity,
             "newClientOrderId": client_order_id[:36],
+            "newOrderRespType": "RESULT",
         }
         hedge = hedge_position_side.upper() if hedge_position_side else ""
         # A live LONG/SHORT row is hedge mode. A failed positionSide/dual read
@@ -4199,8 +4203,11 @@ class BinanceConnector:
         cached = getattr(self, "_ticker_24h_cache", None) or {}
         if cached and time.time() - float(cached.get("ts") or 0) < 40.0:
             return dict(cached.get("pct") or {}), dict(cached.get("vol") or {})
+        # Testnet quoteVolume is inflated, which left the $10M floor inert. Mainnet is the real
+        # liquidity figure, and a foreign-host read spends no testnet weight.
+        base_url = MAINNET if bool(getattr(self.cfg, "testnet", False)) else None
         try:
-            data = self._request("GET", "/fapi/v1/ticker/24hr", timeout=25.0)
+            data = self._request("GET", "/fapi/v1/ticker/24hr", timeout=25.0, base_url=base_url)
         except Exception as e:
             log.warning("ticker_24h_bundle: %s", e)
             return dict(cached.get("pct") or {}), dict(cached.get("vol") or {})

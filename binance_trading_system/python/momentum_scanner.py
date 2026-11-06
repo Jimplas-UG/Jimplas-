@@ -6,11 +6,12 @@ Entry: 15m move >= 5% gain, then >= 0.7% retrace from peak → Short (50% partit
 Recovery: +2% adverse from Short → Long 1 (40%, 10x); at +4% → Long 2 (40%, 10x).
 Each recovery long requires a confirmed primary short, settle delay, and live adverse
 (not peak-only latch). While the short is underwater, Long 1 / Long 2 stay paired
-(no independent TP/0.5% trail) until rescue, invalidation, or a *net-clear* short TP
-flattens all. Hard SHORT_TP while hedges are open is deferred when episode net is still
-red (same discipline as SHORT_PULLBACK) — wait RESCUE / INVALIDATION / SMART_EXIT /
-PARTITION_LOSS. Open legs are clipped so committed margin stays inside the $100
-partition. A same-symbol floating loss of $100 flattens the pair.
+(no independent TP/0.5% trail) until rescue, invalidation, or short TP flattens all.
+Hard SHORT_TP flattens the whole pair even when hedges leave the episode net red (Sep
+exit, restored Nov 2026: deferring it stranded net-long pairs and blocked the one-trade
+slot for days). SHORT_PULLBACK keeps its net-clear gate. Open legs are clipped so
+committed margin stays inside the $100 partition. A same-symbol floating loss of $100
+flattens the pair.
 Short TP at 2.5% down; the short trail keeps a profitable-MFE floor so it never acts
 as a hard stop. Recovery longs are never left without the primary short.
 """
@@ -579,7 +580,14 @@ class MomentumScanner:
         entry = float(short.entry or 0)
         if getattr(self._connector.cfg, "paper", False):
             return entry
-        ex_leg = self._exchange_short_leg(coin.symbol)
+        from binance_connector import PositionsUnavailable
+
+        try:
+            ex_leg = self._exchange_short_leg(coin.symbol)
+        except PositionsUnavailable:
+            # 418/429 cool: keep the entry we hold. Raising here aborted _manage_positions
+            # before INVALIDATION / RESCUE / SHORT_TP on every tick of the cool.
+            return entry
         if ex_leg:
             ex_entry = float(ex_leg.get("price_open") or 0)
             if ex_entry > 0:
@@ -815,10 +823,10 @@ class MomentumScanner:
 
     def _hedged_short_exit_net_ok(self, coin: CoinStrategy) -> bool:
         """
-        Hedged SHORT_TP / SHORT_PULLBACK may flatten only when episode net clears costs.
+        Hedged SHORT_PULLBACK may flatten only when episode net clears costs.
 
-        Mirrors Sep SMART_EXIT discipline: never nuke L1/L2 into a net-red book just
-        because the naked short mark hit -2.5%. Naked shorts (no hedges) always OK.
+        The trail is optional, so it waits for a green book. Hard SHORT_TP does not use
+        this gate. Naked shorts (no hedges) always OK.
         """
         if not (coin.long1 or coin.long2):
             return True
@@ -1937,7 +1945,12 @@ class MomentumScanner:
         """
         if not coin.short or getattr(self._connector.cfg, "paper", False):
             return
-        if self._exchange_has_long(coin.symbol):
+        from binance_connector import PositionsUnavailable
+
+        try:
+            if self._exchange_has_long(coin.symbol):
+                return
+        except PositionsUnavailable:
             return
         adverse = self._short_adverse_pct(coin)
         repaired = False
@@ -2523,11 +2536,18 @@ class MomentumScanner:
                     weight_left = max(0.0, until - time.monotonic())
             except Exception:
                 weight_left = 0.0
-            interval_ms = RECONCILE_IDLE_MS if self._is_flat_for_reconcile() else RECONCILE_INTERVAL_MS
+            # Cheap timer test first: the O(symbols) flat walk ran on every tick of every
+            # symbol, which held the scanner lock for most of each miniTicker frame.
+            since_reconcile_ms = now_ms - self._last_reconcile_ms
             if (
                 cool_left <= 0.25
                 and weight_left <= 0.05
-                and now_ms - self._last_reconcile_ms >= max(3000, interval_ms)
+                and since_reconcile_ms >= max(3000, RECONCILE_INTERVAL_MS)
+                and since_reconcile_ms
+                >= max(
+                    3000,
+                    RECONCILE_IDLE_MS if self._is_flat_for_reconcile() else RECONCILE_INTERVAL_MS,
+                )
             ):
                 self._last_reconcile_ms = now_ms
                 try:
@@ -2543,7 +2563,13 @@ class MomentumScanner:
         coin.last_update_ms = now_ms
         if pct_24h is not None:
             coin.pct_24h = pct_24h
-        if quote_vol_24h is not None and quote_vol_24h >= 0:
+        # Testnet stream volume runs 8-250x mainnet, so it would satisfy any liquidity floor.
+        # On testnet the floor is fed only by apply_volume_map (mainnet 24h).
+        if (
+            quote_vol_24h is not None
+            and quote_vol_24h >= 0
+            and not getattr(self._connector.cfg, "testnet", False)
+        ):
             coin.quote_vol_24h = quote_vol_24h
         if getattr(self._connector.cfg, "paper", False):
             try:
@@ -2610,10 +2636,13 @@ class MomentumScanner:
         if not adopted_now and (coin.short or coin.long1 or coin.long2):
             self._manage_positions(coin)
 
-        if self._one_at_a_time and self._order_session_ok()[0] and not self._has_open_strategy():
-            self._maybe_execute_best_pending()
-        elif not self._one_at_a_time and self._order_session_ok()[0]:
-            self._maybe_execute_best_pending()
+        # Only a queued coin can fire, and it ticks every frame. Ranking still scans every
+        # candidate, and _close_all re-runs the queue the moment the slot frees.
+        if coin.status == STATUS_PENDING:
+            if self._one_at_a_time and self._order_session_ok()[0] and not self._has_open_strategy():
+                self._maybe_execute_best_pending()
+            elif not self._one_at_a_time and self._order_session_ok()[0]:
+                self._maybe_execute_best_pending()
 
         self._maybe_broadcast()
 
@@ -3268,7 +3297,7 @@ class MomentumScanner:
             return
 
         sym = coin.symbol
-        # A close that keeps failing is retried on a backoff — Long 1 arming stays live.
+        # A close that keeps failing is retried on a backoff; no new hedge arms meanwhile.
         close_blocked = self._close_backoff_active(sym)
         if (coin.short or coin.long1 or coin.long2) and not getattr(self._connector.cfg, "paper", False):
             if hasattr(self._connector, "ensure_exchange_leverage"):
@@ -3347,11 +3376,17 @@ class MomentumScanner:
 
         # During failed-close backoff / close_pending: block new risk-increasing hedges.
         arm_hedges = not close_blocked and not pair_gate.is_close_pending(sym)
-        if coin.short and coin.long1 is None and arm_hedges and self._long1_entry_allowed(coin):
-            self._try_open_long1(coin)
+        from binance_connector import PositionsUnavailable
 
-        if coin.short and coin.long2 is None and arm_hedges and self._long2_entry_allowed(coin):
-            self._try_open_long2(coin)
+        try:
+            if coin.short and coin.long1 is None and arm_hedges and self._long1_entry_allowed(coin):
+                self._try_open_long1(coin)
+
+            if coin.short and coin.long2 is None and arm_hedges and self._long2_entry_allowed(coin):
+                self._try_open_long2(coin)
+        except PositionsUnavailable as e:
+            # Unconfirmed book: add no risk, but fall through so the exits below still run.
+            log.debug("scanner %s hedge arm deferred — %s", sym, e)
 
         # Track hedge peaks always (for when short later goes into profit).
         if coin.long1:
@@ -3454,23 +3489,6 @@ class MomentumScanner:
                 )
                 short_exit_reason = "SHORT_PULLBACK"
             if short_exit_reason:
-                # Hedged hard-TP must not flatten a net-red episode (C98/RLC leak).
-                # Same net gate as SHORT_PULLBACK; orphan longs still forbidden once we do close.
-                if not self._hedged_short_exit_net_ok(coin):
-                    # Throttle: manage ticks every second — do not flood the log during paired hold.
-                    now_m = time.monotonic()
-                    last = float(getattr(self, "_defer_tp_log_mono", 0.0) or 0.0)
-                    if now_m - last >= 30.0:
-                        self._defer_tp_log_mono = now_m
-                        log.info(
-                            "scanner %s defer %s — hedges open net=%.4f < cost_buf=%.4f "
-                            "(paired hold until RESCUE/INVALIDATION/SMART_EXIT/PARTITION_LOSS)",
-                            sym,
-                            short_exit_reason,
-                            coin.unrealized_pnl,
-                            cost_buf,
-                        )
-                    return
                 # Recovery longs may never outlive the primary short.
                 self._close_all(coin, short_exit_reason)
                 return

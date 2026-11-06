@@ -15,8 +15,11 @@ from websockets.exceptions import ConnectionClosed
 
 log = logging.getLogger("user_data_stream")
 
-MAINNET_WS = "wss://fstream.binance.com/ws"
+# Mainnet retired /ws/{listenKey}; private events use /private/ws?listenKey=&events=
+# (slash-separated). Testnet keeps the route it has been running on.
+MAINNET_WS = "wss://fstream.binance.com/private/ws"
 TESTNET_WS = "wss://stream.binancefuture.com/ws"
+USER_STREAM_EVENTS = "ORDER_TRADE_UPDATE/ACCOUNT_UPDATE/MARGIN_CALL/TRADE_LITE/listenKeyExpired"
 RECONNECT_MIN_SEC = 0.02
 RECONNECT_MAX_SEC = 0.6
 
@@ -165,8 +168,10 @@ class BinanceUserDataStream:
                 backoff = min(RECONNECT_MAX_SEC, max(RECONNECT_MIN_SEC, backoff * 1.4))
                 continue
             self._listen_key = listen_key
-            base = TESTNET_WS if self._get_testnet() else MAINNET_WS
-            url = f"{base}/{listen_key}"
+            if self._get_testnet():
+                url = f"{TESTNET_WS}/{listen_key}"
+            else:
+                url = f"{MAINNET_WS}?listenKey={listen_key}&events={USER_STREAM_EVENTS}"
             if keepalive_task:
                 keepalive_task.cancel()
             keepalive_task = asyncio.create_task(self._keepalive_loop())

@@ -13,8 +13,9 @@ the live modules still match the working contract:
   Invalidation: ≥6.5% adverse from short entry → flatten all
   PAIR_TIME: disabled (HEDGED_MAX_HOLD_MS=0) — Sep desk had no 24h hedge flatten
   Short TP −2.5%; never leave orphan longs without the primary short
-  Hedged SHORT_TP / SHORT_PULLBACK flatten only when episode net clears exit costs
-  (defer net-red hedged hard-TP — wait RESCUE / INVALIDATION / SMART_EXIT)
+  Hard SHORT_TP flattens the whole pair even when hedges leave the episode net red
+  (operator-ordered Nov 6 2026: Sep exit restored, Oct 10 defer removed)
+  Hedged SHORT_PULLBACK flattens only when episode net clears exit costs
   Shared LONG close must never wipe/retire the sibling recovery leg
   (Long1 close must not permanently kill Long2, and vice versa)
   Smart exit: 6% of partition net — with hedges open, only when short is in profit
@@ -249,10 +250,10 @@ def assert_frozen_contract() -> dict[str, Any]:
     assert "symbol_exchange_leverage" in manage_src
     assert "PARTITION_LOSS" in manage_src
     assert "_partition_loss_hit" in manage_src
-    # Hedged SHORT_TP must share SHORT_PULLBACK's net-clear gate (no net-red flatten).
-    assert hasattr(ms.MomentumScanner, "_hedged_short_exit_net_ok")
-    assert "_hedged_short_exit_net_ok" in manage_src
-    assert "defer" in manage_src
+    # Hard SHORT_TP has no net gate (a deferred TP strands the pair and blocks the slot).
+    # SHORT_PULLBACK keeps its net-clear gate.
+    assert "_hedged_short_exit_net_ok" not in manage_src
+    assert "_hedged_short_exit_net_ok" in inspect.getsource(ms.MomentumScanner._short_pullback_allowed)
     assert "marketMaxQty" in inspect.getsource(bc.BinanceConnector._parse_symbol_filters)
     assert "long_residual_abort_short" in inspect.getsource(bc.BinanceConnector.close_position)
     side_src = inspect.getsource(bc.BinanceConnector.close_by_position_side)

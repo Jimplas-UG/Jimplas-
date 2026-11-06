@@ -250,6 +250,7 @@ scanner_stream = BinanceScannerStream(
     ),
     load_symbols=lambda: connector.list_usdt_perpetual_symbols(),
     get_snapshot=lambda: momentum_scanner.full_snapshot(),
+    rest_pause_left=lambda: connector.rest_cooling_left(),
 )
 
 user_data_stream = BinanceUserDataStream(

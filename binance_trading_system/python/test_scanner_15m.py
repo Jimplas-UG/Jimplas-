@@ -555,6 +555,9 @@ def test_gap_to_4pct_opens_long1_then_long2() -> None:
         gap_price = entry * (1.0 + LONG2_ADVERSE_PCT / 100.0 + 0.001)
         sc.on_tick(sym, gap_price)
         assert coin.long1 is not None, "gap up must open long1"
+        assert coin.long2 is None, "long2 waits out the 3s settle floor after long1"
+        coin.long1_opened_ms = int(time.time() * 1000) - 60_000
+        sc.on_tick(sym, gap_price)
         assert coin.long2 is not None, "gap up must open long2 at +4% from the short"
     print("OK gap up: long1 then long2")
 
@@ -666,8 +669,8 @@ def test_stale_pending_demoted_when_live_15m_collapses() -> None:
             os.environ["SCANNER_EXEC"] = prev
 
 
-def test_short_tp_hedged_net_red_defers() -> None:
-    """C98/RLC lock: hard SHORT_TP must not flatten a net-red hedged episode."""
+def test_short_tp_hedged_net_red_flattens() -> None:
+    """Sep exit lock: hard SHORT_TP flattens a net-red hedged pair and frees the slot."""
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -685,6 +688,7 @@ def test_short_tp_hedged_net_red_defers() -> None:
             MAGIC_SHORT,
             SHORT_LEVERAGE,
             SHORT_TP_PCT,
+            STATUS_CLOSED,
             STATUS_LONG2,
         )
 
@@ -698,13 +702,13 @@ def test_short_tp_hedged_net_red_defers() -> None:
         coin.long2_peak_price = entry * 1.04
         coin.status = STATUS_LONG2
         sc.on_tick(sym, tp - 0.01)
-        assert coin.short is not None and coin.long1 is not None and coin.long2 is not None
-        assert float(coin.unrealized_pnl) < sc._exit_cost_buffer_usd()
-    print("OK hedged SHORT_TP defers when episode net is red")
+        assert coin.short is None and coin.long1 is None and coin.long2 is None
+        assert coin.status == STATUS_CLOSED
+    print("OK hedged SHORT_TP flattens even when episode net is red")
 
 
 def test_short_tp_with_longs_flattens_full_pair() -> None:
-    """Net-clear hedged SHORT_TP still flattens full pair (no orphan longs)."""
+    """Net-green hedged SHORT_TP flattens the full pair too (no orphan longs)."""
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -832,7 +836,7 @@ if __name__ == "__main__":
         test_pending_entry_not_resent_on_every_tick()
         test_pending_keeps_latched_15m_during_retrace()
         test_stale_pending_demoted_when_live_15m_collapses()
-        test_short_tp_hedged_net_red_defers()
+        test_short_tp_hedged_net_red_flattens()
         test_short_tp_with_longs_flattens_full_pair()
         test_failed_entry_keeps_sticky_submit()
         test_adopt_is_noop_in_paper_mode()

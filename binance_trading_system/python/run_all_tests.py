@@ -22,6 +22,11 @@ TESTS = [
     "test_calendar_pnl.py",
     "test_trade_history.py",
     "test_history_cache.py",
+    "test_permanent_leak_locks.py",
+    "test_sep23_capital_locks.py",
+    "test_desk_quality.py",
+    "test_post_fix_stress.py",
+    "test_audit_nov_fixes.py",
 ]
 
 

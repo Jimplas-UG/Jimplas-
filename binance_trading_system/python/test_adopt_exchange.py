@@ -292,7 +292,7 @@ def test_adopt_two_partition_long_splits_before_manage() -> None:
     print("OK adopt: 2-partition long splits; manage does not triple-hedge")
 
 
-def test_manage_still_arms_long1_during_close_backoff() -> None:
+def test_manage_blocks_new_hedge_during_close_backoff() -> None:
     conn = LiveConnector([_short_pos()])
     sc = MomentumScanner(conn, lambda: False)
     sc.load_symbols(["RIFUSDT"])
@@ -306,7 +306,7 @@ def test_manage_still_arms_long1_during_close_backoff() -> None:
     sc._try_open_long1 = lambda c: opened.append(c.symbol)  # type: ignore[method-assign]
     coin.price = 0.05 * (1.0 + LONG1_ADVERSE_PCT / 100.0 + 0.001)
     sc._manage_positions(coin)
-    assert opened == ["RIFUSDT"], "Long 1 must still arm while the close backs off"
+    assert opened == [], "no new hedge may arm while a failed close is backing off"
     assert coin.short is not None
     print("OK close backoff: Long 1 entry still runs")
 
@@ -439,7 +439,7 @@ if __name__ == "__main__":
         test_ensure_pair_coherence_adopts_instead_of_flattening()
         test_close_failure_backoff_blocks_retry_storm()
         test_close_backoff_grows_and_clears()
-        test_manage_still_arms_long1_during_close_backoff()
+        test_manage_blocks_new_hedge_during_close_backoff()
         test_adopt_single_long_past_4pct_as_long2()
         test_adopt_long1_qty_excludes_existing_long2()
         test_adopt_two_partition_long_splits_before_manage()

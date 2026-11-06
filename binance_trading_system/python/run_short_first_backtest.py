@@ -151,7 +151,8 @@ def simulate_symbol(
     """
     short_m = partition * PRIMARY_PARTITION_PCT / 100.0
     l1_m = partition * RECOVERY_PARTITION_PCT / 100.0
-    l2_m = partition * RECOVERY_PARTITION_PCT / 100.0
+    # Live _qty_for_room clips the last leg so committed margin stays inside the partition.
+    l2_m = min(partition * RECOVERY_PARTITION_PCT / 100.0, max(0.0, partition - short_m - l1_m))
     smart_target = partition * SMART_EXIT_PCT / 100.0 + partition * EXIT_COST_PCT / 100.0
 
     trades: list[Trade] = []
@@ -377,15 +378,11 @@ def simulate_symbol(
                             long2 = None
                             long2_done = True
 
-            # Live _hedged_short_exit_net_ok: hedged SHORT_TP only when net clears cost buffer.
+            # Live: hard SHORT_TP flattens the pair whatever the episode net is.
             cost_buf = partition * EXIT_COST_PCT / 100.0
             if short.tp and lo_b <= short.tp:
-                upnl_tp, _, _, _ = _book(short.tp)
-                hedges_now = bool(long1 or long2)
-                if (not hedges_now) or (upnl_tp >= cost_buf):
-                    exit_px, exit_i, exit_reason, stopped = short.tp, j, "SHORT_TP", True
-                    break
-                # else: paired hold until RESCUE / INVALIDATION / SMART_EXIT
+                exit_px, exit_i, exit_reason, stopped = short.tp, j, "SHORT_TP", True
+                break
 
             upnl, _, _, _ = _book(px)
             recovery_eligible = (long1 is None and not long1_done) or (

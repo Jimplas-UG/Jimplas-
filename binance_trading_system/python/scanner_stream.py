@@ -22,8 +22,10 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 log = logging.getLogger("scanner_stream")
 
-MAINNET_WS = "wss://fstream.binance.com/ws"
-TESTNET_WS = "wss://stream.binancefuture.com/ws"
+# !miniTicker@arr is market data. The legacy mainnet /ws route still connects but delivers
+# no frames (probed Nov 2026), which silently dropped the scanner to the 3s REST poll.
+MAINNET_WS = "wss://fstream.binance.com/market/ws"
+TESTNET_WS = "wss://stream.binancefuture.com/market/ws"
 MAINNET_REST = "https://fapi.binance.com"
 TESTNET_REST = "https://testnet.binancefuture.com"
 RECONNECT_MIN_SEC = 0.02
@@ -94,11 +96,14 @@ class BinanceScannerStream:
         on_tick: Callable[[str, float, int, float | None, float | None], None],
         load_symbols: Callable[[], list[str]] | None = None,
         get_snapshot: Callable[[], dict[str, Any]] | None = None,
+        rest_pause_left: Callable[[], float] | None = None,
     ) -> None:
         self._get_testnet = get_testnet
         self._on_tick = on_tick
         self._load_symbols = load_symbols
         self._get_snapshot = get_snapshot
+        self._rest_pause_left = rest_pause_left
+        self._last_tick_err_mono = 0.0
         self._ws_task: asyncio.Task | None = None
         self._rest_task: asyncio.Task | None = None
         self._running = False
@@ -257,6 +262,13 @@ class BinanceScannerStream:
                     self._rest_active = False
                     await asyncio.sleep(REST_POLL_SEC)
                     continue
+                # This poll is raw urllib, outside the connector's ban and weight tracking.
+                # Hitting Binance during a 418 extends the ban.
+                pause = float(self._rest_pause_left() or 0.0) if self._rest_pause_left else 0.0
+                if pause > 0.05:
+                    self._rest_active = False
+                    await asyncio.sleep(min(max(pause, REST_POLL_SEC), 30.0))
+                    continue
                 testnet = bool(self._get_testnet())
                 loop = asyncio.get_running_loop()
                 # Fetch on default pool so HTTP does not block the single tick worker.
@@ -292,7 +304,11 @@ class BinanceScannerStream:
             try:
                 self._on_tick(sym, price, ts, pct_24h, quote_vol)
             except Exception as e:
-                log.debug("on_tick %s: %s", sym, e)
+                # A raised tick skips every exit for that symbol, so it must be visible.
+                now = time.monotonic()
+                if now - self._last_tick_err_mono >= 30.0:
+                    self._last_tick_err_mono = now
+                    log.warning("on_tick %s: %s", sym, e)
 
     async def _connect_and_listen(self) -> None:
         testnet = self._get_testnet()
