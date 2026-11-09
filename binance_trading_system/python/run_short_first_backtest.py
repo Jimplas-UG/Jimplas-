@@ -378,18 +378,28 @@ def simulate_symbol(
                             long2 = None
                             long2_done = True
 
-            # Live: hard SHORT_TP flattens the pair whatever the episode net is.
+            # Live: hedged SHORT_TP shares the net-clear gate with SHORT_PULLBACK.
+            # 60d factual: naked SHORT_TP +$5.80 / 100% win; hedged SHORT_TP −$14.6 / 0% win.
             cost_buf = partition * EXIT_COST_PCT / 100.0
+            upnl, _, _, _ = _book(px)
+            longs_open = bool(long1 or long2)
             if short.tp and lo_b <= short.tp:
-                exit_px, exit_i, exit_reason, stopped = short.tp, j, "SHORT_TP", True
+                # Mark the book at the TP print so the gate matches live unrealized_pnl.
+                upnl_tp, _, _, _ = _book(float(short.tp))
+                if (not longs_open) or (upnl_tp >= cost_buf):
+                    exit_px, exit_i, exit_reason, stopped = short.tp, j, "SHORT_TP", True
+                    break
+                # else defer — hold for RESCUE / INVALIDATION / SMART_EXIT / PARTITION_LOSS
+
+            # Same-symbol floating loss of $100 flattens (live PARTITION_LOSS).
+            if upnl + realized <= -float(partition):
+                exit_px, exit_i, exit_reason, stopped = px, j, "PARTITION_LOSS", True
                 break
 
-            upnl, _, _, _ = _book(px)
             recovery_eligible = (long1 is None and not long1_done) or (
                 long2 is None and not long2_done
             )
             naked_can_still_hedge = recovery_eligible and long1 is None and long2 is None
-            longs_open = bool(long1 or long2)
             cost_ok = (not longs_open) or (upnl >= cost_buf)
             if (
                 mfe >= SHORT_TRAIL_MFE

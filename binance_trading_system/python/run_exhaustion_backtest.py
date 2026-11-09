@@ -96,7 +96,23 @@ def fetch_klines(symbol: str, interval: str, limit: int = 1500, end_ms: int | No
 
 
 def fetch_klines_days(symbol: str, interval: str, days: int) -> list[dict]:
-    """Paginate back `days` of history."""
+    """Paginate back `days` of history. Disk-cache under .klines_cache/ for re-runs."""
+    import json
+    from pathlib import Path
+
+    cache_dir = Path(__file__).resolve().parent / ".klines_cache"
+    cache_dir.mkdir(exist_ok=True)
+    # Bucket by UTC day so a re-run within the same day reuses the prior pull.
+    day_bucket = int(time.time() // 86_400)
+    cache_path = cache_dir / f"{symbol}_{interval}_{days}d_{day_bucket}.json"
+    if cache_path.exists():
+        try:
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(raw, list) and raw:
+                return raw
+        except Exception:  # noqa: BLE001
+            pass
+
     ms_per_bar = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "4h": 14_400_000, "1d": 86_400_000}[interval]
     need = int(days * 86_400_000 / ms_per_bar) + 5
     out: list[dict] = []
@@ -124,7 +140,12 @@ def fetch_klines_days(symbol: str, interval: str, days: int) -> list[dict]:
     dedup = {b["t"]: b for b in out}
     bars = sorted(dedup.values(), key=lambda b: b["t"])
     cutoff = bars[-1]["t"] - days * 86_400_000 if bars else 0
-    return [b for b in bars if b["t"] >= cutoff]
+    bars = [b for b in bars if b["t"] >= cutoff]
+    try:
+        cache_path.write_text(json.dumps(bars), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    return bars
 
 
 def fetch_funding(symbol: str, limit: int = 200) -> list[dict]:

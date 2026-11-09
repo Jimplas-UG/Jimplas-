@@ -669,8 +669,8 @@ def test_stale_pending_demoted_when_live_15m_collapses() -> None:
             os.environ["SCANNER_EXEC"] = prev
 
 
-def test_short_tp_hedged_net_red_flattens() -> None:
-    """Sep exit lock: hard SHORT_TP flattens a net-red hedged pair and frees the slot."""
+def test_short_tp_hedged_net_red_defers() -> None:
+    """60d factual lock: net-red hedged SHORT_TP must NOT flatten (wait RESCUE/INV/SMART/PARTITION)."""
     with _no_smart_exit():
         conn = FakeConnector()
         sc = MomentumScanner(conn, lambda: True)
@@ -688,7 +688,6 @@ def test_short_tp_hedged_net_red_flattens() -> None:
             MAGIC_SHORT,
             SHORT_LEVERAGE,
             SHORT_TP_PCT,
-            STATUS_CLOSED,
             STATUS_LONG2,
         )
 
@@ -702,9 +701,9 @@ def test_short_tp_hedged_net_red_flattens() -> None:
         coin.long2_peak_price = entry * 1.04
         coin.status = STATUS_LONG2
         sc.on_tick(sym, tp - 0.01)
-        assert coin.short is None and coin.long1 is None and coin.long2 is None
-        assert coin.status == STATUS_CLOSED
-    print("OK hedged SHORT_TP flattens even when episode net is red")
+        assert coin.short is not None and coin.long1 is not None and coin.long2 is not None
+        assert coin.status == STATUS_LONG2
+    print("OK hedged SHORT_TP defers when episode net is red")
 
 
 def test_short_tp_with_longs_flattens_full_pair() -> None:
@@ -836,7 +835,7 @@ if __name__ == "__main__":
         test_pending_entry_not_resent_on_every_tick()
         test_pending_keeps_latched_15m_during_retrace()
         test_stale_pending_demoted_when_live_15m_collapses()
-        test_short_tp_hedged_net_red_flattens()
+        test_short_tp_hedged_net_red_defers()
         test_short_tp_with_longs_flattens_full_pair()
         test_failed_entry_keeps_sticky_submit()
         test_adopt_is_noop_in_paper_mode()

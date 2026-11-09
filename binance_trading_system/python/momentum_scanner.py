@@ -6,12 +6,11 @@ Entry: 15m move >= 5% gain, then >= 0.7% retrace from peak → Short (50% partit
 Recovery: +2% adverse from Short → Long 1 (40%, 10x); at +4% → Long 2 (40%, 10x).
 Each recovery long requires a confirmed primary short, settle delay, and live adverse
 (not peak-only latch). While the short is underwater, Long 1 / Long 2 stay paired
-(no independent TP/0.5% trail) until rescue, invalidation, or short TP flattens all.
-Hard SHORT_TP flattens the whole pair even when hedges leave the episode net red (Sep
-exit, restored Nov 2026: deferring it stranded net-long pairs and blocked the one-trade
-slot for days). SHORT_PULLBACK keeps its net-clear gate. Open legs are clipped so
-committed margin stays inside the $100 partition. A same-symbol floating loss of $100
-flattens the pair.
+(no independent TP/0.5% trail) until rescue, invalidation, or a *net-clear* short TP
+flattens all. Hard SHORT_TP while hedges are open is deferred when episode net is still
+red (same discipline as SHORT_PULLBACK) — wait RESCUE / INVALIDATION / SMART_EXIT /
+PARTITION_LOSS. Open legs are clipped so committed margin stays inside the $100
+partition. A same-symbol floating loss of $100 flattens the pair.
 Short TP at 2.5% down; the short trail keeps a profitable-MFE floor so it never acts
 as a hard stop. Recovery longs are never left without the primary short.
 """
@@ -901,10 +900,10 @@ class MomentumScanner:
 
     def _hedged_short_exit_net_ok(self, coin: CoinStrategy) -> bool:
         """
-        Hedged SHORT_PULLBACK may flatten only when episode net clears costs.
+        Hedged SHORT_TP / SHORT_PULLBACK may flatten only when episode net clears costs.
 
-        The trail is optional, so it waits for a green book. Hard SHORT_TP does not use
-        this gate. Naked shorts (no hedges) always OK.
+        Mirrors Sep SMART_EXIT discipline: never nuke L1/L2 into a net-red book just
+        because the naked short mark hit -2.5%. Naked shorts (no hedges) always OK.
         """
         if not (coin.long1 or coin.long2):
             return True
@@ -3668,6 +3667,23 @@ class MomentumScanner:
                 )
                 short_exit_reason = "SHORT_PULLBACK"
             if short_exit_reason:
+                # Hedged hard-TP must not flatten a net-red episode (60d factual leak:
+                # naked SHORT_TP +$5.80 / 100% win; hedged SHORT_TP −$14.6 / 0% win).
+                # Same net gate as SHORT_PULLBACK; orphan longs still forbidden once we do close.
+                if not self._hedged_short_exit_net_ok(coin):
+                    now_m = time.monotonic()
+                    last = float(getattr(self, "_defer_tp_log_mono", 0.0) or 0.0)
+                    if now_m - last >= 30.0:
+                        self._defer_tp_log_mono = now_m
+                        log.info(
+                            "scanner %s defer %s — hedges open net=%.4f < cost_buf=%.4f "
+                            "(paired hold until RESCUE/INVALIDATION/SMART_EXIT/PARTITION_LOSS)",
+                            sym,
+                            short_exit_reason,
+                            coin.unrealized_pnl,
+                            self._exit_cost_buffer_usd(),
+                        )
+                    return
                 # Recovery longs may never outlive the primary short.
                 self._close_all(coin, short_exit_reason)
                 return
